@@ -58,13 +58,13 @@ Fault1 AS
 	SELECT *,
 	LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp) AS EndTime
 	FROM {{from_table}}               
-	WHERE EventId IN (83, 87, 88)
+	WHERE EventId IN (83, 84, 85, 86, 87, 88)
 	),
 Fault AS
 	(
 	SELECT *
 	FROM Fault1
-	WHERE EventID IN (87, 88) --AND EndTime IS NOT NULL 
+	WHERE EventID IN (84, 85, 86, 87, 88) --AND EndTime IS NOT NULL 
 	  --AND DATE_DIFF('second', TimeStamp, EndTime) > 0 --??
 	  --AND DATE_DIFF('second', TimeStamp, EndTime) < (3600 * 12)
 	),
@@ -109,7 +109,7 @@ Splits AS
 	{{from_table}}.Parameter,
 	{{from_table}}.TimeStamp AS EndTime
 	FROM {{from_table}}
-	WHERE {{from_table}}.EventId IN (300, 301, 302, 303, 304, 305, 306, 307)
+	WHERE {{from_table}}.EventId BETWEEN 300 AND 315
 	),
 PhaseCall1 AS
 	(
@@ -125,6 +125,78 @@ PhaseCall AS
 	FROM PhaseCall1
 	WHERE PhaseCall1.EventId = 43
 	), 
+PedDelay1 AS (
+	SELECT *,
+		LAG(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp) AS PrevEvent,
+		MIN(CASE WHEN EventId IN (21,22) THEN TimeStamp END)
+		OVER (PARTITION BY DeviceID, Parameter 
+				ORDER BY TimeStamp 
+				ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS WalkStart
+	FROM {{from_table}}
+	WHERE EventId IN (90, 21, 22)
+	),
+PedDelay AS (
+	SELECT TimeStamp AS StartTime,
+			DeviceID,
+			EventId,
+			Parameter,
+			WalkStart AS EndTime
+	FROM PedDelay1
+	WHERE EventId = 90 AND (PrevEvent=22 OR PrevEvent IS NULL OR WalkStart IS NULL)
+	),
+--Unmatched eventid 90 is accounted for above, 21 is covered by Ped Services, but 22 is not covered by any other event
+--so this is just to capture the unmatched event 22 for incremental processing
+PedDelayUnmatched AS (
+	SELECT TimeStamp AS StartTime,
+			DeviceID,
+			EventId,
+			Parameter,
+			WalkStart AS EndTime
+	FROM PedDelay1
+	WHERE EventId = 22 AND WalkStart IS NULL
+	),
+PhaseHold1 AS
+    (
+    SELECT *,
+    LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp) AS EndTime
+    FROM {{from_table}}               
+    WHERE EventId IN (41, 42)
+    ),
+PhaseHold AS
+    (
+    SELECT PhaseHold1.TimeStamp, PhaseHold1.DeviceID, PhaseHold1.EventID, 
+           PhaseHold1.Parameter, PhaseHold1.EndTime
+    FROM PhaseHold1
+    WHERE PhaseHold1.EventId = 41
+    ),
+PhaseOmit1 AS
+    (
+    SELECT *,
+    LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp) AS EndTime
+    FROM {{from_table}}               
+    WHERE EventId IN (46, 47) and Parameter <= 16
+    ),
+PhaseOmit AS
+    (
+    SELECT PhaseOmit1.TimeStamp, PhaseOmit1.DeviceID, PhaseOmit1.EventID, 
+           PhaseOmit1.Parameter, PhaseOmit1.EndTime
+    FROM PhaseOmit1
+    WHERE PhaseOmit1.EventId = 46
+    ),
+PedOmit1 AS
+    (
+    SELECT *,
+    LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp) AS EndTime
+    FROM {{from_table}}               
+    WHERE EventId IN (48, 49)
+    ),
+PedOmit AS
+    (
+    SELECT PedOmit1.TimeStamp, PedOmit1.DeviceID, PedOmit1.EventID, 
+           PedOmit1.Parameter, PedOmit1.EndTime
+    FROM PedOmit1
+    WHERE PedOmit1.EventId = 48
+    ),	
 FYA1 AS
 	(
 	SELECT *,
@@ -181,6 +253,38 @@ Red AS
 	FROM Red1
 	WHERE Red1.EventId = 10
 	),
+-- New Overlap Events CTE: pulls all events that belong to overlap states
+OverlapEvents AS (
+  SELECT
+    *,
+    LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS EndTime
+  FROM {{from_table}}
+  WHERE EventId BETWEEN 61 AND 66
+),
+OverlapGreen AS (
+  -- Overlap Green: starts with EventId 61
+  SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime
+  FROM OverlapEvents
+  WHERE EventId = 61
+),
+OverlapTrailGreen AS (
+  -- Overlap Trail Green: starts with EventId 62
+  SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime
+  FROM OverlapEvents
+  WHERE EventId = 62
+),
+OverlapYellow AS (
+  -- Overlap Yellow: starts with EventId 63
+  SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime
+  FROM OverlapEvents
+  WHERE EventId = 63
+),
+OverlapRed AS (
+  -- Overlap Red: starts with EventId 64
+  SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime
+  FROM OverlapEvents
+  WHERE EventId = 64
+),
 SpecialFunction1 AS
 	(
 	SELECT *,
@@ -223,15 +327,30 @@ AdvanceWarningOverlap AS
 	FROM AdvanceWarningOverlap1
 	WHERE AdvanceWarningOverlap1.EventId = 71
 	),
+StopTime1 AS
+	(
+	SELECT *,
+	LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp) AS EndTime
+	FROM {{from_table}}               
+	WHERE EventId = 180
+	),
+StopTime AS
+	(
+	SELECT *
+	FROM StopTime1
+	WHERE Parameter = 1
+	),
 categories AS (
   SELECT * FROM (VALUES
     (150, 'Transition'),
     (102, 'Preempt'),
+	(81, 'Other'),
+	(85, 'Watchdog'),
+	(86, 'Stuck Off'),
     (87, 'Stuck On'),
     (88, 'Erratic'),
     (21, 'Ped Service'),
     (131, 'Pattern Change'),
-    --(99, 'Cycle Fault'),
     (300, 'Splits'),
     (301, 'Splits'),
     (302, 'Splits'),
@@ -250,7 +369,16 @@ categories AS (
 	(10, 'Red'),
 	(176, 'Special Function'),
 	(55, 'Advance Warning Phase'),
-	(71, 'Advance Warning Overlap')
+	(71, 'Advance Warning Overlap'),
+	(90, 'Ped Delay'),
+	(61, 'Overlap Green'),
+	(62, 'Overlap Trail Green'),
+	(63, 'Overlap Yellow'),
+	(64, 'Overlap Red'),
+	(41, 'Phase Hold'),
+	(46, 'Phase Omit'),
+	(48, 'Ped Omit'),
+	(22, 'unmatched')--just for unmatched events, 22 is begin FDW, but 21 (begin walk) is already covered
   ) AS t(EventId, Category)
 )
 
@@ -264,8 +392,15 @@ SELECT
   DATE_DIFF('millisecond', t.TimeStamp, t.EndTime)::FLOAT / 1000 AS Duration,
   --c.Category AS Category_Basic,
   CASE
-    WHEN c.Category IN ('Ped Service', 'FYA', 'Phase Call', 'Preempt', 'TSP Call', 'TSP Adjustment', 'Overlap Ped', 'Pattern Change', 'Erratic', 'Stuck On', 'Green', 'Yellow', 'Red', 'Special Function', 'Advance Warning Phase', 'Advance Warning Overlap')
-      THEN c.Category || ' ' || t.Parameter
+-- Add to the CASE statement where other categories are listed:
+    WHEN c.Category IN ('Ped Service', 'FYA', 'Phase Call', 'Preempt', 'TSP Call', 
+                       'TSP Adjustment', 'Overlap Ped', 'Pattern Change', 'Erratic', 
+                       'Stuck On', 'Stuck Off', 'Watchdog', 'Other', 'Green', 'Yellow', 
+                       'Red', 'Special Function', 'Advance Warning Phase', 
+                       'Advance Warning Overlap', 'Ped Delay', 'Overlap Green', 
+                       'Overlap Trail Green', 'Overlap Yellow', 'Overlap Red',
+                       'Phase Hold', 'Phase Omit', 'Ped Omit')
+		THEN c.Category || ' ' || t.Parameter
     WHEN c.Category = 'Splits'
       THEN c.Category || ' ' || (t.EventId - 299)  
     WHEN c.Category = 'Transition' THEN
@@ -307,6 +442,14 @@ FROM
 	SELECT * FROM Yellow
 	UNION ALL
 	SELECT * FROM Red
+	UNION ALL
+	SELECT * FROM OverlapGreen
+	UNION ALL
+	SELECT * FROM OverlapTrailGreen
+	UNION ALL
+	SELECT * FROM OverlapYellow
+	UNION ALL
+	SELECT * FROM OverlapRed
   {% endif %}
   UNION ALL
   SELECT * FROM SpecialFunction
@@ -314,5 +457,17 @@ FROM
   SELECT * FROM AdvanceWarningPhase
   UNION ALL
   SELECT * FROM AdvanceWarningOverlap
+  UNION ALL
+  SELECT * FROM PedDelay
+  UNION ALL
+  SELECT * FROM PedDelayUnmatched
+  UNION ALL
+  SELECT * FROM PhaseHold
+  UNION ALL
+  SELECT * FROM PhaseOmit
+  UNION ALL
+  SELECT * FROM PedOmit
+  UNION ALL
+  SELECT * FROM StopTime
 ) t
 LEFT JOIN categories c ON t.EventId = c.EventId

@@ -240,6 +240,20 @@ Detailed documentation for each measure is coming soon.
 
 ## Release Notes
 
+### Version 1.9.0 (February 19, 2025)
+
+#### New Features:
+Lots of new features for the timeline events:
+- Pedestrian Delay (from button bush to walk)
+- Overlap Events
+- Detector faults including stuck off and other
+- Phase Hold
+- Phase Omit
+- Ped Omit
+- Stop Time
+
+Also updated tests to include these new features. This is a lot of new events to process, so be sure to test thoroughly before deploying to production.
+
 ### Version 1.8.4 (September 12, 2024)
 
 #### Bug Fixes / Improvements:
