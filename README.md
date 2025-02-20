@@ -31,6 +31,7 @@ This project focuses only on transforming event logs into performance measures a
   - [7. Visualization Options](#7-visualization-options)
 - [Performance Measures](#performance-measures)
 - [Release Notes](#release-notes)
+  - [Version 1.9.0 (February 19, 2025)](#version-190-february-19-2025)
   - [Version 1.8.4 (September 12, 2024)](#version-184-september-12-2024)
   - [Version 1.8.3 (September 5, 2024)](#version-183-september-5-2024)
   - [Version 1.8.2 (August 29, 2024)](#version-182-august-29-2024)
@@ -243,7 +244,10 @@ Detailed documentation for each measure is coming soon.
 ### Version 1.9.0 (February 19, 2025)
 
 #### New Features:
-Lots of new features for the timeline events:
+
+Added option to fill in missing time periods for detector actuations with zeros. This makes it clearer when there are no actuations for a detector vs no data due to comm loss. Having zero-value actuation time periods also allows detector health to better identify anomalies due to stuck on/off detectors. 
+
+New timeline events:
 - Pedestrian Delay (from button bush to walk)
 - Overlap Events
 - Detector faults including stuck off and other
