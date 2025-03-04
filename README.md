@@ -1,11 +1,20 @@
-[![Unit Tests](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml)
-![PyPI](https://img.shields.io/pypi/v/atspm)
-
 # ATSPM Aggregation
 
+<!-- Package Info -->
+[![PyPI](https://img.shields.io/pypi/v/atspm)](https://pypi.org/project/atspm/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/atspm)](https://pypi.org/project/atspm/)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/atspm)](https://pypi.org/project/atspm/)
+
+<!-- Repository Info -->
+[![GitHub License](https://img.shields.io/github/license/ShawnStrasser/ATSPM_Aggregation)](https://github.com/ShawnStrasser/ATSPM_Aggregation/blob/main/LICENSE)
+[![GitHub issues](https://img.shields.io/github/issues/ShawnStrasser/ATSPM_Aggregation)](https://github.com/ShawnStrasser/ATSPM_Aggregation/issues)
+[![GitHub stars](https://img.shields.io/github/stars/ShawnStrasser/ATSPM_Aggregation)](https://github.com/ShawnStrasser/ATSPM_Aggregation/stargazers)
+
+<!-- Status -->
+[![Unit Tests](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml)
+[![codecov](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation/branch/main/graph/badge.svg)](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation)
+
 `atspm` is a cutting-edge, lightweight Python package that transforms raw traffic signal controller event logs into meaningful Traffic Signal Performance Measures (TSPMs). These measures help transportation agencies continuously monitor and optimize signal timing perfomance, detect issues, and take proative actions - all in real-time. 
-
-
 
 ## What makes ATSPM Different from Traditional Methods like Synchro?
 Unlike traditional traffic signal optimization tools like Synchro, which rely on periodic manual data collection and simulation models, ATSPM uses real-time data directly collected from signal controllers installed at intersections (inside the ITS cabinets). This real-time reporting capability allows agencies to generate performance data for any selected time range, making it ideal for continuously monitoring signal perfromance and diagnosing problems before they escalate.
