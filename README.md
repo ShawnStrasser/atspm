@@ -12,7 +12,7 @@
 
 <!-- Status -->
 [![Unit Tests](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml)
-[![codecov](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation/branch/main/graph/badge.svg)](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation)
+[![codecov](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation/branch/atspm-package/graph/badge.svg)](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation)
 
 `atspm` is a cutting-edge, lightweight Python package that transforms raw traffic signal controller event logs into meaningful Traffic Signal Performance Measures (TSPMs). These measures help transportation agencies continuously monitor and optimize signal timing perfomance, detect issues, and take proative actions - all in real-time. 
 

@@ -44,8 +44,10 @@ jobs:
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v3
       with:
+        token: ${{ secrets.CODECOV_TOKEN }}
         files: ./coverage.xml
         fail_ci_if_error: false
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
 
     - name: Upload pytest results
       uses: actions/upload-artifact@v4
