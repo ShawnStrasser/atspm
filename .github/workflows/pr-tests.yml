@@ -1,4 +1,4 @@
-name: Python Tests and Publish
+name: Unit Tests
 
 on:
   push:
