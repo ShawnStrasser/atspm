@@ -22,16 +22,28 @@ WITH base_counts AS (
     ) as TimeStamp
 ),
 device_detectors AS (
+    {% if known_detectors_found | default(false) %}
+    -- Combine current detectors with previously known detectors
     SELECT DISTINCT
         DeviceId,
-        Detector
+        Detector::int16 as Detector
+    FROM (
+        SELECT DeviceId, Detector FROM base_counts
+        UNION 
+        SELECT DeviceId, Detector FROM known_detectors_previous
+    )
+    {% else %}
+    -- Just use current detectors if no history is available
+    SELECT DISTINCT
+        DeviceId,
+        Detector::int16 as Detector
     FROM base_counts
-
+    {% endif %}
 )
 SELECT 
     t.TimeStamp,
     d.DeviceId,
-    d.Detector,
+    d.Detector::int16 as Detector,
     COALESCE(b.Total, 0::int16) as Total
 FROM time_series t
 CROSS JOIN device_detectors d

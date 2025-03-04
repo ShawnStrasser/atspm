@@ -4,6 +4,7 @@ from .utils import v_print
 def save_data(**kwargs):
     unmatched_events_path = None
     sf_unmatched_events_path = None
+    known_detectors_path = None
     # Extract parameters from kwargs
     output_dir = kwargs['output_dir']
     output_to_separate_folders = kwargs['output_to_separate_folders']
@@ -25,6 +26,13 @@ def save_data(**kwargs):
             sf_unmatched_events_path = sf_unmatched_events_path.strip("'")
         else:
             sf_unmatched_events_path = None
+            
+    if kwargs.get('known_detectors_settings') is not None:
+        if 'df_or_path' in kwargs['known_detectors_settings']:
+            known_detectors_path = kwargs['known_detectors_settings']['df_or_path']
+            known_detectors_path = known_detectors_path.strip("'")
+        else:
+            known_detectors_path = None
 
     # Make output directory if it does not exist
     os.makedirs(output_dir, exist_ok=True)
@@ -37,8 +45,9 @@ def save_data(**kwargs):
     for table_name in table_names:
         table_name = table_name[0]
         # skip if table name is raw_data or detector_config
-        if table_name in ['raw_data', 'detector_config', 'unmatched_previous', 'sf_unmatched_previous', 'sf_final']:
+        if table_name in ['raw_data', 'detector_config', 'unmatched_previous', 'sf_unmatched_previous', 'sf_final', 'current_detectors', 'known_detectors_previous']:
             continue
+            
         # Save unmatched data to path given, if any
         if table_name == 'unmatched_events' and isinstance(unmatched_events_path, str):
             v_print(f"Saving unmatched events to {unmatched_events_path}", kwargs['verbose'], 2)
@@ -51,6 +60,14 @@ def save_data(**kwargs):
         if table_name == 'sf_unmatched' and isinstance(sf_unmatched_events_path, str):
             v_print(f"Saving split failures unmatched events to {sf_unmatched_events_path}", kwargs['verbose'], 2)
             query = f"COPY (SELECT * FROM sf_unmatched) TO '{sf_unmatched_events_path}'"
+            v_print(query, kwargs['verbose'], 2)
+            conn.query(query)
+            continue
+            
+        # Save known detectors to path given, if any
+        if table_name == 'known_detectors' and isinstance(known_detectors_path, str):
+            v_print(f"Saving known detectors to {known_detectors_path}", kwargs['verbose'], 2)
+            query = f"COPY (SELECT * FROM known_detectors) TO '{known_detectors_path}'"
             v_print(query, kwargs['verbose'], 2)
             conn.query(query)
             continue

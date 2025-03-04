@@ -196,6 +196,7 @@ def incremental_processor_output_with_dataframes():
   configs = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
   unmatched_df = ''
   sf_unmatched_df = ''
+  known_detectors_df = ''
 
   chunks = {
       '1_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 15:00:00' and timestamp < '2024-05-13 15:15:00'").df(),
@@ -227,6 +228,16 @@ def incremental_processor_output_with_dataframes():
         'verbose': 0,
         'aggregations': INCREMENTAL_AGGREGATIONS
     })
+    
+    # Modify the actuations aggregation to include fill_in_missing parameter
+    for agg in params['aggregations']:
+      if agg['name'] == 'actuations':
+        agg['params'] = {
+            'fill_in_missing': True,
+            'known_detectors_df_or_path': known_detectors_df,
+            'known_detectors_max_days_old': 2
+        }
+        
     processor = SignalDataProcessor(**params)
     processor.load()
     processor.aggregate()
@@ -241,23 +252,73 @@ def incremental_processor_output_with_dataframes():
     # Update unmatched dataframes for next iteration
     unmatched_df = processor.conn.sql("select * from unmatched_events").df()
     sf_unmatched_df = processor.conn.sql("select * from sf_unmatched").df()
+    
+    # Update known detectors dataframe for next iteration
+    known_detectors_df = processor.conn.sql("select * from known_detectors").df()
 
     # Write unmatched dataframes to disk as csv
     unmatched_df.to_csv('unmatched_df_temp.csv')
     sf_unmatched_df.to_csv('sf_unmatched_df_temp.csv')
+    known_detectors_df.to_csv('known_detectors_df_temp.csv')
 
     # Read unmatched dataframes back from disk
     unmatched_df = pd.read_csv('unmatched_df_temp.csv')
     sf_unmatched_df = pd.read_csv('sf_unmatched_df_temp.csv')
+    known_detectors_df = pd.read_csv('known_detectors_df_temp.csv')
 
   return results
+
+@pytest.fixture(scope="module")
+def oneshot_processor_output_with_fill_in_missing():
+  """Fixture to run the SignalDataProcessor in oneshot mode with fill_in_missing for actuations"""
+  data = duckdb.query("select * from 'tests/hires_test_data.parquet'").df()
+  
+  # Create a copy of the test parameters
+  params = TEST_PARAMS.copy()
+  
+  # Update with our specific test needs
+  params.update({
+      'raw_data': data,
+      'verbose': 0,
+  })
+  
+  # Find the actuations aggregation
+  actuations_agg = None
+  for agg in params['aggregations']:
+    if agg['name'] == 'actuations':
+      actuations_agg = agg.copy()  # Make a copy to avoid modifying the original
+      break
+  
+  # Set the fill_in_missing parameter
+  actuations_agg['params'] = {'fill_in_missing': True}
+  
+  # Create a new list with just the actuations aggregation
+  params['aggregations'] = [actuations_agg]
+  
+  # Run the processor
+  processor = SignalDataProcessor(**params)
+  processor.load()
+  processor.aggregate()
+  
+  # Get the results
+  result = processor.conn.sql("select * from actuations").df()
+  
+  # Clean up
+  processor.conn.close()
+  
+  return result
 
 @pytest.mark.parametrize("aggregation", INCREMENTAL_AGGREGATIONS, ids=lambda x: x['name'])
 def test_incremental_aggregation_with_dataframes(incremental_processor_output_with_dataframes, aggregation):
   """Test each aggregation for incremental runs using dataframes"""
   agg_name = aggregation['name']
   incremental_results = incremental_processor_output_with_dataframes[agg_name]
-  precalc_file = f"tests/precalculated/{agg_name}.parquet"
+  
+  # Use actuations_zeros.parquet for actuations comparison
+  if agg_name == 'actuations':
+    precalc_file = f"tests/precalculated/actuations_zeros_incremental.parquet"
+  else:
+    precalc_file = f"tests/precalculated/{agg_name}.parquet"
 
   assert len(incremental_results) == 12, f"Expected 12 chunks of results for {agg_name}"
   assert os.path.exists(precalc_file), f"Precalculated file for {agg_name} not found"
@@ -271,6 +332,19 @@ def test_incremental_aggregation_with_dataframes(incremental_processor_output_wi
   else:
     compare_dataframes(combined_df, precalc_df)
 
+def test_oneshot_actuations_with_fill_in_missing(oneshot_processor_output_with_fill_in_missing):
+  """Test actuations with fill_in_missing in oneshot mode"""
+  # Get the results from the fixture
+  actuations_df = oneshot_processor_output_with_fill_in_missing
+  
+  # Load the precalculated file
+  precalc_file = "tests/precalculated/actuations_zeros_oneshot.parquet"
+  assert os.path.exists(precalc_file), f"Precalculated file {precalc_file} not found"
+  
+  precalc_df = pd.read_parquet(precalc_file)
+  
+  # Compare the dataframes
+  compare_dataframes(actuations_df, precalc_df)
 
 if __name__ == "__main__":
   pytest.main([__file__])

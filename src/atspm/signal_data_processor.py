@@ -96,6 +96,8 @@ class SignalDataProcessor:
         self.detector_config = None
         self.unmatched_event_settings = None # For incremental processing of timeline, split failure, arrival on green, and yellow red)
         self.unmatched_found = False
+        self.known_detectors_settings = None # For incremental processing of actuations to track detectors with zero counts
+        self.known_detectors_found = False
         self.incremental_run = False
         self.binned_actuations = None # For detector_health aggregation
         self.device_groups = None # For detector_health aggregation if groups are provided
@@ -136,6 +138,57 @@ class SignalDataProcessor:
                     v_print(f"Warning, {key} file is None. This is expected only for the first run.", self.verbose)
                     self.unmatched_found = False
 
+        # Check for known_detectors parameters in actuations aggregation
+        # If found, extract them and create known_detectors_settings
+        for agg in self.aggregations:
+            if agg['name'] == 'actuations' and 'params' in agg:
+                params = agg['params']
+                if 'known_detectors_df_or_path' in params:
+                    if self.known_detectors_settings is None:
+                        self.known_detectors_settings = {}
+                    self.known_detectors_settings['df_or_path'] = params.pop('known_detectors_df_or_path')
+                    if 'known_detectors_max_days_old' in params:
+                        self.known_detectors_settings['max_days_old'] = params.pop('known_detectors_max_days_old')
+                    else:
+                        self.known_detectors_settings['max_days_old'] = 2  # Default to 2 days if not specified
+                    
+                    # Set incremental_run and known_detectors_found flags
+                    if not self.incremental_run:
+                        self.incremental_run = True
+                    self.known_detectors_found = True
+                    
+                    # Format the df_or_path for DuckDB
+                    value = self.known_detectors_settings['df_or_path']
+                    if isinstance(value, str):
+                        if os.path.exists(value) and value != '':
+                            self.known_detectors_settings['df_or_path'] = f"'{value}'"
+                        else:
+                            v_print(f"Warning, df_or_path file '{value}' does not exist or is blank. This is expected only for the first run.", self.verbose)
+                            self.known_detectors_found = False
+                    elif value is None or (isinstance(value, str) and value == ''):
+                        v_print(f"Warning, df_or_path file is None or empty. This is expected only for the first run.", self.verbose)
+                        self.known_detectors_found = False
+                    break
+
+        # Check format of known_detectors_settings (for backward compatibility)
+        # Similar to unmatched_event_settings
+        if self.known_detectors_settings is not None and not hasattr(self, 'known_detectors_found'):
+            if not self.incremental_run:
+                self.incremental_run = True
+            self.known_detectors_found = True
+            for key, value in self.known_detectors_settings.items():
+                if key == 'max_days_old':
+                    continue
+                if isinstance(value, str):
+                    if os.path.exists(value) and value != '':
+                        self.known_detectors_settings[key] = f"'{value}'"
+                    else:
+                        v_print(f"Warning, {key} file '{value}' does not exist or is blank. This is expected only for the first run.", self.verbose)
+                        self.known_detectors_found = False
+                elif value is None:
+                    v_print(f"Warning, {key} file is None. This is expected only for the first run.", self.verbose)
+                    self.known_detectors_found = False
+
         # Check if detector_health is in aggregations
         if any(d['name'] == 'detector_health' for d in self.aggregations):
             try:
@@ -170,7 +223,9 @@ class SignalDataProcessor:
                     self.raw_data,
                     self.detector_config,
                     self.unmatched_event_settings,
-                    self.unmatched_found)
+                    self.unmatched_found,
+                    self.known_detectors_settings,
+                    self.known_detectors_found)
             # delete self.raw_data and self.detector_config to free up memory
             self.data_loaded = True
             if self.raw_data is not None:
@@ -197,7 +252,7 @@ class SignalDataProcessor:
         # Create unmatched_events table if unmatched_events is not None
         # This table will be used to insert unmatched events, to be saved and reloaded in the next run
         #if self.unmatched_event_settings is not None:
-        #    v_print("Creating unmatched_events table", self.verbose, level=2)
+        #    v_print("Creating unmatched_events table", self.verbose, 2)
         #    self.conn.query(f"CREATE TABLE unmatched_events AS SELECT * AS aggregation FROM raw_data WHERE 1=0")
 
         for aggregation in self.aggregations:
@@ -250,51 +305,108 @@ class SignalDataProcessor:
                 end_time = time.time()
                 self.runtimes[aggregation['name']] = end_time - start_time
                 continue
+            else:
+                # Get parameters from the aggregation, or defaults
+                # Add the bin_size from init
+                params = aggregation.get('params', {}).copy()  # Need to copy to avoid modifying the original
+                params['bin_size'] = self.bin_size
+                params['from_table'] = 'raw_data'
+                params['remove_incomplete'] = self.remove_incomplete
+                
+                #######################
+                ### Full Pedestrian ###
+                # Add min_timestamp and max_timestamp to params if detector_faults or full_ped
+                if aggregation['name'] == 'full_ped':
+                    # Round min_timestamp down to nearest bin_size
+                    params['min_timestamp'] = round_down_15(self.min_timestamp)
+                    params['max_timestamp'] = round_down_15(self.max_timestamp)
 
-            # Add bin_size and remove_incomplete to params
-            aggregation['params']['bin_size'] = self.bin_size
-            aggregation['params']['remove_incomplete'] = self.remove_incomplete
-            aggregation['params']['from_table'] = 'raw_data'
-
-            #######################
-            ### Full Pedestrian ###
-            # Add min_timestamp and max_timestamp to params if detector_faults or full_ped
-            if aggregation['name'] == 'full_ped':
-                # Round min_timestamp down to nearest bin_size
-                aggregation['params']['min_timestamp'] = round_down_15(self.min_timestamp)
-                aggregation['params']['max_timestamp'] = round_down_15(self.max_timestamp)
-
-            #######################
-            ### Unmatched Events ##
-            # If unmatched_event_settings is supplied, then change the from_table for timeline, split_failures, arrival_on_green, and yellow_red
-            # These are views that have the relateded unmatched events unioned to them
-            if self.incremental_run and aggregation['name'] in ['timeline', 'arrival_on_green', 'yellow_red', 'split_failures']:
-                aggregation['params']['incremental_run'] = True #lets the aggregation know to save unmatched events for next run
-                if self.unmatched_found:
-                    v_print(f"Incremental run using previous events for {aggregation['name']}", self.verbose, 2)
-                    aggregation['params']['unmatched'] = True #lets the aggregation know to use the unmatched events from previous run
-                    # split_failures uses its own view
-                    if aggregation['name'] != 'split_failures':
-                        aggregation['params']['from_table'] = 'raw_data_all'
-                else:
-                    v_print(f"First Run For {aggregation['name']}", self.verbose, 2)
-                    aggregation['params']['unmatched'] = False
-              
-            #######################
-            ### Run Aggregation ###
-            self.sql_queries[aggregation['name']] = aggregate_data(
-                self.conn,
-                aggregation['name'],
-                self.to_sql,
-                **aggregation['params'])
-
+                #######################
+                ### Unmatched Events ##
+                # If unmatched_event_settings is supplied, then change the from_table for timeline, split_failures, arrival_on_green, and yellow_red
+                # These are views that have the relateded unmatched events unioned to them
+                if self.incremental_run and aggregation['name'] in ['timeline', 'arrival_on_green', 'yellow_red', 'split_failures']:
+                    params['incremental_run'] = True #lets the aggregation know to save unmatched events for next run
+                    if self.unmatched_found:
+                        v_print(f"Incremental run using previous events for {aggregation['name']}", self.verbose, 2)
+                        params['unmatched'] = True #lets the aggregation know to use the unmatched events from previous run
+                        # split_failures uses its own view
+                        if aggregation['name'] != 'split_failures':
+                            params['from_table'] = 'raw_data_all'
+                    else:
+                        v_print(f"First Run For {aggregation['name']}", self.verbose, 2)
+                        params['unmatched'] = False
+                
+                # Add known_detectors_found flag for actuations aggregation
+                if aggregation['name'] == 'actuations':
+                    params['known_detectors_found'] = self.known_detectors_found
+                
+                # Output sql or execute query
+                self.sql_queries[aggregation['name']] = aggregate_data(
+                    self.conn,
+                    aggregation['name'],
+                    self.to_sql,
+                    **params
+                )
+                
             end_time = time.time()
+            # Store the runtime
             self.runtimes[aggregation['name']] = end_time - start_time
-
+            
+        # Print out runtimes
         v_print(f"\n\nTotal aggregation runtime: {sum(self.runtimes.values()):.2f} seconds.", self.verbose)
         v_print("\nIndividual Query Runtimes:", self.verbose)
         for name, runtime in self.runtimes.items():
             v_print(f"{name}: {runtime:.2f} seconds", self.verbose)
+
+        # After all aggregations are finished, create and update the known_detectors table
+        # This combines detectors from the current batch with previous known detectors
+        if self.known_detectors_settings is not None and any(agg['name'] == 'actuations' for agg in self.aggregations):
+            v_print("Creating/updating known_detectors table", self.verbose, 2)
+            
+            # Create a query to extract all detectors from raw_data and update LastSeen timestamp
+            current_detectors_query = """
+            CREATE OR REPLACE TABLE current_detectors AS
+            SELECT DISTINCT
+                DeviceId,
+                Parameter as Detector,
+                MAX(TimeStamp) as LastSeen
+            FROM raw_data
+            WHERE EventID = 82
+            GROUP BY DeviceId, Detector;
+            """
+            self.conn.query(current_detectors_query)
+            
+            # Create or update the known_detectors table
+            if self.known_detectors_found:
+                # Merge current detectors with previously known detectors
+                merge_query = """
+                CREATE OR REPLACE TABLE known_detectors AS
+                SELECT 
+                    u.DeviceId,
+                    u.Detector,
+                    COALESCE(MAX(kd.LastSeen), MAX(cd.LastSeen)) as LastSeen
+                FROM 
+                    (SELECT DISTINCT DeviceId, Detector FROM known_detectors_previous 
+                     UNION 
+                     SELECT DISTINCT DeviceId, Detector FROM current_detectors) u
+                LEFT JOIN known_detectors_previous kd ON u.DeviceId = kd.DeviceId AND u.Detector = kd.Detector
+                LEFT JOIN current_detectors cd ON u.DeviceId = cd.DeviceId AND u.Detector = cd.Detector
+                GROUP BY u.DeviceId, u.Detector;
+                """
+            else:
+                # Just use current detectors if no history is available
+                merge_query = """
+                CREATE OR REPLACE TABLE known_detectors AS
+                SELECT 
+                    DeviceId,
+                    Detector,
+                    LastSeen
+                FROM current_detectors;
+                """
+            
+            self.conn.query(merge_query)
+            v_print("Known detectors table updated", self.verbose, 2)
     
     def save(self):
         """Saves the processed data."""

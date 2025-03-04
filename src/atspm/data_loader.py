@@ -6,7 +6,9 @@ def load_data(conn,
               raw_data=None,
               detector_config=None,
               unmatched_events=None,
-              use_unmatched=False):
+              use_unmatched=False,
+              known_detectors=None,
+              use_known_detectors=False):
 
     # Load Raw Data
     load_sql = """
@@ -84,5 +86,41 @@ def load_data(conn,
         print("*"*50)
         print("Error when loading unmatched_events! Here are some tips:")
         print("Loading from a CSV file may cause errors if the timestamp is not in the correct format. Try saving data in Parquet instead.")
+        print("*"*50)
+        raise e
+    
+    # Load known_detectors (if provided)
+    try:
+        if use_known_detectors:
+            max_days_old = known_detectors.get('max_days_old', 2)  # Default to 2 days if not specified
+            
+            known_detectors_reference = known_detectors.get('df_or_path')
+            
+            if isinstance(known_detectors_reference, str):
+                reference = known_detectors_reference
+            else:
+                # Create a pointer for DuckDB
+                reference = 'known_detectors_df'
+                known_detectors_df = known_detectors_reference
+            
+            # Create WHERE clause to filter out old records
+            where_clause = f" WHERE LastSeen::DATETIME > TIMESTAMP '{min_timestamp}' - INTERVAL '{max_days_old} days'"
+            
+            # Load the known_detectors_previous table
+            load_sql = f"""
+            CREATE TABLE known_detectors_previous AS
+            SELECT DeviceId as DeviceId, Detector as Detector, LastSeen::DATETIME as LastSeen
+            FROM {reference} {where_clause};
+            """
+            
+            v_print(f"Loading known detectors from: \n{reference}\n", verbose, 2)
+            v_print(f'Executing SQL to load known detectors: \n{load_sql}', verbose, 2)
+            conn.query(load_sql)
+            
+    except Exception as e:
+        print("*"*50)
+        print("Error when loading known_detectors! Here are some tips:")
+        print("Loading from a CSV file may cause errors if the timestamp is not in the correct format. Try saving data in Parquet instead.")
+        print("Make sure known_detectors table has DeviceId, Detector, and LastSeen columns.")
         print("*"*50)
         raise e
