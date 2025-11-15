@@ -267,7 +267,7 @@ class SignalDataProcessor:
             if aggregation['name'] == 'detector_health':
                 if self.to_sql:
                     raise ValueError("to_sql option is  supported for detector_health")
-                decomp = traffic_anomaly.median_decompose(
+                decomp = traffic_anomaly.decompose(
                     self.binned_actuations,
                     **aggregation['params']['decompose_params']
                 )
@@ -283,7 +283,7 @@ class SignalDataProcessor:
                 else:
                     exclude_col = ""
                 # Find Anomalies
-                anomaly = traffic_anomaly.find_anomaly(
+                anomaly_df = traffic_anomaly.anomaly(
                     decomposed_data=decomp,
                     **aggregation['params']['anomaly_params']
                 )
