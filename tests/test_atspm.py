@@ -346,5 +346,96 @@ def test_oneshot_actuations_with_fill_in_missing(oneshot_processor_output_with_f
   # Compare the dataframes
   compare_dataframes(actuations_df, precalc_df)
 
+@pytest.fixture(scope="module")
+def detector_health_output():
+  """Fixture to run detector_health aggregation"""
+  data = duckdb.query("select * from 'tests/hires_test_data.parquet'").df()
+  configs = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
+  
+  # First, run actuations aggregation with fill_in_missing=True
+  actuations_params = {
+    'raw_data': data,
+    'detector_config': configs,
+    'bin_size': 15,
+    'verbose': 0,
+    'aggregations': [
+      {'name': 'actuations', 'params': {'fill_in_missing': True}},
+    ]
+  }
+  
+  processor = SignalDataProcessor(**actuations_params)
+  processor.load()
+  processor.aggregate()
+  
+  # Get the actuations data
+  actuations = processor.conn.query("SELECT * FROM actuations ORDER BY TimeStamp").df()
+  processor.close()
+  
+  # Set common parameters (matching the notebook)
+  common_params = {
+    'datetime_column': 'TimeStamp',
+    'value_column': 'Total',
+    'entity_grouping_columns': ['DeviceId', 'Detector']
+  }
+  
+  # Set median decomposition parameters
+  decompose_params = {
+    **common_params,
+    'freq_minutes': 15,
+    'min_time_of_day_samples': 0,  # 0 just for testing, in prod set to 14
+    'rolling_window_enable': False
+  }
+  
+  # Set anomaly detection parameters
+  anomaly_params = {
+    **common_params,
+    'entity_threshold': 6.0,
+    'group_threshold': 3.0,
+    'GEH': True,
+    'log_adjust_negative': True
+  }
+  
+  # Combine all parameters
+  detector_health_params = {
+    'aggregations': [
+      {
+        'name': 'detector_health',
+        'params': {
+          'data': actuations,
+          'device_groups': None,
+          'return_last_n_days': 1,
+          'decompose_params': decompose_params,
+          'anomaly_params': anomaly_params
+        }
+      },
+    ]
+  }
+  
+  # Run detector_health aggregation
+  processor = SignalDataProcessor(**detector_health_params)
+  processor.aggregate()
+  
+  # Get the results
+  result = processor.conn.query("SELECT * FROM detector_health ORDER BY TimeStamp").df()
+  
+  # Clean up
+  processor.close()
+  
+  return result
+
+def test_detector_health(detector_health_output):
+  """Test detector_health aggregation"""
+  # Get the results from the fixture
+  detector_health_df = detector_health_output
+  
+  # Load the precalculated file
+  precalc_file = "tests/precalculated/detector_health.parquet"
+  assert os.path.exists(precalc_file), f"Precalculated file {precalc_file} not found"
+  
+  precalc_df = pd.read_parquet(precalc_file)
+  
+  # Compare the dataframes
+  compare_dataframes(detector_health_df, precalc_df)
+
 if __name__ == "__main__":
   pytest.main([__file__])
