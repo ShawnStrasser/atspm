@@ -14,9 +14,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "duckdb>=0.9.1,<1.3.0",
-    "traffic-anomaly>=1.0.0",
+    "traffic-anomaly>=2.4.0",
     "jinja2",
+    "pyarrow",
+    "pyarrow_hotfix",
 ]
 
 [tools.setuptools]
