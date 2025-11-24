@@ -66,27 +66,28 @@ class SignalDataProcessor:
 
     Example
     -------
-    processor = SignalDataProcessor(
+    # Recommended: Use context manager (automatically closes connection)
+    with SignalDataProcessor(
         raw_data=sample_data.data,
         detector_config=sample_data.config,
         bin_size=15,
-        output_dir='test_folder',
-        output_to_separate_folders=True,
-        output_format='csv',
-        remove_incomplete=True,
-        unmatched_event_settings={
-            'df_or_path': 'test_folder/unmatched.parquet',
-            'split_fail_df_or_path': 'test_folder/sf_unmatched.parquet',
-            'max_days_old': 14
-        },
         verbose=1,
         aggregations=[
             {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
             {'name': 'actuations', 'params': {}},
-            # ... other aggregations ...
         ]
-    )
-    processor.run()
+    ) as processor:
+        processor.load()
+        processor.aggregate()
+        # Access results via processor.conn before exiting
+    
+    # Alternative: Call close() explicitly
+    processor = SignalDataProcessor(...)
+    try:
+        processor.load()
+        processor.aggregate()
+    finally:
+        processor.close()
     '''
 
     def __init__(self, **kwargs):
@@ -146,11 +147,13 @@ class SignalDataProcessor:
                 if 'known_detectors_df_or_path' in params:
                     if self.known_detectors_settings is None:
                         self.known_detectors_settings = {}
-                    self.known_detectors_settings['df_or_path'] = params.pop('known_detectors_df_or_path')
-                    if 'known_detectors_max_days_old' in params:
-                        self.known_detectors_settings['max_days_old'] = params.pop('known_detectors_max_days_old')
-                    else:
-                        self.known_detectors_settings['max_days_old'] = 2  # Default to 2 days if not specified
+                    # Use get() and then remove via dict comprehension to avoid modifying original params
+                    self.known_detectors_settings['df_or_path'] = params.get('known_detectors_df_or_path')
+                    self.known_detectors_settings['max_days_old'] = params.get('known_detectors_max_days_old', 2)  # Default to 2 days
+                    # Remove these keys from params without modifying the original dict in-place
+                    # by creating a filtered copy that will be used later
+                    agg['params'] = {k: v for k, v in params.items() 
+                                     if k not in ('known_detectors_df_or_path', 'known_detectors_max_days_old')}
                     
                     # Set incremental_run and known_detectors_found flags
                     if not self.incremental_run:
@@ -200,6 +203,8 @@ class SignalDataProcessor:
      
         # Establish a connection to the database
         self.conn = duckdb.connect()
+        # Track whether connection has been closed
+        self._closed = False
         # Track whether data has been loaded
         self.data_loaded = False
 
@@ -272,10 +277,12 @@ class SignalDataProcessor:
                     **aggregation['params']['decompose_params']
                 )
                 del self.binned_actuations
+                self.binned_actuations = None  # Clear reference
                 # Join groups to decomp
                 if self.device_groups is not None:
                     device_groups = self.device_groups # DuckDB needs a direct pointer to see the table
                     decomp = self.conn.sql("SELECT * FROM decomp NATURAL JOIN device_groups").df()
+                    del device_groups  # Clear local reference after DuckDB query
                     # Exclude group_grouping_columns in anomaly_params
                     exclude_col = ', '.join(["'{}'".format(x) for x in aggregation['params']['anomaly_params']['group_grouping_columns']])
                     exclude_col = f"EXCLUDE ({exclude_col})"
@@ -287,6 +294,7 @@ class SignalDataProcessor:
                     decomposed_data=decomp,
                     **aggregation['params']['anomaly_params']
                 )
+                del decomp  # Free memory after anomaly calculation
                 # Extract max date from anomaly table and subtract return_last_n_days
                 sql = f"""
                     SELECT CAST(MAX(TimeStamp)::DATE - INTERVAL '{aggregation['params']['return_last_n_days']-1}' DAY AS VARCHAR) AS max_date_minus_one
@@ -301,6 +309,7 @@ class SignalDataProcessor:
                         WHERE TimeStamp >= '{max_date}'
                         """
                 self.conn.execute(query)
+                del anomaly_df  # Free memory after saving to DuckDB
                 # no external sql file like other aggregations, so just continue
                 end_time = time.time()
                 self.runtimes[aggregation['name']] = end_time - start_time
@@ -415,9 +424,26 @@ class SignalDataProcessor:
             return
         save_data(**self.__dict__)
         
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit. Closes the database connection."""
+        self.close()
+        return False
+    
     def close(self):
-        """Closes the database connection."""
-        self.conn.close()
+        """Closes the database connection. Safe to call multiple times."""
+        if self._closed:
+            return
+        if hasattr(self, 'conn') and self.conn is not None:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+        self.conn = None
+        self._closed = True
 
     def run(self):
         """Runs the complete data processing pipeline."""

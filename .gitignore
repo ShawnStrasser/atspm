@@ -140,3 +140,5 @@ Thumbs.db
 !src/atspm/data/**/*.parquet
 
 atspm.ipynb
+testing.ipynb
+testingstuff.ipynb

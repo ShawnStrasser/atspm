@@ -122,6 +122,33 @@ def test_all_files_generated():
   for file in expected_files:
       assert os.path.exists(os.path.join(TEST_PARAMS['output_dir'], file)), f"File {file} not generated"
 
+def test_context_manager():
+  """Test that using the context manager produces correct results"""
+  # Use has_data aggregation as a simple test case
+  with SignalDataProcessor(
+    raw_data=TEST_PARAMS['raw_data'],
+    detector_config=TEST_PARAMS['detector_config'],
+    bin_size=TEST_PARAMS['bin_size'],
+    verbose=0,
+    aggregations=[
+      {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+    ]
+  ) as processor:
+    processor.load()
+    processor.aggregate()
+    # Get results while still in context (before connection closes)
+    result_df = processor.conn.sql("SELECT * FROM has_data").df()
+  
+  # After exiting context, connection should be closed
+  assert processor._closed, "Connection should be closed after exiting context manager"
+  
+  # Compare with precalculated data
+  precalc_file = "tests/precalculated/has_data.parquet"
+  assert os.path.exists(precalc_file), f"Precalculated file {precalc_file} not found"
+  precalc_df = pd.read_parquet(precalc_file)
+  
+  compare_dataframes(result_df, precalc_df)
+
 @pytest.fixture(scope="module")
 def incremental_processor_output():
   """Fixture to run the SignalDataProcessor incrementally"""
