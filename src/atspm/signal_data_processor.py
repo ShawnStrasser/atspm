@@ -267,7 +267,7 @@ class SignalDataProcessor:
             if aggregation['name'] == 'detector_health':
                 if self.to_sql:
                     raise ValueError("to_sql option is  supported for detector_health")
-                decomp = traffic_anomaly.median_decompose(
+                decomp = traffic_anomaly.decompose(
                     self.binned_actuations,
                     **aggregation['params']['decompose_params']
                 )
@@ -283,21 +283,21 @@ class SignalDataProcessor:
                 else:
                     exclude_col = ""
                 # Find Anomalies
-                anomaly = traffic_anomaly.find_anomaly(
+                anomaly_df = traffic_anomaly.anomaly(
                     decomposed_data=decomp,
                     **aggregation['params']['anomaly_params']
                 )
                 # Extract max date from anomaly table and subtract return_last_n_days
                 sql = f"""
                     SELECT CAST(MAX(TimeStamp)::DATE - INTERVAL '{aggregation['params']['return_last_n_days']-1}' DAY AS VARCHAR) AS max_date_minus_one
-                    FROM anomaly
+                    FROM anomaly_df
                     """
                 max_date = self.conn.query(sql).fetchone()[0]
 
                 # Save anomaly table to DuckDB
                 query = f"""CREATE OR REPLACE TABLE detector_health AS
                         SELECT * {exclude_col}
-                        FROM anomaly
+                        FROM anomaly_df
                         WHERE TimeStamp >= '{max_date}'
                         """
                 self.conn.execute(query)

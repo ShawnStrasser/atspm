@@ -1,8 +1,20 @@
 # ATSPM Aggregation
 
+<!-- Package Info -->
+[![PyPI](https://img.shields.io/pypi/v/atspm)](https://pypi.org/project/atspm/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/atspm)](https://pypi.org/project/atspm/)
+[![PyPI - Downloads](https://img.shields.io/pypi/dm/atspm)](https://pypi.org/project/atspm/)
+
+<!-- Repository Info -->
+[![GitHub License](https://img.shields.io/github/license/ShawnStrasser/ATSPM_Aggregation)](https://github.com/ShawnStrasser/ATSPM_Aggregation/blob/main/LICENSE)
+[![GitHub issues](https://img.shields.io/github/issues/ShawnStrasser/ATSPM_Aggregation)](https://github.com/ShawnStrasser/ATSPM_Aggregation/issues)
+[![GitHub stars](https://img.shields.io/github/stars/ShawnStrasser/ATSPM_Aggregation)](https://github.com/ShawnStrasser/ATSPM_Aggregation/stargazers)
+
+<!-- Status -->
+[![Unit Tests](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml)
+[![codecov](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation/branch/atspm-package/graph/badge.svg)](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation)
+
 `atspm` is a cutting-edge, lightweight Python package that transforms raw traffic signal controller event logs into meaningful Traffic Signal Performance Measures (TSPMs). These measures help transportation agencies continuously monitor and optimize signal timing perfomance, detect issues, and take proative actions - all in real-time. 
-
-
 
 ## What makes ATSPM Different from Traditional Methods like Synchro?
 Unlike traditional traffic signal optimization tools like Synchro, which rely on periodic manual data collection and simulation models, ATSPM uses real-time data directly collected from signal controllers installed at intersections (inside the ITS cabinets). This real-time reporting capability allows agencies to generate performance data for any selected time range, making it ideal for continuously monitoring signal perfromance and diagnosing problems before they escalate.
@@ -240,6 +252,52 @@ The following performance measures are included:
 Detailed documentation for each measure is coming soon.
 
 ## Release Notes
+
+### Version 1.9.1 (March 4, 2025)
+
+#### Bug Fixes / Improvements:
+
+Filling in missing time periods for detectors with zero actuations didn't work for incremental processing, this has been fixed by tracking a list of known detectors between each run, similar to the unmatched event tracking. So how it works is you provide a dataframe or file path of known detectors, it will filter out detectors last seen more than n days ago, and then will fill in missing time periods with zeros for the remaining detectors.
+
+```python
+known_detectors_df='path/to/known_detectors.csv'
+# or supply Pandas DataFrame directly
+
+from src.atspm import SignalDataProcessor, sample_data
+
+# Set up all parameters
+params = {
+    # Global Settings
+    'raw_data': sample_data.data,
+    'bin_size': 15, 
+# Performance Measures
+'aggregations': [
+    {'name': 'actuations', 'params': {
+            'fill_in_missing': True,
+            'known_detectors_df_or_path': known_detectors_df,
+            'known_detectors_max_days_old': 2
+    }}
+]
+}
+```
+
+After you run the processor, here's how to query the known detectors table:
+
+```python
+processor = SignalDataProcessor(**params)
+processor.load()
+processor.aggregate()
+# get all table names from the database
+known_detectors_df = processor.conn.query("SELECT * FROM known_detectors;").df()
+```
+
+Here's what the known detectors table could look like:
+
+| DeviceId | Detector | LastSeen |
+|----------|----------|----------|
+| 1        | 1        | 2025-03-04 00:00:00 |
+| 1        | 2        | 2025-03-04 00:00:00 |
+| 2        | 1        | 2025-03-04 00:00:00 |
 
 ### Version 1.9.0 (February 19, 2025)
 

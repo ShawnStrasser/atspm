@@ -1,10 +1,14 @@
-name: Python Tests and Publish
+name: Unit Tests
 
 on:
   push:
     branches: [ atspm-package ]
+    paths:
+      - 'src/**'
   pull_request:
     branches: [ atspm-package ]
+    paths:
+      - 'src/**'
   release:
     types: [created]
   workflow_dispatch:
@@ -28,14 +32,22 @@ jobs:
 
     - name: Install dependencies
       run: |
-        pip install pytest build pandas pyarrow toml
+        pip install pytest pytest-cov build pandas pyarrow toml
         pip install .
 
     - name: Build package
       run: python -m build
 
-    - name: Run tests
-      run: pytest --junitxml=pytest-results.xml
+    - name: Run tests with coverage
+      run: pytest --cov=src --cov-report=xml --junitxml=pytest-results.xml
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: ./coverage.xml
+        fail_ci_if_error: false
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
 
     - name: Upload pytest results
       uses: actions/upload-artifact@v4
