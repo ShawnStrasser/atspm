@@ -2,11 +2,11 @@ name: Unit Tests
 
 on:
   push:
-    branches: [ atspm-package ]
+    branches: [ main ]
     paths:
       - 'src/**'
   pull_request:
-    branches: [ atspm-package ]
+    branches: [ main ]
     paths:
       - 'src/**'
   release:
