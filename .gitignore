@@ -142,3 +142,15 @@ Thumbs.db
 atspm.ipynb
 testing.ipynb
 testingstuff.ipynb
+archive/
+dist/
+__pycache__/
+atspm/etc/
+atspm/Include/
+atspm/Lib/
+atspm/Scripts/
+atspm/share/
+pyvenv.cfg
+*.egg-info/
+_notes.txt
+package_tester.ipynb

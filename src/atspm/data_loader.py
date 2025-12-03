@@ -1,6 +1,118 @@
 import os
 from .utils import v_print
 
+_CANONICAL_COLUMNS = ['TimeStamp', 'DeviceId', 'EventId', 'Parameter']
+_COLUMN_VARIANTS = {
+    'timestamp': 'TimeStamp',
+    'deviceid': 'DeviceId',
+    'device': 'DeviceId',
+    'signal': 'DeviceId',
+    'signalid': 'DeviceId',
+    'location': 'DeviceId',
+    'intersection': 'DeviceId',
+    'trafficsignal': 'DeviceId',
+    'name': 'DeviceId',
+    'devicename': 'DeviceId',
+    'eventid': 'EventId',
+    'eventcode': 'EventId',
+    'parameter': 'Parameter',
+    'eventparameter': 'Parameter',
+    'eventparam': 'Parameter',
+}
+
+
+def _normalize_column_name(name):
+    name = str(name).strip()
+    return ''.join(ch for ch in name if ch not in {' ', '_'}).lower()
+
+
+def _quote_identifier(name):
+    """Quote identifiers for SQL statements."""
+    safe_name = str(name).replace('"', '""')
+    return f'"{safe_name}"'
+
+
+def _quote_path(path):
+    escaped = str(path).replace("'", "''")
+    return f"'{escaped}'"
+
+
+def _strip_wrapping_quotes(path):
+    value = str(path)
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _get_columns_from_dataframe_like(source):
+    if hasattr(source, 'columns'):
+        return list(source.columns)
+    if hasattr(source, 'column_names'):
+        return list(source.column_names)
+    raise ValueError("Unable to determine columns from the provided DataFrame-like source.")
+
+
+def _get_columns_from_path(conn, path):
+    reference = _quote_path(path)
+    cursor = conn.execute(f"SELECT * FROM {reference} LIMIT 0")
+    description = cursor.description
+    if description is None:
+        return []
+    return [col[0] for col in description]
+
+
+def _choose_column(existing, candidate, canonical):
+    if not existing:
+        return candidate
+    if candidate.lower() == canonical.lower() and existing.lower() != canonical.lower():
+        return candidate
+    return existing
+
+
+def _resolve_canonical_columns(columns, source_label, required=None):
+    if required is None:
+        required = _CANONICAL_COLUMNS
+    mapping = {}
+    for raw_name in columns:
+        if raw_name is None:
+            continue
+        normalized = _normalize_column_name(raw_name)
+        canonical = _COLUMN_VARIANTS.get(normalized)
+        if canonical:
+            mapping[canonical] = _choose_column(mapping.get(canonical), str(raw_name), canonical)
+    missing = [col for col in required if col not in mapping]
+    if missing:
+        raise ValueError(
+            f"Source '{source_label}' must include columns for {', '.join(missing)}. "
+            f"Available columns: {', '.join(str(c) for c in columns)}"
+        )
+    return mapping
+
+
+_CAST_TYPES = {
+    'TimeStamp': 'DATETIME',
+    'EventId': 'INT16',
+    'Parameter': 'INT16',
+}
+
+
+def _build_column_expression(mapping, key, use_alias=True):
+    column_name = mapping[key]
+    quoted = _quote_identifier(column_name)
+    cast_type = _CAST_TYPES.get(key)
+    expr = f"{quoted}::{cast_type}" if cast_type else f"{quoted}"
+    if use_alias:
+        return f"{expr} as {key}"
+    return expr
+
+
+def _build_select_columns(column_map, include=None, extras=None):
+    columns = include if include is not None else _CANONICAL_COLUMNS
+    parts = [_build_column_expression(column_map, col) for col in columns if col in column_map]
+    if extras:
+        parts.extend(extras)
+    return ", ".join(parts)
+
 def load_data(conn,
               verbose,
               raw_data=None,
@@ -10,21 +122,29 @@ def load_data(conn,
               known_detectors=None,
               use_known_detectors=False):
 
-    # Load Raw Data
-    load_sql = """
-        CREATE TABLE raw_data AS
-        SELECT DISTINCT TimeStamp::DATETIME as TimeStamp, DeviceId as DeviceId, EventId::INT16 as EventId, Parameter::INT16 as Parameter
-        """
-    # From statment is used to load data from a file or a string (as DataFrame)
     if raw_data is not None:
         if isinstance(raw_data, str):
+            raw_path = _strip_wrapping_quotes(raw_data)
             v_print("Loading raw data from path", verbose, 2)
-            load_sql += f" FROM '{raw_data}'"
+            source_reference = _quote_path(raw_path)
+            source_columns = _get_columns_from_path(conn, raw_path)
+            source_label = raw_path
         else:
             v_print("Loading raw data from DataFrame", verbose, 2)
-            load_sql += " FROM raw_data"
-        # Filter out out of range values for EventId and Parameter (to avoid errors when loading data in case of anomalies/errors)
-        load_sql += " WHERE EventId >= 0 AND EventId <= 32767 AND Parameter >= 0 AND Parameter <= 32767"
+            source_reference = "raw_data"
+            source_columns = _get_columns_from_dataframe_like(raw_data)
+            source_label = "raw_data DataFrame"
+
+        column_map = _resolve_canonical_columns(source_columns, source_label)
+        select_clause = _build_select_columns(column_map)
+
+        load_sql = f"""
+        CREATE TABLE raw_data AS
+        SELECT DISTINCT {select_clause}
+        FROM {source_reference}
+        WHERE EventId >= 0 AND EventId <= 32767 AND Parameter >= 0 AND Parameter <= 32767
+        """
+
         conn.query(load_sql)
         # Get the minimum timestamp from the raw data
         min_timestamp = conn.query("SELECT MIN(TimeStamp) FROM raw_data").fetchone()[0]
@@ -48,22 +168,33 @@ def load_data(conn,
         if use_unmatched:
             max_days_old = unmatched_events['max_days_old']
             unmatched_events.pop('max_days_old')
-            # Create a WHERE clause to filter out old events
-            where_clause = f" WHERE TimeStamp::DATETIME > TIMESTAMP '{min_timestamp}' - INTERVAL '{max_days_old} days'"
             # Iterate over the strings/dataframes in unmatched_events dictionary
             for key, value in unmatched_events.items():
                 if isinstance(value, str):
-                    reference = value
+                    source_path = _strip_wrapping_quotes(value)
+                    reference = _quote_path(source_path)
+                    source_columns = _get_columns_from_path(conn, source_path)
+                    source_label = source_path
                 else:
                     # Create a pointer for DuckDB
                     reference = 'unmatched_df'
                     unmatched_df = value
+                    source_columns = _get_columns_from_dataframe_like(value)
+                    source_label = f"unmatched_events[{key}]"
 
-                # Create view that unions the previous unmatched events with the new ones
+                required_columns = _CANONICAL_COLUMNS if key == 'df_or_path' else ['TimeStamp', 'DeviceId', 'EventId']
+                column_map = _resolve_canonical_columns(source_columns, source_label, required_columns)
+                timestamp_select = _build_column_expression(column_map, 'TimeStamp')
+                timestamp_filter = _build_column_expression(column_map, 'TimeStamp', use_alias=False)
+                device_select = _build_column_expression(column_map, 'DeviceId')
+                eventid_select = _build_column_expression(column_map, 'EventId')
+                where_clause = f" WHERE {timestamp_filter} > TIMESTAMP '{min_timestamp}' - INTERVAL '{max_days_old} days'"
+
                 if key == 'df_or_path':
+                    parameter_select = _build_column_expression(column_map, 'Parameter')
                     load_sql = f"""
                     CREATE TABLE unmatched_previous AS
-                    SELECT TimeStamp::DATETIME as TimeStamp, DeviceId as DeviceId, EventId::INT16 as EventId, Parameter::INT16 as Parameter
+                    SELECT {timestamp_select}, {device_select}, {eventid_select}, {parameter_select}
                     FROM {reference} {where_clause};
                     CREATE VIEW raw_data_all AS
                     SELECT * FROM raw_data
@@ -73,7 +204,7 @@ def load_data(conn,
                 elif key == 'split_fail_df_or_path':
                     load_sql = f"""
                     CREATE TABLE sf_unmatched_previous AS
-                    SELECT TimeStamp::DATETIME as TimeStamp, DeviceId as DeviceId, EventId::INT16 as EventId, Detector::INT16 as Detector, Phase::INT16 as Phase
+                    SELECT {timestamp_select}, {device_select}, {eventid_select}, Detector::INT16 as Detector, Phase::INT16 as Phase
                     FROM {reference} {where_clause}
                     """
                 else:
