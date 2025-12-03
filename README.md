@@ -12,7 +12,7 @@
 
 <!-- Status -->
 [![Unit Tests](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml)
-[![codecov](https://codecov.io/gh/ShawnStrasser/atspm/branch/main/graph/badge.svg)](https://codecov.io/gh/ShawnStrasser/atspm)
+[![codecov](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation/badge.svg)](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation)
 
 `atspm` is a cutting-edge, lightweight Python package that transforms raw traffic signal controller event logs into meaningful Traffic Signal Performance Measures (TSPMs). These measures help transportation agencies continuously monitor and optimize signal timing perfomance, detect issues, and take proative actions - all in real-time. 
 
@@ -43,12 +43,6 @@ This project focuses only on transforming event logs into performance measures a
   - [7. Visualization Options](#7-visualization-options)
 - [Performance Measures](#performance-measures)
 - [Release Notes](#release-notes)
-  - [Version 1.9.0 (February 19, 2025)](#version-190-february-19-2025)
-  - [Version 1.8.4 (September 12, 2024)](#version-184-september-12-2024)
-  - [Version 1.8.3 (September 5, 2024)](#version-183-september-5-2024)
-  - [Version 1.8.2 (August 29, 2024)](#version-182-august-29-2024)
-  - [Version 1.8.0 (August 28, 2024)](#version-180-august-28-2024)
-  - [Version 1.7.0 (August 22, 2024)](#version-170-august-22-2024)
 - [Future Plans](#future-plans)
 - [Contributing](#contributing)
 - [License](#license)
@@ -113,6 +107,41 @@ params = {
     ]
 }
 ```
+
+#### Detector configuration format
+
+Older examples sometimes refer to a `detector.config` file. In the current package, this is passed via the
+`detector_config` parameter and can be either a file path (CSV/Parquet/JSON) or a DataFrame / DuckDB relation.
+
+The detector configuration table must have the following columns:
+
+| Column      | Type   | Description                                                                 |
+|-------------|--------|-----------------------------------------------------------------------------|
+| `DeviceId`  | int    | Controller ID, matching the `DeviceId` in your raw event logs.             |
+| `Phase`     | int    | Phase number served by the detector (e.g., NEMA phase).                    |
+| `Parameter` | int    | Detector number / channel (matches the `Parameter` in the event log).      |
+| `Function`  | string | One of `Presence`, `Yellow_Red`, or `Advance`, which controls which        |
+|             |        | performance measures apply (e.g., split failures, yellow/red, arrivals on green). |
+
+A sample configuration is bundled with the package:
+
+```python
+from atspm import sample_data
+
+# sample_data.config is a DuckDB relation with the required columns
+sample_data.config
+```
+
+To use your own configuration, create a table with the schema above and pass either a path or DataFrame:
+
+```python
+params['detector_config'] = 'path/to/detector_config.parquet'  # or .csv, etc.
+# or
+import pandas as pd
+detector_df = pd.read_parquet('path/to/detector_config.parquet')
+params['detector_config'] = detector_df
+```
+
 ### 3. Performance Measures
 
 The core of `atspm` is calculating various traffic signal performance measures from the raw event log data. Each measure is based on specific traffic signal controller events such as vehicle actuations, pedestrian button presses, or signal changes (green, yellow, red).
@@ -253,7 +282,22 @@ Detailed documentation for each measure is coming soon.
 
 ## Release Notes
 
-### Version 1.9.1 (March 4, 2025)
+### Version 1.9.4 (November 24, 2025)
+
+#### Bug Fixes / Improvements:
+- Better housekeeping to reduce memory usage and added optional context manager support for `SignalDataProcessor`.
+
+### Version 1.9.3 (November 15, 2025)
+
+#### Bug Fixes / Improvements:
+- Added unit test for detector health, fixed a table-name bug, and updated dependencies.
+
+### Version 1.9.2 (November 15, 2025)
+
+#### Bug Fixes / Improvements:
+- Bug fix to work with the new `traffic-anomaly` API.
+
+  ### Version 1.9.1 (March 4, 2025)
 
 #### Bug Fixes / Improvements:
 
