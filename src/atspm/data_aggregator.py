@@ -37,9 +37,9 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
             FROM timeline WHERE EndTime IS NULL; """
         # And drop unmatched rows from timeline table
         query += f" DELETE FROM timeline WHERE EndTime IS NULL OR Duration < {kwargs['min_duration']}; "
-        # Drop EventId and Parameter from timeline table
-        query += " ALTER TABLE timeline DROP COLUMN EventId; "
+        # Drop columns not needed in saved output
         query += " ALTER TABLE timeline DROP COLUMN Parameter; "
+        query += " ALTER TABLE timeline DROP COLUMN EventId; "
 
     try:
         if to_sql: # return sql as string

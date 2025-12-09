@@ -79,6 +79,8 @@ def save_data(**kwargs):
         else:
             final_path = f"{prefix}{table_name}"
 
+        # Order exports consistently: timeline by StartTime, everything else by TimeStamp
+        order_clause = ' ORDER BY StartTime' if table_name == 'timeline' else ' ORDER BY TimeStamp'
         # Query to select all data from the table
-        query = f"COPY (SELECT * FROM {table_name} ORDER BY TimeStamp) TO '{output_dir}/{final_path}.{output_format}'"
+        query = f"COPY (SELECT * FROM {table_name}{order_clause}) TO '{output_dir}/{final_path}.{output_format}'"
         conn.query(query)

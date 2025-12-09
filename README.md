@@ -6,13 +6,13 @@
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/atspm)](https://pypi.org/project/atspm/)
 
 <!-- Repository Info -->
-[![GitHub License](https://img.shields.io/github/license/ShawnStrasser/ATSPM_Aggregation)](https://github.com/ShawnStrasser/ATSPM_Aggregation/blob/main/LICENSE)
-[![GitHub issues](https://img.shields.io/github/issues/ShawnStrasser/ATSPM_Aggregation)](https://github.com/ShawnStrasser/ATSPM_Aggregation/issues)
-[![GitHub stars](https://img.shields.io/github/stars/ShawnStrasser/ATSPM_Aggregation)](https://github.com/ShawnStrasser/ATSPM_Aggregation/stargazers)
+[![GitHub License](https://img.shields.io/github/license/ShawnStrasser/atspm)](https://github.com/ShawnStrasser/atspm/blob/main/LICENSE)
+[![GitHub issues](https://img.shields.io/github/issues/ShawnStrasser/atspm)](https://github.com/ShawnStrasser/atspm/issues)
+[![GitHub stars](https://img.shields.io/github/stars/ShawnStrasser/atspm)](https://github.com/ShawnStrasser/atspm/stargazers)
 
 <!-- Status -->
-[![Unit Tests](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/ShawnStrasser/ATSPM_Aggregation/actions/workflows/pr-tests.yml)
-[![codecov](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation/badge.svg)](https://codecov.io/gh/ShawnStrasser/ATSPM_Aggregation)
+[![Unit Tests](https://github.com/ShawnStrasser/atspm/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/ShawnStrasser/atspm/actions/workflows/pr-tests.yml)
+[![codecov](https://codecov.io/gh/ShawnStrasser/atspm/badge.svg)](https://codecov.io/gh/ShawnStrasser/atspm)
 
 `atspm` is a cutting-edge, lightweight Python package that transforms raw traffic signal controller event logs into meaningful Traffic Signal Performance Measures (TSPMs). These measures help transportation agencies continuously monitor and optimize signal timing perfomance, detect issues, and take proative actions - all in real-time. 
 
@@ -185,10 +185,10 @@ After running the code, your output folder (e.g., `test_folder/`) will contain t
 
 ```bash
 test_folder/
-├── actuations/
-├── arrival_on_green/
-├── split_failures/
-└── ...
+  actuations/
+  arrival_on_green/
+  split_failures/
+  ...
 ```
 Inside each folder, there will be a CSV file named `prefix_.csv` with the aggregated performance data. In production, the prefix could be named using the date/time of the run. Or you can output everything to a single folder.
 
@@ -260,27 +260,118 @@ Use of CSV files in production should be avoided, instead use [Parquet](https://
 
 ## Performance Measures
 
-The following performance measures are included:
+`atspm` produces two types of outputs:
 
-- Actuations
-- Arrival on Green
-- Communications (MAXVIEW Specific, otherwise "Has Data" tells when controller generated data)
-- Coordination (MAXTIME Specific)
-- Detector Health
-- Pedestrian Actuations, Services, and Estimated Volumes
-- Split Failures
-- Splits (MAXTIME Specific)
-- Terminations
-- Timeline Events
-- Yellow and Red Actuations
+- Binned aggregate tables, where each row represents a `bin_size`-minute interval
+- A non-binned `timeline` table with start/end times for key events
 
-*Coming Soon:*
-- Total Pedestrian Delay
-- Pedestrian Detector Health
+### Binned aggregate measures (per `bin_size` interval)
+
+All of the following tables include a `TimeStamp` column aligned to the start of each aggregation bin (for example, 15 minutes):
+
+- **Has Data** (`has_data`): Marks intervals where each controller produced sufficient data (proxy for controller online/communications health). Also used to filter incomplete periods for other measures.
+- **Actuations** (`actuations`): Detector actuations per detector and interval (with optional zero-filling of missing intervals).
+- **Arrival on Green** (`arrival_on_green`): Percentage of detector actuations that occur during green by phase.
+- **Yellow and Red Actuations** (`yellow_red`): Distribution of detector actuations relative to the start of red, including red offset and signal state.
+- **Split Failures** (`split_failures`): Green and red occupancies by phase (and optionally detector/approach) and a count of cycles that meet split-failure thresholds; can be returned either per cycle or aggregated into time bins.
+- **Terminations** (`terminations`): Counts of GapOut, MaxOut, and ForceOff terminations by phase.
+- **Splits** (`splits`): MAXTIME-specific split events (cycle length/split services) aggregated by interval.
+- **Communications** (`communications`): Vendor-specific communications statistics (for example, MAXVIEW event codes) averaged per interval.
+- **Coordination** (`coordination`): MAXTIME-specific coordination/pattern change events with both raw timestamps and binned timestamps.
+- **Pedestrian Measures** (`ped`, `unique_ped`, `full_ped`): Pedestrian services, actuations, unique actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations.
+- **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
+- **Detector Health** (`detector_health`): Time-series anomaly scores for detector actuations (using the `traffic-anomaly` package), typically run on binned `actuations` data.
+
+### Timeline events (non-binned)
+
+The **`timeline`** table is an event-level dimension for troubleshooting and visualization and is *not* binned into `bin_size` intervals. Each row includes:
+
+- `DeviceId`
+- `StartTime` / `EndTime`
+- `Duration` (seconds between `StartTime` and `EndTime`)
+- `EventClass` (for example, Green, Yellow, Ped Service, Split, Preempt)
+- `EventValue` (phase/overlap or a coded value, depending on `EventClass`)
+- `IsValid` (whether the start/end pair is complete)
+
+Passing `maxtime=True` to the `timeline` aggregation adds MAXTIME-only events such as splits and alarm group events (Event 175).
+
+The table below lists all `EventClass` values and their associated `EventValue` ranges produced by the `timeline` aggregation.
+
+<details>
+<summary>Timeline EventClass and EventValue reference</summary>
+
+| EventClass | EventValue |
+| --- | --- |
+| Green | 1-16 |
+| Yellow | 1-16 |
+| Red | 1-16 |
+| Ped Service | 1-16 |
+| Ped Delay | 1-16 |
+| Ped Omit | 1-16 |
+| Phase Call | 1-16 |
+| Phase Hold | 1-16 |
+| Phase Omit | 1-16 |
+| FYA | 1-16 |
+| Advance Warning Phase | 1-16 |
+| Overlap Green | 1-16 |
+| Overlap Trail Green | 1-16 |
+| Overlap Yellow | 1-16 |
+| Overlap Red | 1-16 |
+| Overlap Ped | 1-16 |
+| Advance Warning Overlap | 1-16 |
+| Split | 1-16 |
+| Pattern Change | 0-255 |
+| Coord | 0-255 |
+| Preempt | 1-16 |
+| TSP Call | 1-16 |
+| TSP Adjustment | 1-16 |
+| TSP Checkin | 1-16 |
+| TSP Service | 1-16 |
+| TSP Detector | 1-16 |
+| Watchdog | NULL |
+| Stuck Off | 1-128 |
+| Stuck On | 1-128 |
+| Erratic | 1-128 |
+| Transition | NULL |
+| Transition Shortway | NULL |
+| Transition Longway | NULL |
+| Transition Dwell | NULL |
+| Cycle Fault | NULL |
+| Coord Fault | NULL |
+| Coord Fail | NULL |
+| Cycle Fail | NULL |
+| MMU Flash | NULL |
+| Local Flash | NULL |
+| Flash - Other | NULL |
+| Flash - Not Flash | NULL |
+| Flash - Automatic | NULL |
+| Flash - Local Manual | NULL |
+| Flash - Fault Monitor | NULL |
+| Flash - MMU | NULL |
+| Flash - Startup | NULL |
+| Flash - Preempt | NULL |
+| Alarm Group State | NULL |
+| Power Failure | NULL |
+| Power Restored | NULL |
+| Stop Time Input | NULL |
+| Manual Control | NULL |
+| Aux Switch | 1-64 |
+| Interval Advance | NULL |
+| Special Function | 1-64 |
+
+</details>
 
 Detailed documentation for each measure is coming soon.
 
 ## Release Notes
+
+### Version 2.0.0 (December 9, 2025)
+
+#### Breaking Changes / Features:
+- Timeline now outputs `EventClass`/`EventValue` (bucketed `TimeStamp` removed) and retains `IsValid`; use `maxtime=True` to include MAXTIME-only events (Splits and Alarm event 175).
+- Removed `splits_only` in favor of the `maxtime` flag for timeline.
+- Added `ped_delay` aggregation that averages pedestrian delay from timeline using `EndTime` buckets at the configured `bin_size`.
+- Documented the timeline dimension table in this README (previously available via `SignalDataProcessor.timeline_description`).
 
 ### Version 1.9.4 (November 24, 2025)
 
@@ -307,7 +398,7 @@ Filling in missing time periods for detectors with zero actuations didn't work f
 known_detectors_df='path/to/known_detectors.csv'
 # or supply Pandas DataFrame directly
 
-from src.atspm import SignalDataProcessor, sample_data
+from atspm import SignalDataProcessor, sample_data
 
 # Set up all parameters
 params = {

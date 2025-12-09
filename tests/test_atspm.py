@@ -7,6 +7,7 @@ import duckdb
 import numpy
 import toml
 from src.atspm import __version__
+from pandas.api.types import is_integer_dtype, is_float_dtype
 
 def test_version_consistency():
   """Test that the version in __init__.py matches the one in pyproject.toml"""
@@ -43,7 +44,8 @@ TEST_PARAMS = {
       {'name': 'splits', 'params': {}},
       {'name': 'terminations', 'params': {}},
       {'name': 'yellow_red', 'params': {'latency_offset_seconds': 1.5, 'min_red_offset': -8}},
-      {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time':60}}, # events shorter than 0.2 seconds are removed. coord pattern change events assigned duration of 60s (for visualization)
+      {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time':60, 'maxtime': True}}, # events shorter than 0.2 seconds are removed. coord pattern change events assigned duration of 60s (for visualization)
+      {'name': 'ped_delay', 'params': {}},
   ]
 }
 
@@ -61,8 +63,16 @@ def processor_output():
 
 def compare_dataframes(df1, df2):
   """Compare two dataframes, ignoring row order"""
-  df1_sorted = df1.sort_values(by=list(df1.columns)).reset_index(drop=True)
-  df2_sorted = df2.sort_values(by=list(df2.columns)).reset_index(drop=True)
+  # Align numeric dtypes so nullable ints and floats compare cleanly
+  df1_aligned, df2_aligned = df1.copy(), df2.copy()
+  for col in set(df1_aligned.columns).intersection(df2_aligned.columns):
+    if is_integer_dtype(df1_aligned[col]) and is_float_dtype(df2_aligned[col]):
+      df1_aligned[col] = df1_aligned[col].astype('float64')
+    elif is_float_dtype(df1_aligned[col]) and is_integer_dtype(df2_aligned[col]):
+      df2_aligned[col] = df2_aligned[col].astype('float64')
+
+  df1_sorted = df1_aligned.sort_values(by=list(df1_aligned.columns)).reset_index(drop=True)
+  df2_sorted = df2_aligned.sort_values(by=list(df2_aligned.columns)).reset_index(drop=True)
   pd.testing.assert_frame_equal(df1_sorted, df2_sorted)
 
 def round_specific_columns(df, columns_to_round, tenths=2):
@@ -372,6 +382,19 @@ def test_oneshot_actuations_with_fill_in_missing(oneshot_processor_output_with_f
   
   # Compare the dataframes
   compare_dataframes(actuations_df, precalc_df)
+
+def test_ped_delay_output(processor_output):
+  """Test pedestrian delay aggregation output"""
+  output_file = os.path.join(TEST_PARAMS['output_dir'], f"{TEST_PARAMS['output_file_prefix']}ped_delay.parquet")
+  precalc_file = "tests/precalculated/ped_delay.parquet"
+
+  assert os.path.exists(output_file), "Ped delay output file not found"
+  assert os.path.exists(precalc_file), "Precalculated ped delay file not found"
+
+  output_df = pd.read_parquet(output_file)
+  precalc_df = pd.read_parquet(precalc_file)
+
+  compare_dataframes(output_df, precalc_df)
 
 @pytest.fixture(scope="module")
 def detector_health_output():

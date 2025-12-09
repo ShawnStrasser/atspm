@@ -48,7 +48,7 @@ class SignalDataProcessor:
         A list of dictionaries, each containing the name of an aggregation function and its parameters.
         Supported aggregations include: 'has_data', 'actuations', 'arrival_on_green', 'communications',
         'coordination', 'ped', 'unique_ped', 'full_ped', 'split_failures', 'splits', 'terminations',
-        'yellow_red', 'timeline', and potentially others.
+        'yellow_red', 'timeline', 'ped_delay', and potentially others.
 
     Methods
     -------
@@ -315,6 +315,14 @@ class SignalDataProcessor:
                 self.runtimes[aggregation['name']] = end_time - start_time
                 continue
             else:
+                # Dependencies: ped_delay requires the timeline table to exist
+                if aggregation['name'] == 'ped_delay' and not self.to_sql:
+                    has_timeline = self.conn.execute(
+                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'timeline'"
+                    ).fetchone()[0]
+                    if has_timeline == 0:
+                        raise ValueError("ped_delay aggregation requires the timeline table. Run timeline first.")
+
                 # Get parameters from the aggregation, or defaults
                 # Add the bin_size from init
                 params = aggregation.get('params', {}).copy()  # Need to copy to avoid modifying the original
@@ -423,7 +431,7 @@ class SignalDataProcessor:
             v_print("to_sql option is True, data will not be saved.", self.verbose)
             return
         save_data(**self.__dict__)
-        
+
     def __enter__(self):
         """Context manager entry."""
         return self
