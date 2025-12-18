@@ -14,35 +14,29 @@
 [![Unit Tests](https://github.com/ShawnStrasser/atspm/actions/workflows/pr-tests.yml/badge.svg)](https://github.com/ShawnStrasser/atspm/actions/workflows/pr-tests.yml)
 [![codecov](https://codecov.io/gh/ShawnStrasser/atspm/badge.svg)](https://codecov.io/gh/ShawnStrasser/atspm)
 
-`atspm` is a cutting-edge, lightweight Python package that transforms raw traffic signal controller event logs into meaningful Traffic Signal Performance Measures (TSPMs). These measures help transportation agencies continuously monitor and optimize signal timing perfomance, detect issues, and take proative actions - all in real-time. 
+`atspm` is a cutting-edge, lightweight Python package that transforms raw traffic signal controller event logs into aggregate performance measures and troubleshooting data which help transportation agencies continuously monitor and optimize signal timing performance, detect issues, and take proactive actions - all in real-time. `atspm` may be used by itself, embedded inside an ATMS application, or installed on an edge device.
 
-## What makes ATSPM Different from Traditional Methods like Synchro?
-Unlike traditional traffic signal optimization tools like Synchro, which rely on periodic manual data collection and simulation models, ATSPM uses real-time data directly collected from signal controllers installed at intersections (inside the ITS cabinets). This real-time reporting capability allows agencies to generate performance data for any selected time range, making it ideal for continuously monitoring signal perfromance and diagnosing problems before they escalate.
+## What Makes ATSPM Different?
+Traditional traffic signal optimization tools like Synchro rely on periodic manual data collection and simulation models. In contrast, `atspm` offers:
 
-Traditional signal retiming projects often depend on infrequent manual traffic studies and citizen complaints to detect problems. This reactive approach can delay maintencance, increase congestion and compromise road safety. On the other hand, ATSPMs enable proactive management by continuously collecting data and monitoring traffic signal performance, allowing agencies to solve issues before they lead to major traffic disruptions.
+*   **Real-Time Data:** Uses data directly collected from signal controllers at intersections.
+*   **Continuous Monitoring:** Allows agencies to generate performance data for any time range, diagnosing problems before they escalate.
+*   **Proactive Management:** Enables agencies to solve issues before they lead to major traffic disruptions, rather than relying on infrequent manual studies or citizen complaints.
+*   **Cost Efficiency:** With over 330,000 traffic signals in the US, continuous monitoring reduces the need for costly manual interventions (typically $4,500 per intersection every 3-5 years).
 
-The Python `atspm` project is inspired by UDOT ATSPM, (https://github.com/udotdevelopment/ATSPM) which is a full stack application for collecting data from signal controllers and visualizing it at the intersection level for detailed real-time troubleshooting and analysis. This atspm package focuses instead on aggregation and analytics, enabling more of a system-wide monitoring approach. Both projects are complimentary and can be deployed together.
+The Python `atspm` project is inspired by UDOT ATSPM, which is a full-stack application for intersection-level visualization. This package focuses on **aggregation and analytics**, enabling a system-wide monitoring approach. Both projects are complementary and can be deployed together.
 
-With over 330,000 traffic signals operating in the US, agencies typically retime these signals every three to five years at a cost of around $4,500 per intersetion. ATSPMs provide a significant improvement over this traditional model by offering continuous performance monitoring, reducing the need for costly manual interventions. (https://ops.fhwa.dot.gov/publications/fhwahop20002/ch2.htm)
-
-This project focuses only on transforming event logs into performance measures and troubleshooting data, it does include data visualization. Feel free to submit feature requests or bug reports or to reach out with questions or comments. Contributions are welcome! 
+This project focuses only on transforming event logs into performance measures and troubleshooting data; it does not include data visualization. Feel free to submit feature requests or bug reports or to reach out with questions or comments. Contributions are welcome! 
 
 ## Table of Contents
 
-- [What Makes ATSPM Different from Traditional Methods like Synchro?](#what-makes-atspm-different-from-traditional-methods-like-synchro)
+- [What Makes ATSPM Different?](#what-makes-atspm-different)
 - [Features](#features)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Usage Example](#usage-example)
-  - [1. Installing the Package](#1-installing-the-package)
-  - [2. Setting Parameters](#2-setting-parameters)
-  - [3. Performance Measures](#3-performance-measures)
-  - [4. Running the Processor](#4-running-the-processor)
-  - [5. Retrieving Results as a DataFrame](#5-retrieving-results-as-a-dataframe)
-  - [6. Advanced Usage - Detector Health and Pedestrian Volumes](#6-advanced-usage---detector-health-and-pedestrian-volumes)
-  - [7. Visualization Options](#7-visualization-options)
 - [Performance Measures](#performance-measures)
-- [Release Notes](#release-notes)
+- [Release Notes](CHANGELOG.md)
 - [Future Plans](#future-plans)
 - [Contributing](#contributing)
 - [License](#license)
@@ -62,7 +56,7 @@ pip install atspm
 ```
 Or pinned to a specific version:
 ```bash
-pip install atspm==1.x.x 
+pip install atspm==2.x.x 
 ```
 `atspm` works on Python 3.10-3.12 and is tested on Ubuntu, Windows, and MacOS.
 
@@ -73,190 +67,119 @@ The best place to start is with these self-contained example uses in Colab!<br>
 
 ## Usage Example
 
-### 1. Installing the Package
-In this section, we will walk through an example of using the `atspm` package to get started. This can easily be done using pip as shown above
-
-### 2. Setting Parameters
-
 The first step in running the tool is to define the parameters that will dictate how the data is processed. The parameters include global settings for input data, output formats, and options to select specific performance measures.
 
-- **Raw Data**: In the provided example, the raw event log data is provided through `sample_data.data`. In a real-world scenario, this would be a DataFrame or file path (CSV/Parquet/JSON) containing traffic event logs.
-- **Detector Configuration**: The `detector_config` defines how the detectors at the intersections are configured (e.g., their location, type).
-- **Bin Size**: Data is aggregated in 15-minute intervals (or bins), which is typical for analyzing traffic signals.
-- **Output Directory**: The results will be saved in a directory called `test_folder`. This could be customized based on the user's need.
-- **Output Format**: The output format is defined as CSV (`output_format: 'csv'`), but the package also supports other formats like Parquet or JSON.
-
-#### Example Parameters:
+### Exhaustive Parameter List
 
 ```python
+from atspm import SignalDataProcessor, sample_data
+
 params = {
-    'raw_data': sample_data.data,  # Path to raw event data
-    'detector_config': sample_data.config,
-    'bin_size': 15,  # 15-minute aggregation bins
-    'output_dir': 'test_folder',  # Output directory for results
-    'output_format': 'csv',  # Output format (CSV/Parquet/JSON)
-    'output_file_prefix': 'prefix_',  # Optional file prefix
-    'remove_incomplete': True,  # Remove periods with incomplete data
-    'verbose': 1,  # Verbosity level (1: performance logging)
-    'aggregations': [  # Performance measures to calculate
-        {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
-        {'name': 'actuations', 'params': {}},
-        {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
-        {'name': 'split_failures', 'params': {'red_time': 5, 'red_occupancy_threshold': 0.80, 'green_occupancy_threshold': 0.80}},
-        # ... other performance measures
-    ]
-}
-```
+    # --- Global Settings ---
+    'raw_data': sample_data.data,           # Path (CSV/Parquet/JSON) or Pandas DataFrame
+    'detector_config': sample_data.config,  # Path (CSV/Parquet/JSON) or Pandas DataFrame
+    'bin_size': 15,                         # Aggregation interval in minutes
+    'output_dir': 'test_folder',            # Directory to save results
+    'output_format': 'csv',                 # 'csv', 'parquet', or 'json'
+    'output_file_prefix': 'run1_',          # Optional prefix for output files
+    'output_to_separate_folders': True,     # Save each measure in its own subfolder
+    'remove_incomplete': True,              # Remove bins with insufficient data (requires 'has_data' agg)
+    'verbose': 1,                           # 0: Errors only, 1: Performance, 2: Debug
+    'to_sql': False,                        # If True, returns SQL strings instead of executing
 
-#### Detector configuration format
+    # --- Incremental Processing Settings ---
+    'unmatched_event_settings': {
+        'df_or_path': 'unmatched.csv',           # Track unmatched timeline events
+        'split_fail_df_or_path': 'sf_unmatched.csv', # Track unmatched split failures
+        'max_days_old': 7                        # Max age for tracking unmatched events
+    },
 
-Older examples sometimes refer to a `detector.config` file. In the current package, this is passed via the
-`detector_config` parameter and can be either a file path (CSV/Parquet/JSON) or a DataFrame / DuckDB relation.
-
-The detector configuration table must have the following columns:
-
-| Column      | Type   | Description                                                                 |
-|-------------|--------|-----------------------------------------------------------------------------|
-| `DeviceId`  | int    | Controller ID, matching the `DeviceId` in your raw event logs.             |
-| `Phase`     | int    | Phase number served by the detector (e.g., NEMA phase).                    |
-| `Parameter` | int    | Detector number / channel (matches the `Parameter` in the event log).      |
-| `Function`  | string | One of `Presence`, `Yellow_Red`, or `Advance`, which controls which        |
-|             |        | performance measures apply (e.g., split failures, yellow/red, arrivals on green). |
-
-A sample configuration is bundled with the package:
-
-```python
-from atspm import sample_data
-
-# sample_data.config is a DuckDB relation with the required columns
-sample_data.config
-```
-
-To use your own configuration, create a table with the schema above and pass either a path or DataFrame:
-
-```python
-params['detector_config'] = 'path/to/detector_config.parquet'  # or .csv, etc.
-# or
-import pandas as pd
-detector_df = pd.read_parquet('path/to/detector_config.parquet')
-params['detector_config'] = detector_df
-```
-
-### 3. Performance Measures
-
-The core of `atspm` is calculating various traffic signal performance measures from the raw event log data. Each measure is based on specific traffic signal controller events such as vehicle actuations, pedestrian button presses, or signal changes (green, yellow, red).
-
-#### Some Key Performance Measures Include:
-
-- **Actuations**: This tracks how many times vehicles trigger detectors at the intersection.
-- **Arrival on Green**: This measures the percentage of vehicles that arrive at an intersection when the signal is green, which is a key indicator of signal timing efficiency.
-- **Split Failures**: This measures the number of cycles where a vehicle was unable to pass through the intersection during the green phase (indicating potential issues with signal timing).
-- **Pedestrian Actuations and Volumes**: Measures how often pedestrian buttons are pressed and estimates pedestrian volumes at crossings.
-
-Each of these measures can be configured in the `params` dictionary. You can also add or remove measures based on your analysis needs.
-
-#### Example Configuration for Split Failures:
-
-```python
-{
-    'name': 'split_failures',
-    'params': {
-        'red_time': 5,  # Minimum red time for a split failure
-        'red_occupancy_threshold': 0.80,  # Threshold for red signal occupancy
-        'green_occupancy_threshold': 0.80,  # Threshold for green signal occupancy
-        'by_approach': True  # Aggregate split failures by approach
-    }
-}
-```
-### 4. Running the Processor
-
-After setting the parameters, the next step is to run the data processor. This involves loading the raw data, performing the aggregations, and saving the results.
-
-```python
-processor = SignalDataProcessor(**params)
-processor.load()  # Load raw event data
-processor.aggregate()  # Perform data aggregation
-processor.save()  # Save aggregated results to the output folder
-The `aggregate()` function computes the defined performance measures, while `save()` outputs the results to the specified folder.
-
-After running the code, your output folder (e.g., `test_folder/`) will contain the results of the analysis, with the data split into subdirectories based on the performance measures.
-```
-#### Output Example:
-
-```bash
-test_folder/
-  actuations/
-  arrival_on_green/
-  split_failures/
-  ...
-```
-Inside each folder, there will be a CSV file named `prefix_.csv` with the aggregated performance data. In production, the prefix could be named using the date/time of the run. Or you can output everything to a single folder.
-
-### 5. Retrieving Results as a DataFrame
-You can also manually query the results from the internal database and retrieve the data as a Pandas DataFrame for further analysis:
-```python
-# Query results from the processor and convert to a Pandas DataFrame
-results = processor.conn.query("SELECT * FROM actuations ORDER BY TimeStamp").df()
-print(results.head())
-```
-
-### 6. Advanced Usage - Detector health and Pedestrian Volumes
-### Detector Health
-
-Once you've collected a significant amount of data (e.g., 5 weeks), you can run advanced measures like **detector health**, which uses time series decomposition for anomaly detection. This feature allows you to identify malfunctioning detectors and impute missing data.
-
-### Pedestrian Volumes
-
-The package can also estimate pedestrian volumes from push button actuations using the methodology established in traffic studies. This is especially useful for understanding pedestrian activity at intersections.
-
-#### Example for Pedestrian Volumes:
-
-```python
-params = {
-    'raw_data': 'path/to/ped_data.parquet',
-    'bin_size': 15,  # Binned at 15-minute intervals
+    # --- Performance Measures (Aggregations) ---
     'aggregations': [
-        {'name': 'full_ped', 'params': {'seconds_between_actuations': 15, 'return_volumes': True}},
+        {
+            'name': 'has_data', 
+            'params': {
+                'no_data_min': 5,           # Min minutes of data required per bin
+                'min_data_points': 3        # Min events required per sub-bin
+            }
+        },
+        {
+            'name': 'actuations', 
+            'params': {
+                'fill_in_missing': True,    # Zero-fill missing detector intervals
+                'known_detectors_df_or_path': 'known_detectors.csv', # For zero-filling
+                'known_detectors_max_days_old': 2
+            }
+        },
+        {
+            'name': 'arrival_on_green', 
+            'params': {
+                'latency_offset_seconds': 0 # Adjust for detector-to-controller latency
+            }
+        },
+        {
+            'name': 'split_failures', 
+            'params': {
+                'red_time': 5,              # Min red time to consider a split failure
+                'red_occupancy_threshold': 0.80,
+                'green_occupancy_threshold': 0.80,
+                'by_approach': True         # Aggregate by approach instead of detector
+            }
+        },
+        {
+            'name': 'yellow_red', 
+            'params': {
+                'latency_offset_seconds': 0
+            }
+        },
+        {
+            'name': 'timeline', 
+            'params': {
+                'maxtime': True,            # Include MAXTIME-specific events
+                'min_duration': 1,          # Filter out events shorter than n seconds
+                'cushion_time': 1           # Padding for instant events (seconds)
+            }
+        },
+        {
+            'name': 'full_ped', 
+            'params': {
+                'seconds_between_actuations': 15, # Min time between unique peds
+                'return_volumes': True            # Estimate pedestrian volumes
+            }
+        },
+        {'name': 'ped_delay', 'params': {}},
+        {'name': 'terminations', 'params': {}},
+        {'name': 'splits', 'params': {}},
+        {'name': 'coordination', 'params': {}} # MAXTIME-specific
     ]
 }
 
+# Running the Processor
+# Using 'with' ensures the DuckDB connection is closed automatically
+with SignalDataProcessor(**params) as processor:
+    processor.load()      # Load raw data into DuckDB
+    processor.aggregate() # Run performance measures
+    processor.save()      # Save to output_dir
+
+# Alternatively, use the .run() method to perform all steps at once
+processor = SignalDataProcessor(**params)
+processor.run()
+```
+
+### Retrieving Results as a DataFrame
+You can query the internal DuckDB database directly. Note that the connection must be open to query data:
+```python
 processor = SignalDataProcessor(**params)
 processor.load()
-processor.aggregate()
-
-```
-The output will provide an estimated count of pedestrian volumes at various intersections.
-
-### 7. Visualization Options
-
-The data produced by `atspm` can easily be visualized using tools like Power BI, Plotly, or other data visualization platforms. This allows users to create dashboards showing key traffic metrics such as pedestrian volumes, signal timings, and detector health.
-
-#### Example Plot: Pedestrian Volumes Map
-
-You can generate interactive maps of pedestrian volumes using `plotly` to create a visual representation of pedestrian activity:
-
-```python
-import plotly.graph_objects as go
-
-fig = go.Figure(data=go.Scattermapbox(
-    lon=ped_data['Longitude'],
-    lat=ped_data['Latitude'],
-    text=ped_data['Name'] + '<br>Pedestrian Volume: ' + ped_data['PedVolumes'].astype(str),
-    mode='markers',
-    marker=dict(
-        size=ped_data['PedVolumes'] / 50,
-        color=ped_data['PedVolumes'],
-        colorscale='Viridis'
-    )
-))
-
-fig.update_layout(mapbox=dict(style='outdoors', zoom=5))
-fig.show()
+results = processor.conn.query("SELECT * FROM actuations ORDER BY TimeStamp").df()
+print(results.head())
+processor.conn.close() # Manually close if not using 'with'
 ```
 
-A good way to use the data is to output as parquet to separate folders, and then a data visualization tool like Power BI can read in all the files in each folder and create a dashboard. For example, see: [Oregon DOT ATSPM Dashboard](https://app.powerbigov.us/view?r=eyJrIjoiNzhmNTUzNDItMzkzNi00YzZhLTkyYWQtYzM1OGExMDk3Zjk1IiwidCI6IjI4YjBkMDEzLTQ2YmMtNGE2NC04ZDg2LTFjOGEzMWNmNTkwZCJ9)
+### Visualization Options
+The data produced by `atspm` can be visualized using Power BI, Plotly, or other platforms. For example, see the [Oregon DOT ATSPM Dashboard](https://app.powerbigov.us/view?r=eyJrIjoiNzhmNTUzNDItMzkzNi00YzZhLTkyYWQtYzM1OGExMDk3Zjk1IiwidCI6IjI4YjBkMDEzLTQ2YmMtNGE2NC04ZDg2LTFjOGEzMWNmNTkwZCJ9).
 
-Use of CSV files in production should be avoided, instead use [Parquet](https://parquet.apache.org/) file format, which is significantly faster, smaller, and enforces datatypes.
+> **Note:** Use [Parquet](https://parquet.apache.org/) format in production for significantly better performance and smaller file sizes.
 
 ## Performance Measures
 
@@ -276,9 +199,8 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Split Failures** (`split_failures`): Green and red occupancies by phase (and optionally detector/approach) and a count of cycles that meet split-failure thresholds; can be returned either per cycle or aggregated into time bins.
 - **Terminations** (`terminations`): Counts of GapOut, MaxOut, and ForceOff terminations by phase.
 - **Splits** (`splits`): MAXTIME-specific split events (cycle length/split services) aggregated by interval.
-- **Communications** (`communications`): Vendor-specific communications statistics (for example, MAXVIEW event codes) averaged per interval.
 - **Coordination** (`coordination`): MAXTIME-specific coordination/pattern change events with both raw timestamps and binned timestamps.
-- **Pedestrian Measures** (`ped`, `unique_ped`, `full_ped`): Pedestrian services, actuations, unique actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations.
+- **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations.
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
 - **Detector Health** (`detector_health`): Time-series anomaly scores for detector actuations (using the `traffic-anomaly` package), typically run on binned `actuations` data.
 
@@ -365,125 +287,7 @@ Detailed documentation for each measure is coming soon.
 
 ## Release Notes
 
-### Version 2.0.0 (December 9, 2025)
-
-#### Breaking Changes / Features:
-- Timeline now outputs `EventClass`/`EventValue` (bucketed `TimeStamp` removed) and retains `IsValid`; use `maxtime=True` to include MAXTIME-only events (Splits and Alarm event 175).
-- Removed `splits_only` in favor of the `maxtime` flag for timeline.
-- Added `ped_delay` aggregation that averages pedestrian delay from timeline using `EndTime` buckets at the configured `bin_size`.
-- Documented the timeline dimension table in this README (previously available via `SignalDataProcessor.timeline_description`).
-
-### Version 1.9.4 (November 24, 2025)
-
-#### Bug Fixes / Improvements:
-- Better housekeeping to reduce memory usage and added optional context manager support for `SignalDataProcessor`.
-
-### Version 1.9.3 (November 15, 2025)
-
-#### Bug Fixes / Improvements:
-- Added unit test for detector health, fixed a table-name bug, and updated dependencies.
-
-### Version 1.9.2 (November 15, 2025)
-
-#### Bug Fixes / Improvements:
-- Bug fix to work with the new `traffic-anomaly` API.
-
-  ### Version 1.9.1 (March 4, 2025)
-
-#### Bug Fixes / Improvements:
-
-Filling in missing time periods for detectors with zero actuations didn't work for incremental processing, this has been fixed by tracking a list of known detectors between each run, similar to the unmatched event tracking. So how it works is you provide a dataframe or file path of known detectors, it will filter out detectors last seen more than n days ago, and then will fill in missing time periods with zeros for the remaining detectors.
-
-```python
-known_detectors_df='path/to/known_detectors.csv'
-# or supply Pandas DataFrame directly
-
-from atspm import SignalDataProcessor, sample_data
-
-# Set up all parameters
-params = {
-    # Global Settings
-    'raw_data': sample_data.data,
-    'bin_size': 15, 
-# Performance Measures
-'aggregations': [
-    {'name': 'actuations', 'params': {
-            'fill_in_missing': True,
-            'known_detectors_df_or_path': known_detectors_df,
-            'known_detectors_max_days_old': 2
-    }}
-]
-}
-```
-
-After you run the processor, here's how to query the known detectors table:
-
-```python
-processor = SignalDataProcessor(**params)
-processor.load()
-processor.aggregate()
-# get all table names from the database
-known_detectors_df = processor.conn.query("SELECT * FROM known_detectors;").df()
-```
-
-Here's what the known detectors table could look like:
-
-| DeviceId | Detector | LastSeen |
-|----------|----------|----------|
-| 1        | 1        | 2025-03-04 00:00:00 |
-| 1        | 2        | 2025-03-04 00:00:00 |
-| 2        | 1        | 2025-03-04 00:00:00 |
-
-### Version 1.9.0 (February 19, 2025)
-
-#### New Features:
-
-Added option to fill in missing time periods for detector actuations with zeros. This makes it clearer when there are no actuations for a detector vs no data due to comm loss. Having zero-value actuation time periods also allows detector health to better identify anomalies due to stuck on/off detectors. 
-
-New timeline events:
-- Pedestrian Delay (from button bush to walk)
-- Overlap Events
-- Detector faults including stuck off and other
-- Phase Hold
-- Phase Omit
-- Ped Omit
-- Stop Time
-
-Also updated tests to include these new features. This is a lot of new events to process, so be sure to test thoroughly before deploying to production.
-
-### Version 1.8.4 (September 12, 2024)
-
-#### Bug Fixes / Improvements:
-Fixed a timestamp conversion issue when reading unmatched events from a csv file. Updated the unit tests to catch this issue in the future. 
-
-### Version 1.8.3 (September 5, 2024)
-
-#### Bug Fixes / Improvements:
-- Fixed estimated volumes for full_ped. Previously, it was converting 15-minute ped data to hourly by applying a rolling sum, then applying the quadratic transform to get volumes, and then converted back to 15-minute by undoing the rolling sum. The bug had to do with the data not always being ordered correctly before undoing the rolling sum. However, this update removes the undo rolling sum altogether and replaces it with multiplying hourly volumes by the ratio of 15-minute data to hourly data (more detail coming in the docs eventually). It seems to work much better now.
-
-### Version 1.8.2 (August 29, 2024)
-
-#### Bug Fixes / Improvements:
-- Fixed issue when passing unmatched events as a dataframe instead of a file path.
-- Added more tests for incremental runs when using dataframes. This is to mimic the ODOT production environment.
-
-### Version 1.8.0 (August 28, 2024)
-
-#### Bug Fixes / Improvements:
-- Removed unused code from yellow_red for efficiency, but it's still not passing tests for incremental processing.
-
-#### New Features:
-- Added special functions and advance warning to timeline events.
-
-### Version 1.7.0 (August 22, 2024)
-
-#### Bug Fixes / Improvements:
-- Fixed issue with incremental processing where cycles at the processing boundary were getting thrown out. This was NOT fixed yet for yellow_red!
-- Significant changes to split_failures to make incremental processing more robust. For example, cycle timestamps are now tied to the end of the red period, not the start of the green period. 
-
-#### New Features:
-- Support for incremental processing added for split_failures & arrival_on_green. (yellow_red isn't passing tests yet)
-- Added phase green, yellow & all red to timeline. 
+See [CHANGELOG.md](CHANGELOG.md) for a full history of changes.
 
 ## Future Plans
 
