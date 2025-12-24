@@ -99,16 +99,7 @@ Transition AS
 	FROM Transition1
 	WHERE Parameter IN (2, 3, 4)
 	),
-Splits AS --MAXTIME SPECIFIC
-	(
-	SELECT {{from_table}}.TimeStamp + INTERVAL ({{from_table}}.Parameter * -1) SECOND AS TimeStamp,
-	{{from_table}}.DeviceID, 
-	{{from_table}}.EventID,
-	{{from_table}}.Parameter,
-	{{from_table}}.TimeStamp AS EndTime
-	FROM {{from_table}}
-	WHERE {{from_table}}.EventId BETWEEN 300 AND 315
-	),
+{{ paired_event('Splits', 0, 12) }},
 TSP_AdjustEvents AS /* intermediate step */
 	(
 	SELECT *,
@@ -255,22 +246,7 @@ categories AS (
     (88, 'Erratic'),
     (21, 'Ped Service'),
     (131, 'Pattern Change'),
-    (300, 'Split'),
-    (301, 'Split'),
-    (302, 'Split'),
-    (303, 'Split'),
-    (304, 'Split'),
-    (305, 'Split'),
-    (306, 'Split'),
-    (307, 'Split'),
-    (308, 'Split'),
-    (309, 'Split'),
-    (310, 'Split'),
-    (311, 'Split'),
-    (312, 'Split'),
-    (313, 'Split'),
-    (314, 'Split'),
-    (315, 'Split'),
+    (0, 'Split'),
     (43, 'Phase Call'),
     (32, 'FYA'),
     (67, 'Overlap Ped'),
@@ -330,7 +306,7 @@ FROM (
     CASE
       WHEN t.EventId = 175 THEN t.Parameter
       WHEN a.alarm_type IS NOT NULL THEN NULL
-      WHEN c.EventClass = 'Split' THEN t.EventId - 299
+      WHEN c.EventClass = 'Split' THEN t.Parameter
       WHEN c.EventClass IN ('Ped Service', 'FYA', 'Phase Call', 'Preempt', 'TSP Call', 'TSP Checkin', 
                             'TSP Adjustment', 'TSP Service', 'TSP Detector', 'Overlap Ped', 
                             'Pattern Change', 'Erratic', 'Stuck On', 'Stuck Off', 'Other',
@@ -368,10 +344,8 @@ FROM (
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM PhaseCall
     UNION ALL
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM FYA
-    {% if maxtime|default(false) %}
-    UNION ALL 
-    SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, TRUE AS IsValid FROM Splits
-    {% endif %}
+    UNION ALL
+    SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM Splits
   	UNION ALL
   	SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM Green
   	UNION ALL
