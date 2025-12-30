@@ -32,11 +32,16 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
     # For timeline aggregation, get unmatched rows (EndTime is null) and put them into table 'unmatched'
     if aggregation_name == 'timeline':
         # Insert unmatched rows into unmatched_events table if unmatched_event_settings is provided
+        # Exclude synthetic EventId 901 (Phase Wait matched output - never unmatched by design)
+        # Include 902 (Phase Wait pending) - this is how we track 43s that need Phase Wait matching
+        # across chunks without interfering with PhaseCall matching of the same 43
         query += f""" CREATE TABLE unmatched_events AS
             SELECT StartTime AS TimeStamp, DeviceId, EventId, Parameter
-            FROM timeline WHERE EndTime IS NULL; """
-        # And drop unmatched rows from timeline table
-        query += f" DELETE FROM timeline WHERE EndTime IS NULL OR Duration < {kwargs['min_duration']}; "
+            FROM timeline
+            WHERE EndTime IS NULL AND EventId != 901; """
+        # Delete unmatched rows from timeline table, including 902 (Phase Wait state tracking)
+        # which is only used for incremental processing and should never appear in output
+        query += f" DELETE FROM timeline WHERE EndTime IS NULL OR Duration < {kwargs['min_duration']} OR EventId = 902; "
         # Drop columns not needed in saved output
         query += " ALTER TABLE timeline DROP COLUMN Parameter; "
         query += " ALTER TABLE timeline DROP COLUMN EventId; "

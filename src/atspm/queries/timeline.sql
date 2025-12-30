@@ -85,6 +85,56 @@ WITH
 {{ instant_event('PowerRestored', 184) }},
 
 
+-- Phase Wait Logic
+-- Pairs Phase Call (43) with the next Green Start (1) for same phase
+-- Measures how long a phase waits after being called until it gets green
+-- Uses EventId 902 for unmatched state tracking across incremental chunks
+-- Note: Fresh 43s come from raw_data, 902s come from unmatched_previous
+{% if unmatched %}
+-- Incremental mode with unmatched events: Select 43s and 1s from raw_data (fresh),
+-- and 902s from unmatched_previous. This prevents re-matching 43s that were already
+-- matched in a previous chunk (those 43s are in unmatched_previous for PhaseCall).
+PhaseWait_Source AS (
+    SELECT * FROM raw_data WHERE EventId IN (43, 1)
+    UNION ALL
+    SELECT * FROM unmatched_previous WHERE EventId IN (902, 1)
+),
+PhaseWait1 AS (
+    SELECT *,
+        LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS EndTime,
+        LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId
+    FROM PhaseWait_Source
+    WHERE EventId IN (43, 1, 902)
+),
+{% else %}
+-- Batch mode or first chunk: Use from_table directly
+PhaseWait1 AS (
+    SELECT *,
+        LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS EndTime,
+        LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId
+    FROM {{from_table}}
+    WHERE EventId IN (43, 1, 902)
+),
+{% endif %}
+PhaseWait_Matched AS (
+    -- Matched: 43 or 902 followed by 1, output as Phase Wait (901)
+    SELECT TimeStamp, DeviceID, 901 AS EventID, Parameter, EndTime, TRUE AS IsValid
+    FROM PhaseWait1
+    WHERE EventId IN (43, 902) AND NextEventId = 1
+),
+PhaseWait_Unmatched AS (
+    -- Unmatched: 43 or 902 at end of data (no next event), output as 902 for state tracking
+    SELECT TimeStamp, DeviceID, 902 AS EventID, Parameter, NULL::TIMESTAMP AS EndTime, FALSE AS IsValid
+    FROM PhaseWait1
+    WHERE EventId IN (43, 902) AND NextEventId IS NULL
+),
+PhaseWait AS (
+    SELECT * FROM PhaseWait_Matched
+    UNION ALL
+    SELECT * FROM PhaseWait_Unmatched
+),
+
+
 -- Core derived event windows
 Transition1 AS /* intermediate step */
 	(
@@ -237,6 +287,8 @@ alarm_definitions AS (
 ),
 categories AS (
   SELECT * FROM (VALUES
+    (901, 'Phase Wait'),
+    (902, 'Phase Wait'),
     (150, 'Transition'),
     (102, 'Preempt'),
     (84, 'Other'),
@@ -314,12 +366,14 @@ FROM (
                             'Advance Warning Overlap', 'Ped Delay', 'Overlap Green', 
                             'Overlap Trail Green', 'Overlap Yellow', 'Overlap Red',
                             'Phase Hold', 'Phase Omit', 'Ped Omit', 'Aux Switch',
-                            'Manual Control', 'Stop Time Input', 'Interval Advance') THEN t.Parameter
+                            'Manual Control', 'Stop Time Input', 'Interval Advance', 'Phase Wait') THEN t.Parameter
       ELSE NULL
     END AS EventValue
   FROM 
   (
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, TRUE AS IsValid FROM Transition
+    UNION ALL
+    SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM PhaseWait
     UNION ALL
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM Preempt
     UNION ALL 
