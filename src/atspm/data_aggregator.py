@@ -46,6 +46,52 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
         query += " ALTER TABLE timeline DROP COLUMN Parameter; "
         query += " ALTER TABLE timeline DROP COLUMN EventId; "
 
+    # For coordination_agg aggregation, insert synthetic state events into unmatched_events
+    # Uses synthetic EventIds 931-934 to carry coordination state across incremental runs:
+    # 931: Pattern, 932: CycleLength, 933: ActualCycleLength, 934: ActualOffset
+    if aggregation_name == 'coordination_agg':
+        query += """
+        INSERT INTO unmatched_events
+        SELECT 
+            MAX(TimeStamp) AS TimeStamp,
+            DeviceId,
+            931 AS EventId,
+            LAST(Pattern ORDER BY TimeStamp) AS Parameter
+        FROM coordination_agg
+        GROUP BY DeviceId
+        HAVING LAST(Pattern ORDER BY TimeStamp) != 0;
+        
+        INSERT INTO unmatched_events
+        SELECT 
+            MAX(TimeStamp) AS TimeStamp,
+            DeviceId,
+            932 AS EventId,
+            LAST(CycleLength ORDER BY TimeStamp) AS Parameter
+        FROM coordination_agg
+        GROUP BY DeviceId
+        HAVING LAST(CycleLength ORDER BY TimeStamp) != 0;
+        
+        INSERT INTO unmatched_events
+        SELECT 
+            MAX(TimeStamp) AS TimeStamp,
+            DeviceId,
+            933 AS EventId,
+            LAST(ActualCycleLength ORDER BY TimeStamp) AS Parameter
+        FROM coordination_agg
+        GROUP BY DeviceId
+        HAVING LAST(ActualCycleLength ORDER BY TimeStamp) != 0;
+        
+        INSERT INTO unmatched_events
+        SELECT 
+            MAX(TimeStamp) AS TimeStamp,
+            DeviceId,
+            934 AS EventId,
+            LAST(ActualOffset ORDER BY TimeStamp) AS Parameter
+        FROM coordination_agg
+        GROUP BY DeviceId
+        HAVING LAST(ActualOffset ORDER BY TimeStamp) != 0;
+        """
+
     try:
         if to_sql: # return sql as string
             return query

@@ -147,10 +147,19 @@ params = {
                 'return_volumes': True            # Estimate pedestrian volumes
             }
         },
+        {
+            'name': 'phase_wait',
+            'params': {
+                'preempt_recovery_seconds': 120, # Time after preempt ends to exclude
+                'assumed_cycle_length': 140,     # Fallback cycle length (Free mode)
+                'skip_multiplier': 1.5           # Threshold for skipped phases
+            }
+        },
         {'name': 'ped_delay', 'params': {}},
         {'name': 'terminations', 'params': {}},
         {'name': 'splits', 'params': {}},
-        {'name': 'coordination', 'params': {}} # MAXTIME-specific
+        {'name': 'coordination', 'params': {}}, # MAXTIME-specific
+        {'name': 'coordination_agg', 'params': {}} # General coordination state (Pattern, Cycle, etc.)
     ]
 }
 
@@ -199,9 +208,11 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Split Failures** (`split_failures`): Green and red occupancies by phase (and optionally detector/approach) and a count of cycles that meet split-failure thresholds; can be returned either per cycle or aggregated into time bins.
 - **Terminations** (`terminations`): Counts of GapOut, MaxOut, and ForceOff terminations by phase.
 - **Splits** (`splits`): MAXTIME-specific split events (cycle length/split services) aggregated by interval.
-- **Coordination** (`coordination`): MAXTIME-specific coordination/pattern change events with both raw timestamps and binned timestamps.
+- **Coordination** (`coordination`): Raw events for Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME). Includes both `Raw_TimeStamp` and binned `TimeStamp`.
+- **Coordination Aggregate** (`coordination_agg`): Binned coordination state per interval. Provides the active Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME) for every bin using fill-forward logic.
 - **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations.
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
+- **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length).
 - **Detector Health** (`detector_health`): Time-series anomaly scores for detector actuations (using the `traffic-anomaly` package), typically run on binned `actuations` data.
 
 ### Timeline events (non-binned)
@@ -243,6 +254,7 @@ The table below lists all `EventClass` values and their associated `EventValue` 
 | Advance Warning Overlap | 1-16 |
 | Split | 1-16 |
 | Pattern Change | 0-255 |
+| Cycle Length Change | 0-255 |
 | Coord | 0-255 |
 | Preempt | 1-16 |
 | TSP Call | 1-16 |

@@ -10,4 +10,4 @@ SELECT
 FROM 
 	{{from_table}}
 WHERE
-	EventId IN(131,132,316,318)
+	EventId IN(131,132,316,318) -- Pattern Change, Cycle Length Change, Actual Cycle Length (MAXTIME), Actual Cycle Offset (MAXTIME)

@@ -46,10 +46,13 @@ TEST_PARAMS = {
       {'name': 'yellow_red', 'params': {'latency_offset_seconds': 1.5, 'min_red_offset': -8}},
       {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time':60, 'maxtime': True}}, # events shorter than 0.2 seconds are removed. coord pattern change events assigned duration of 60s (for visualization)
       {'name': 'ped_delay', 'params': {}},
+      {'name': 'phase_wait', 'params': {'preempt_recovery_seconds': 120, 'assumed_cycle_length': 140, 'skip_multiplier': 1.5}},
+      {'name': 'coordination_agg', 'params': {}},  # Requires has_data and timeline
   ]
 }
 
 # Define aggregations that can be run incrementally
+# coordination_agg requires fill-forward of state across time buckets, which doesn't work well incrementally
 INCREMENTAL_AGGREGATIONS = [agg for agg in TEST_PARAMS['aggregations'] if agg['name'] not in ['unique_ped', 'full_ped', 'yellow_red']]
 
 @pytest.fixture(scope="module")

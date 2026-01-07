@@ -44,7 +44,7 @@ def save_data(**kwargs):
     # Iterate over all tables
     for table_name in table_names:
         table_name = table_name[0]
-        # skip if table name is raw_data or detector_config
+        # skip if table name is raw_data or detector_config or internal state tables
         if table_name in ['raw_data', 'detector_config', 'unmatched_previous', 'sf_unmatched_previous', 'sf_final', 'current_detectors', 'known_detectors_previous']:
             continue
             

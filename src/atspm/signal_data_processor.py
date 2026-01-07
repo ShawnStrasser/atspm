@@ -47,8 +47,8 @@ class SignalDataProcessor:
     aggregations : list of dict
         A list of dictionaries, each containing the name of an aggregation function and its parameters.
         Supported aggregations include: 'has_data', 'actuations', 'arrival_on_green', 'communications',
-        'coordination', 'ped', 'unique_ped', 'full_ped', 'split_failures', 'splits', 'terminations',
-        'yellow_red', 'timeline', 'ped_delay', and potentially others.
+        'coordination', 'coordination_agg', 'ped', 'unique_ped', 'full_ped', 'split_failures', 'splits', 'terminations',
+        'yellow_red', 'timeline', 'ped_delay', 'phase_wait', and potentially others.
 
     Methods
     -------
@@ -315,13 +315,21 @@ class SignalDataProcessor:
                 self.runtimes[aggregation['name']] = end_time - start_time
                 continue
             else:
-                # Dependencies: ped_delay requires the timeline table to exist
-                if aggregation['name'] == 'ped_delay' and not self.to_sql:
+                # Dependencies: ped_delay, phase_wait, and coordination_agg require the timeline table to exist
+                if aggregation['name'] in ('ped_delay', 'phase_wait', 'coordination_agg') and not self.to_sql:
                     has_timeline = self.conn.execute(
                         "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'timeline'"
                     ).fetchone()[0]
                     if has_timeline == 0:
-                        raise ValueError("ped_delay aggregation requires the timeline table. Run timeline first.")
+                        raise ValueError(f"{aggregation['name']} aggregation requires the timeline table. Run timeline first.")
+                
+                # Dependencies: coordination_agg also requires the has_data table to exist
+                if aggregation['name'] == 'coordination_agg' and not self.to_sql:
+                    has_has_data = self.conn.execute(
+                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'has_data'"
+                    ).fetchone()[0]
+                    if has_has_data == 0:
+                        raise ValueError(f"{aggregation['name']} aggregation requires the has_data table. Run has_data first.")
 
                 # Get parameters from the aggregation, or defaults
                 # Add the bin_size from init
@@ -330,6 +338,17 @@ class SignalDataProcessor:
                 params['from_table'] = 'raw_data'
                 params['remove_incomplete'] = self.remove_incomplete
                 
+                #######################
+                ### Phase Wait ###
+                # Set defaults for phase_wait aggregation
+                if aggregation['name'] == 'phase_wait':
+                    if 'preempt_recovery_seconds' not in params:
+                        params['preempt_recovery_seconds'] = 120
+                    if 'assumed_cycle_length' not in params:
+                        params['assumed_cycle_length'] = 140
+                    if 'skip_multiplier' not in params:
+                        params['skip_multiplier'] = 1.5
+
                 #######################
                 ### Full Pedestrian ###
                 # Add min_timestamp and max_timestamp to params if detector_faults or full_ped
@@ -357,6 +376,10 @@ class SignalDataProcessor:
                 # Add known_detectors_found flag for actuations aggregation
                 if aggregation['name'] == 'actuations':
                     params['known_detectors_found'] = self.known_detectors_found
+                
+                # Add coord_state_found flag for coordination_agg aggregation (uses unmatched events)
+                if aggregation['name'] == 'coordination_agg':
+                    params['coord_state_found'] = self.unmatched_found
                 
                 # Output sql or execute query
                 self.sql_queries[aggregation['name']] = aggregate_data(

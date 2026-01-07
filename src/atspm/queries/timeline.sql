@@ -83,6 +83,7 @@ WITH
 {{ instant_event('IntervalAdvance', 179) }},
 {{ instant_event('PowerFailure', 182) }},
 {{ instant_event('PowerRestored', 184) }},
+{{ instant_event('CycleLengthChange', 132) }},
 
 
 -- Phase Wait Logic
@@ -329,6 +330,7 @@ categories AS (
     (182, 'Power Failure'),
     (184, 'Power Restored'),
     (202, 'Aux Switch'),
+    (132, 'Cycle Length Change'),
     (22, 'Ped Delay')--just for unmatched events, 22 is begin FDW, but 21 (begin walk) is already covered
   ) AS t(EventId, EventClass)
 )
@@ -366,7 +368,8 @@ FROM (
                             'Advance Warning Overlap', 'Ped Delay', 'Overlap Green', 
                             'Overlap Trail Green', 'Overlap Yellow', 'Overlap Red',
                             'Phase Hold', 'Phase Omit', 'Ped Omit', 'Aux Switch',
-                            'Manual Control', 'Stop Time Input', 'Interval Advance', 'Phase Wait') THEN t.Parameter
+                            'Manual Control', 'Stop Time Input', 'Interval Advance', 'Phase Wait',
+                            'Cycle Length Change') THEN t.Parameter
       ELSE NULL
     END AS EventValue
   FROM 
@@ -442,6 +445,8 @@ FROM (
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM ManualControl
     UNION ALL
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM IntervalAdvance
+    UNION ALL
+    SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM CycleLengthChange
     UNION ALL
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM AlarmStatus
   ) t

@@ -1,5 +1,12 @@
 # Release Notes
 
+### Version 2.1.0 (January 6, 2026)
+
+#### New Features:
+- Added **Coordination Aggregate (`coordination_agg`)**: Binned state for active Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME). Includes incremental support with fill-forward logic.
+- Added **Phase Wait (`phase_wait`)**: Average wait time for green after a phase call. Features configurable preempt recovery time, assumed cycle length for free mode, and skip threshold.
+- Added **Cycle Length Change (132)** to the `timeline` aggregation.
+
 ### Version 2.0.0 (December 9, 2025)
 
 #### Breaking Changes / Features:
