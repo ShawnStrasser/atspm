@@ -118,9 +118,12 @@ add_rolling_sum AS (
 ),
 
 --Transform to volumes
---Estimated_Hourly = A90C * Hourly_Actuations + A90C_squared * Hourly_Actuations^2 + Intercept
---where A90C = 0.7167, A90C_squared = 0.0599, Intercept = 1.1063
---See docs for explanation. NOTE: Need to write docs!
+--This formula estimates hourly pedestrian volumes based on unique actuations (A90C) over a 1 hour window.
+--The coefficients are derived from the study: https://doi.org/10.1177/0361198121994126
+--Formula: Volume = 0.7167 * A90C + 0.0599 * A90C^2 + 1.1063
+--A90C (Unique Actuations) is calculated as a rolling sum over 1 hour (4 x 15-min bins).
+--The estimated hourly volume is then distributed back to the 15-minute bins proportional to the actuations in each bin,
+--plus a quarter of the intercept value (1.1063 / 4).
 volumes AS (
     SELECT
         *,
