@@ -279,6 +279,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Communications** (`communications`): Vendor-specific communications statistics (for example, MAXVIEW event codes) averaged per interval.
 - **Coordination** (`coordination`): MAXTIME-specific coordination/pattern change events with both raw timestamps and binned timestamps.
 - **Pedestrian Measures** (`ped`, `unique_ped`, `full_ped`): Pedestrian services, actuations, unique actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations.
+    - **Note on Estimated Volumes:** Hourly volumes are estimated from unique actuations using coefficients from Kothuri et al. (DOI: 10.1177/0361198121994126) and distributed back to the aggregation bins.
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
 - **Detector Health** (`detector_health`): Time-series anomaly scores for detector actuations (using the `traffic-anomaly` package), typically run on binned `actuations` data.
 
