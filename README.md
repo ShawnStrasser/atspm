@@ -297,6 +297,148 @@ The table below lists all `EventClass` values and their associated `EventValue` 
 
 Detailed documentation for each measure is coming soon.
 
+## Output Schemas
+
+The following tables are produced by the aggregation process, depending on the configured list of aggregations.
+
+### Primary Performance Measures
+
+#### actuations
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Detector` (INT16): Detector number.
+*   `Total` (INT16): Total count of actuations.
+
+#### arrival_on_green
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Phase` (INT16): Phase number.
+*   `Total_Actuations` (BIGINT): Total actuations on the advance detector.
+*   `Percent_AOG` (FLOAT): Fraction of actuations arriving on green (0.0 - 1.0).
+
+#### communications
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `EventId` (INT16): Event ID being tracked (e.g., 400).
+*   `Average` (FLOAT): Average value of the parameter.
+
+#### coordination
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `Raw_TimeStamp` (DATETIME): Exact timestamp of the event.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `EventId` (INT16): Event ID (131, 132, 316, 318).
+*   `Parameter` (INT16): Value associated with the event (Pattern, Cycle Length, etc.).
+
+#### coordination_agg
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Pattern` (INT16): Pattern number in effect.
+*   `CycleLength` (INT16): Cycle length in effect.
+*   `ActualCycleLength` (INT16): Measured cycle length.
+*   `ActualOffset` (INT16): Measured offset.
+
+#### full_ped
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Phase` (INT16): Phase number.
+*   `PedServices` (INT16): Count of ped services.
+*   `PedActuation` (INT16): Count of ped actuations.
+*   `Unique_Actuations` (INT16): Count of unique ped actuations (filtered for duplicates).
+*   `Estimated_Volumes` (FLOAT): Estimated pedestrian volume (only present if `return_volumes=True`).
+
+#### has_data
+*   `TimeStamp` (DATETIME): Bin start time where data exists.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+
+#### ped
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Phase` (INT16): Phase number.
+*   `PedServices` (INT16): Count of ped services.
+*   `PedActuation` (INT16): Count of ped actuations.
+
+#### ped_delay
+*   `TimeStamp` (DATETIME): Bin start time (rounded from EndTime of walk).
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Phase` (INT16): Phase number.
+*   `AvgPedDelay` (FLOAT): Average delay in seconds.
+*   `Samples` (BIGINT): Number of ped delay events.
+
+#### phase_wait
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Phase` (INT16): Phase number.
+*   `AvgPhaseWait` (FLOAT): Average wait time in seconds.
+*   `TotalSkips` (BIGINT): Count of skipped phases.
+
+#### splits
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `EventId` (INT16): Split event ID (300-317).
+*   `Services` (INT16): Number of times the split occurred.
+*   `Average_Split` (FLOAT): Average split duration.
+
+#### split_failures
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Detector` (INT16): Detector number (if `by_approach=False`).
+*   `Phase` (INT16): Phase number.
+*   `Green_Time` (FLOAT): Average Green time.
+*   `Green_Occupancy` (FLOAT): Average Green occupancy (0.0 - 1.0).
+*   `Red_Occupancy` (FLOAT): Average Red occupancy (0.0 - 1.0).
+*   `Split_Failure` (INT16): Count of split failures.
+
+#### terminations
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Phase` (INT16): Phase number.
+*   `PerformanceMeasure` (TEXT): 'GapOut', 'MaxOut', or 'ForceOff'.
+*   `Total` (INT16): Count of terminations.
+
+#### timeline
+*   `StartTime` (DATETIME): Event start time.
+*   `EndTime` (DATETIME): Event end time (or next event time).
+*   `Duration` (FLOAT): Duration in seconds.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `IsValid` (BOOLEAN): Validity flag for the interval.
+*   `EventClass` (TEXT): Description of the event class.
+*   `EventValue` (INTEGER): Parameter value (Phase, Detector, etc.).
+
+#### unique_ped
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Phase` (INT16): Phase number.
+*   `Unique_Actuations` (INT16): Count of unique actuations.
+
+#### yellow_red
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Phase` (INT16): Phase number.
+*   `Signal_State` (INTEGER): Signal state during actuation.
+*   `Red_Offset` (FLOAT): Time into red (seconds).
+*   `Count` (FLOAT): Number of actuations.
+
+### Supporting State Tables
+(Used primarily for incremental processing)
+
+#### known_detectors
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Detector` (INTEGER): Detector number.
+*   `LastSeen` (DATETIME): Timestamp when detector was last seen.
+
+#### sf_unmatched
+(Split Failures Unmatched)
+*   `TimeStamp` (DATETIME): Timestamp of the event.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `EventId` (INT16): Event ID.
+*   `Detector` (INT16): Detector number.
+*   `Phase` (INT16): Phase number.
+
+#### unmatched_events
+*   `TimeStamp` (DATETIME): Timestamp of the event.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `EventId` (INT16): Event ID.
+*   `Parameter` (INT16): Parameter value.
 ## Release Notes
 
 See [CHANGELOG.md](CHANGELOG.md) for a full history of changes.
