@@ -490,5 +490,154 @@ def test_detector_health(detector_health_output):
   # Compare the dataframes
   compare_dataframes(detector_health_df, precalc_df)
 
+
+# =============================================================================
+# PHASE WAIT LOGIC TESTS
+# =============================================================================
+
+@pytest.fixture(scope="module")
+def phase_wait_synthetic_output():
+  """
+  Fixture to test Phase Wait logic with synthetic data covering all scenarios:
+  1. Simple 43→1: Phase call followed by green
+  2. 43→44: Dropped call (should NOT create Phase Wait)
+  3. 43→44→43→1: Dropped call followed by new call that succeeds
+  4. Persistent call: 43→1→7→1 (creates 2 Phase Waits)
+  5. Persistent call: 43→1→7→1→7→1 (creates 3 Phase Waits)
+  6. 43→1→7→44→43→1: Call drops then new call (2 Phase Waits)
+  7. Multiple drops: 43→44→43→44→43→1 (only last 43 counts)
+  8. Multi-device: Same logic on different device
+  9. Chunk boundary: Tests state tracking across chunks
+  10. Green without call: Should NOT create Phase Wait
+  """
+  # Import the synthetic test data
+  from tests.phase_wait_test_data import raw_df, expected_df
+  
+  # Run the timeline aggregation
+  params = {
+    'raw_data': raw_df,
+    'bin_size': 15,
+    'verbose': 0,
+    'aggregations': [
+      {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
+    ]
+  }
+  
+  processor = SignalDataProcessor(**params)
+  processor.load()
+  processor.aggregate()
+  
+  # Get the timeline results
+  result = processor.conn.query("SELECT * FROM timeline WHERE EventClass = 'Phase Wait' AND IsValid = TRUE").df()
+  processor.close()
+  
+  return result, expected_df
+
+
+def test_phase_wait_synthetic(phase_wait_synthetic_output):
+  """Test Phase Wait logic with synthetic data covering all scenarios"""
+  actual_df, expected_df = phase_wait_synthetic_output
+  
+  # Prepare dataframes for comparison
+  actual_sorted = actual_df[['DeviceId', 'StartTime', 'EndTime', 'Duration', 'EventValue']].sort_values(
+      ['DeviceId', 'StartTime']).reset_index(drop=True)
+  expected_sorted = expected_df[['DeviceId', 'StartTime', 'EndTime', 'Duration', 'EventValue']].sort_values(
+      ['DeviceId', 'StartTime']).reset_index(drop=True)
+  
+  # Align dtypes
+  actual_sorted['Duration'] = actual_sorted['Duration'].astype('float32')
+  expected_sorted['Duration'] = expected_sorted['Duration'].astype('float32')
+  actual_sorted['EventValue'] = actual_sorted['EventValue'].astype('int16')
+  expected_sorted['EventValue'] = expected_sorted['EventValue'].astype('int16')
+  
+  # Compare
+  pd.testing.assert_frame_equal(actual_sorted, expected_sorted, check_dtype=False)
+
+
+@pytest.fixture(scope="module")
+def phase_wait_incremental_output():
+  """
+  Fixture to test Phase Wait logic with incremental processing.
+  Splits synthetic data into chunks to test state tracking (902, 903, 904 events).
+  """
+  from tests.phase_wait_test_data import raw_df, expected_df
+  from datetime import datetime, timedelta
+  
+  # Define chunk boundaries based on timestamps in synthetic data
+  # The data runs from 08:00:00 to ~08:20:10
+  # We'll split into 3 chunks to test state tracking
+  base_time = datetime(2024, 5, 14, 8, 0, 0)
+  
+  chunks = {
+    '1_chunk': raw_df[raw_df['TimeStamp'] < base_time + timedelta(minutes=8)].copy(),   # 08:00:00 - 08:07:59
+    '2_chunk': raw_df[(raw_df['TimeStamp'] >= base_time + timedelta(minutes=8)) & 
+                       (raw_df['TimeStamp'] < base_time + timedelta(minutes=15))].copy(),  # 08:08:00 - 08:14:59
+    '3_chunk': raw_df[raw_df['TimeStamp'] >= base_time + timedelta(minutes=15)].copy(),  # 08:15:00+
+  }
+  
+  output_dir = 'tests/test_phase_wait_incremental'
+  os.makedirs(output_dir, exist_ok=True)
+  
+  all_results = []
+  
+  for i, (chunk_name, chunk_data) in enumerate(chunks.items()):
+    params = {
+      'raw_data': chunk_data,
+      'bin_size': 15,
+      'verbose': 0,
+      'output_dir': output_dir,
+      'output_file_prefix': f"{chunk_name}_",
+      'output_format': 'parquet',
+      'output_to_separate_folders': False,
+      'unmatched_event_settings': {
+        'df_or_path': f"{output_dir}/unmatched.parquet",
+        'max_days_old': 14
+      },
+      'aggregations': [
+        {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
+      ]
+    }
+    
+    processor = SignalDataProcessor(**params)
+    processor.run()
+  
+  # Combine all chunk results
+  for chunk_name in chunks.keys():
+    output_file = f"{output_dir}/{chunk_name}_timeline.parquet"
+    if os.path.exists(output_file):
+      df = pd.read_parquet(output_file)
+      all_results.append(df)
+  
+  combined_df = pd.concat(all_results).drop_duplicates().reset_index(drop=True)
+  
+  # Filter to valid Phase Wait events
+  phase_wait_df = combined_df[(combined_df['EventClass'] == 'Phase Wait') & (combined_df['IsValid'] == True)]
+  
+  yield phase_wait_df, expected_df
+  
+  # Cleanup
+  shutil.rmtree(output_dir)
+
+
+def test_phase_wait_incremental(phase_wait_incremental_output):
+  """Test Phase Wait logic with incremental processing"""
+  actual_df, expected_df = phase_wait_incremental_output
+  
+  # Prepare dataframes for comparison
+  actual_sorted = actual_df[['DeviceId', 'StartTime', 'EndTime', 'Duration', 'EventValue']].sort_values(
+      ['DeviceId', 'StartTime']).reset_index(drop=True)
+  expected_sorted = expected_df[['DeviceId', 'StartTime', 'EndTime', 'Duration', 'EventValue']].sort_values(
+      ['DeviceId', 'StartTime']).reset_index(drop=True)
+  
+  # Align dtypes
+  actual_sorted['Duration'] = actual_sorted['Duration'].astype('float32')
+  expected_sorted['Duration'] = expected_sorted['Duration'].astype('float32')
+  actual_sorted['EventValue'] = actual_sorted['EventValue'].astype('int16')
+  expected_sorted['EventValue'] = expected_sorted['EventValue'].astype('int16')
+  
+  # Compare
+  pd.testing.assert_frame_equal(actual_sorted, expected_sorted, check_dtype=False)
+
+
 if __name__ == "__main__":
   pytest.main([__file__])

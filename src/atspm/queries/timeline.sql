@@ -86,53 +86,117 @@ WITH
 {{ instant_event('CycleLengthChange', 132) }},
 
 
--- Phase Wait Logic
--- Pairs Phase Call (43) with the next Green Start (1) for same phase
--- Measures how long a phase waits after being called until it gets green
--- Uses EventId 902 for unmatched state tracking across incremental chunks
--- Note: Fresh 43s come from raw_data, 902s come from unmatched_previous
+-- Phase Wait Logic (Revised)
+-- Measures how long a phase waits after being called until it gets green.
+-- Key events: 43=Phase Call Registered, 44=Phase Call Dropped, 1=Green Start, 7=Green End
+--
+-- Rules:
+-- 1. 43→1 (no 44 in between): Valid Phase Wait from 43 to 1
+-- 2. 43→44: Dropped call, NO Phase Wait event (call cancelled before green)
+-- 3. 43→1→7→1 (no 44 between 7 and next 1): Persistent call, creates ANOTHER Phase Wait from 7 to 1
+-- 4. 43→1→7→44: Call drops after green, no more Phase Wait events from this call
+--
+-- State tracking for incremental processing:
+-- - EventId 902: Unmatched Phase Call (43 waiting for resolution)
+-- - EventId 903: Unmatched Green End with active call (7 waiting for next event)
+-- - EventId 904: Green currently active marker (1 at end of chunk, waiting for 7 in next chunk)
+--                This marker tells the next chunk that when a 7 arrives, the call was active
+--
+-- The algorithm:
+-- 1. Filter to relevant events (43, 44, 1, 7)
+-- 2. Use LEAD to see next event
+-- 3. Track call state: call is active if most recent 43/44 was 43 (not 44)
+-- 4. 43→1 creates Phase Wait (and call state becomes active)
+-- 5. 7→1 creates Phase Wait ONLY if call is still active (no 44 since last 43)
 {% if unmatched %}
--- Incremental mode with unmatched events: Select 43s and 1s from raw_data (fresh),
--- and 902s from unmatched_previous. This prevents re-matching 43s that were already
--- matched in a previous chunk (those 43s are in unmatched_previous for PhaseCall).
+-- Incremental mode: Include 43, 44, 1, 7 from raw_data, and 902/903/904 from unmatched_previous
 PhaseWait_Source AS (
-    SELECT * FROM raw_data WHERE EventId IN (43, 1)
+    SELECT * FROM raw_data WHERE EventId IN (43, 44, 1, 7)
     UNION ALL
-    SELECT * FROM unmatched_previous WHERE EventId IN (902, 1)
+    SELECT * FROM unmatched_previous WHERE EventId IN (902, 903, 904)
 ),
-PhaseWait1 AS (
+PhaseWait_WithCallState AS (
     SELECT *,
-        LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS EndTime,
-        LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId
+        LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId,
+        LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextTime,
+        -- Find the most recent call state change (43=call active, 44=call inactive)
+        -- 902 from previous chunk means an unmatched call is active
+        -- 903 from previous chunk means green end with active call (call is still active)
+        -- 904 from previous chunk means a green was active and call persisted
+        LAST_VALUE(CASE WHEN EventId IN (43, 44, 902, 903, 904) THEN EventId END IGNORE NULLS) 
+            OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId 
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS LastCallChangeEvent
     FROM PhaseWait_Source
-    WHERE EventId IN (43, 1, 902)
+    WHERE EventId IN (43, 44, 1, 7, 902, 903, 904)
 ),
 {% else %}
 -- Batch mode or first chunk: Use from_table directly
-PhaseWait1 AS (
+PhaseWait_WithCallState AS (
     SELECT *,
-        LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS EndTime,
-        LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId
+        LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId,
+        LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextTime,
+        -- Find the most recent call state change (43=call active, 44=call inactive)
+        LAST_VALUE(CASE WHEN EventId IN (43, 44) THEN EventId END IGNORE NULLS) 
+            OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId 
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS LastCallChangeEvent
     FROM {{from_table}}
-    WHERE EventId IN (43, 1, 902)
+    WHERE EventId IN (43, 44, 1, 7, 902, 903, 904)
 ),
 {% endif %}
-PhaseWait_Matched AS (
-    -- Matched: 43 or 902 followed by 1, output as Phase Wait (901)
-    SELECT TimeStamp, DeviceID, 901 AS EventID, Parameter, EndTime, TRUE AS IsValid
-    FROM PhaseWait1
+PhaseWait_Events AS (
+    SELECT *,
+        -- Call is active if the most recent call-state event was 43, 902, 903, or 904 (not 44)
+        -- 903 means "Green End with active call" so it proves the call is active
+        COALESCE(LastCallChangeEvent IN (43, 902, 903, 904), FALSE) AS CallIsActive
+    FROM PhaseWait_WithCallState
+),
+-- Case 1: Phase Call (43 or 902) directly followed by Green Start (1) = Valid Phase Wait
+-- This is the first Phase Wait in a call sequence
+PhaseWait_CallToGreen AS (
+    SELECT TimeStamp, DeviceID, 901 AS EventID, Parameter, NextTime AS EndTime, TRUE AS IsValid
+    FROM PhaseWait_Events
     WHERE EventId IN (43, 902) AND NextEventId = 1
 ),
-PhaseWait_Unmatched AS (
-    -- Unmatched: 43 or 902 at end of data (no next event), output as 902 for state tracking
+-- Case 2: Green End (7 or 903) directly followed by Green Start (1) = Persistent call Phase Wait
+-- This ONLY counts if call is still active (most recent 43/44 was 43)
+PhaseWait_PersistentCall AS (
+    SELECT TimeStamp, DeviceID, 901 AS EventID, Parameter, NextTime AS EndTime, TRUE AS IsValid
+    FROM PhaseWait_Events
+    WHERE EventId IN (7, 903) 
+      AND NextEventId = 1 
+      AND CallIsActive = TRUE  -- Call must be active for persistent call to count
+),
+-- Unmatched: Phase Call (43 or 902) at end of chunk waiting for resolution
+PhaseWait_UnmatchedCall AS (
     SELECT TimeStamp, DeviceID, 902 AS EventID, Parameter, NULL::TIMESTAMP AS EndTime, FALSE AS IsValid
-    FROM PhaseWait1
+    FROM PhaseWait_Events
     WHERE EventId IN (43, 902) AND NextEventId IS NULL
 ),
+-- Unmatched: Green End (7) at end of chunk with active call, waiting to see if 1 or 44 comes next
+-- Only save if call is active, otherwise no point tracking this 7
+PhaseWait_UnmatchedGreenEnd AS (
+    SELECT TimeStamp, DeviceID, 903 AS EventID, Parameter, NULL::TIMESTAMP AS EndTime, FALSE AS IsValid
+    FROM PhaseWait_Events
+    WHERE EventId IN (7, 903) AND NextEventId IS NULL AND CallIsActive = TRUE
+),
+-- NEW: Unmatched Green Start (1) at end of chunk with active call
+-- This means: green started, call is active, but 7 (green end) is in next chunk
+-- Save as 904 so next chunk knows the call was active when 7 arrives
+PhaseWait_UnmatchedGreenStart AS (
+    SELECT TimeStamp, DeviceID, 904 AS EventID, Parameter, NULL::TIMESTAMP AS EndTime, FALSE AS IsValid
+    FROM PhaseWait_Events
+    WHERE EventId = 1 AND NextEventId IS NULL AND CallIsActive = TRUE
+),
 PhaseWait AS (
-    SELECT * FROM PhaseWait_Matched
+    SELECT * FROM PhaseWait_CallToGreen
     UNION ALL
-    SELECT * FROM PhaseWait_Unmatched
+    SELECT * FROM PhaseWait_PersistentCall
+    UNION ALL
+    SELECT * FROM PhaseWait_UnmatchedCall
+    UNION ALL
+    SELECT * FROM PhaseWait_UnmatchedGreenEnd
+    UNION ALL
+    SELECT * FROM PhaseWait_UnmatchedGreenStart
 ),
 
 
@@ -290,6 +354,8 @@ categories AS (
   SELECT * FROM (VALUES
     (901, 'Phase Wait'),
     (902, 'Phase Wait'),
+    (903, 'Phase Wait'),
+    (904, 'Phase Wait'),
     (150, 'Transition'),
     (102, 'Preempt'),
     (84, 'Other'),
