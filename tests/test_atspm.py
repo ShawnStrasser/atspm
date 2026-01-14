@@ -28,7 +28,7 @@ TEST_PARAMS = {
   'output_to_separate_folders': False,
   'output_format': 'parquet',
   'output_file_prefix': 'test_',
-  'remove_incomplete': False,
+  'remove_incomplete': True,
   'to_sql': False,
   'verbose': 0,
   'aggregations': [
@@ -320,6 +320,7 @@ def oneshot_processor_output_with_fill_in_missing():
   params.update({
       'raw_data': data,
       'verbose': 0,
+      'remove_incomplete': False,
   })
   
   # Find the actuations aggregation
@@ -528,6 +529,7 @@ def test_empty_dataframe_input():
     detector_config=detector_config,
     bin_size=15,
     verbose=0,
+    remove_incomplete=True,
     aggregations=all_aggregations
   )
   
