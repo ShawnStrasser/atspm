@@ -490,5 +490,59 @@ def test_detector_health(detector_health_output):
   # Compare the dataframes
   compare_dataframes(detector_health_df, precalc_df)
 
+def test_empty_dataframe_input():
+  """Test that the SignalDataProcessor handles empty input gracefully.
+  
+  When an empty dataframe is provided, all aggregations should complete
+  without errors and produce empty output tables.
+  """
+  # Create an empty dataframe with the expected columns
+  empty_df = pd.DataFrame(columns=['TimeStamp', 'DeviceId', 'EventId', 'Parameter'])
+  
+  # Get detector config from the test data
+  detector_config = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
+  
+  # Use all the same aggregations as TEST_PARAMS
+  all_aggregations = [
+    {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+    {'name': 'actuations', 'params': {}},
+    {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
+    {'name': 'communications', 'params': {'event_codes': '400,503,502'}},
+    {'name': 'coordination', 'params': {}},
+    {'name': 'ped', 'params': {}},
+    {'name': 'unique_ped', 'params': {'seconds_between_actuations': 15}},
+    {'name': 'full_ped', 'params': {'seconds_between_actuations': 15, 'return_volumes': True}},
+    {'name': 'split_failures', 'params': {'red_time': 5, 'red_occupancy_threshold': 0.80, 'green_occupancy_threshold': 0.80, 'by_approach': True, 'by_cycle': False}},
+    {'name': 'splits', 'params': {}},
+    {'name': 'terminations', 'params': {}},
+    {'name': 'yellow_red', 'params': {'latency_offset_seconds': 1.5, 'min_red_offset': -8}},
+    {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time': 60, 'maxtime': True}},
+    {'name': 'ped_delay', 'params': {}},
+    {'name': 'phase_wait', 'params': {'preempt_recovery_seconds': 120, 'assumed_cycle_length': 140, 'skip_multiplier': 1.5}},
+    {'name': 'coordination_agg', 'params': {}},
+  ]
+  
+  # Try running the processor with an empty dataframe
+  processor = SignalDataProcessor(
+    raw_data=empty_df,
+    detector_config=detector_config,
+    bin_size=15,
+    verbose=0,
+    aggregations=all_aggregations
+  )
+  
+  # Load and aggregate should complete without errors
+  processor.load()
+  processor.aggregate()
+  
+  # Verify each aggregation output table exists and is empty
+  for agg in all_aggregations:
+    agg_name = agg['name']
+    result_df = processor.conn.sql(f"SELECT * FROM {agg_name}").df()
+    assert len(result_df) == 0, f"{agg_name} should be empty when raw_data is empty"
+  
+  # Clean up
+  processor.close()
+
 if __name__ == "__main__":
   pytest.main([__file__])
