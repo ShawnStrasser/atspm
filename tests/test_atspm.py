@@ -28,7 +28,7 @@ TEST_PARAMS = {
   'output_to_separate_folders': False,
   'output_format': 'parquet',
   'output_file_prefix': 'test_',
-  'remove_incomplete': False,
+  'remove_incomplete': True,
   'to_sql': False,
   'verbose': 0,
   'aggregations': [
@@ -320,6 +320,7 @@ def oneshot_processor_output_with_fill_in_missing():
   params.update({
       'raw_data': data,
       'verbose': 0,
+      'remove_incomplete': False,
   })
   
   # Find the actuations aggregation
@@ -512,7 +513,7 @@ def phase_wait_synthetic_output():
   """
   # Import the synthetic test data
   from tests.phase_wait_test_data import raw_df, expected_df
-  
+
   # Run the timeline aggregation
   params = {
     'raw_data': raw_df,
@@ -522,34 +523,34 @@ def phase_wait_synthetic_output():
       {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
     ]
   }
-  
+
   processor = SignalDataProcessor(**params)
   processor.load()
   processor.aggregate()
-  
+
   # Get the timeline results
   result = processor.conn.query("SELECT * FROM timeline WHERE EventClass = 'Phase Wait' AND IsValid = TRUE").df()
   processor.close()
-  
+
   return result, expected_df
 
 
 def test_phase_wait_synthetic(phase_wait_synthetic_output):
   """Test Phase Wait logic with synthetic data covering all scenarios"""
   actual_df, expected_df = phase_wait_synthetic_output
-  
+
   # Prepare dataframes for comparison
   actual_sorted = actual_df[['DeviceId', 'StartTime', 'EndTime', 'Duration', 'EventValue']].sort_values(
       ['DeviceId', 'StartTime']).reset_index(drop=True)
   expected_sorted = expected_df[['DeviceId', 'StartTime', 'EndTime', 'Duration', 'EventValue']].sort_values(
       ['DeviceId', 'StartTime']).reset_index(drop=True)
-  
+
   # Align dtypes
   actual_sorted['Duration'] = actual_sorted['Duration'].astype('float32')
   expected_sorted['Duration'] = expected_sorted['Duration'].astype('float32')
   actual_sorted['EventValue'] = actual_sorted['EventValue'].astype('int16')
   expected_sorted['EventValue'] = expected_sorted['EventValue'].astype('int16')
-  
+
   # Compare
   pd.testing.assert_frame_equal(actual_sorted, expected_sorted, check_dtype=False)
 
@@ -562,24 +563,24 @@ def phase_wait_incremental_output():
   """
   from tests.phase_wait_test_data import raw_df, expected_df
   from datetime import datetime, timedelta
-  
+
   # Define chunk boundaries based on timestamps in synthetic data
   # The data runs from 08:00:00 to ~08:20:10
   # We'll split into 3 chunks to test state tracking
   base_time = datetime(2024, 5, 14, 8, 0, 0)
-  
+
   chunks = {
     '1_chunk': raw_df[raw_df['TimeStamp'] < base_time + timedelta(minutes=8)].copy(),   # 08:00:00 - 08:07:59
-    '2_chunk': raw_df[(raw_df['TimeStamp'] >= base_time + timedelta(minutes=8)) & 
+    '2_chunk': raw_df[(raw_df['TimeStamp'] >= base_time + timedelta(minutes=8)) &
                        (raw_df['TimeStamp'] < base_time + timedelta(minutes=15))].copy(),  # 08:08:00 - 08:14:59
     '3_chunk': raw_df[raw_df['TimeStamp'] >= base_time + timedelta(minutes=15)].copy(),  # 08:15:00+
   }
-  
+
   output_dir = 'tests/test_phase_wait_incremental'
   os.makedirs(output_dir, exist_ok=True)
-  
+
   all_results = []
-  
+
   for i, (chunk_name, chunk_data) in enumerate(chunks.items()):
     params = {
       'raw_data': chunk_data,
@@ -600,21 +601,21 @@ def phase_wait_incremental_output():
     
     processor = SignalDataProcessor(**params)
     processor.run()
-  
+
   # Combine all chunk results
   for chunk_name in chunks.keys():
     output_file = f"{output_dir}/{chunk_name}_timeline.parquet"
     if os.path.exists(output_file):
       df = pd.read_parquet(output_file)
       all_results.append(df)
-  
+
   combined_df = pd.concat(all_results).drop_duplicates().reset_index(drop=True)
-  
+
   # Filter to valid Phase Wait events
   phase_wait_df = combined_df[(combined_df['EventClass'] == 'Phase Wait') & (combined_df['IsValid'] == True)]
-  
+
   yield phase_wait_df, expected_df
-  
+
   # Cleanup
   shutil.rmtree(output_dir)
 
@@ -622,22 +623,74 @@ def phase_wait_incremental_output():
 def test_phase_wait_incremental(phase_wait_incremental_output):
   """Test Phase Wait logic with incremental processing"""
   actual_df, expected_df = phase_wait_incremental_output
-  
+
   # Prepare dataframes for comparison
   actual_sorted = actual_df[['DeviceId', 'StartTime', 'EndTime', 'Duration', 'EventValue']].sort_values(
       ['DeviceId', 'StartTime']).reset_index(drop=True)
   expected_sorted = expected_df[['DeviceId', 'StartTime', 'EndTime', 'Duration', 'EventValue']].sort_values(
       ['DeviceId', 'StartTime']).reset_index(drop=True)
-  
+
   # Align dtypes
   actual_sorted['Duration'] = actual_sorted['Duration'].astype('float32')
   expected_sorted['Duration'] = expected_sorted['Duration'].astype('float32')
   actual_sorted['EventValue'] = actual_sorted['EventValue'].astype('int16')
   expected_sorted['EventValue'] = expected_sorted['EventValue'].astype('int16')
-  
+
   # Compare
   pd.testing.assert_frame_equal(actual_sorted, expected_sorted, check_dtype=False)
 
 
-if __name__ == "__main__":
-  pytest.main([__file__])
+def test_empty_dataframe_input():
+  """Test that the SignalDataProcessor handles empty input gracefully.
+
+  When an empty dataframe is provided, all aggregations should complete
+  without errors and produce empty output tables.
+  """
+  # Create an empty dataframe with the expected columns
+  empty_df = pd.DataFrame(columns=['TimeStamp', 'DeviceId', 'EventId', 'Parameter'])
+
+  # Get detector config from the test data
+  detector_config = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
+
+  # Use all the same aggregations as TEST_PARAMS
+  all_aggregations = [
+    {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+    {'name': 'actuations', 'params': {}},
+    {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
+    {'name': 'communications', 'params': {'event_codes': '400,503,502'}},
+    {'name': 'coordination', 'params': {}},
+    {'name': 'ped', 'params': {}},
+    {'name': 'unique_ped', 'params': {'seconds_between_actuations': 15}},
+    {'name': 'full_ped', 'params': {'seconds_between_actuations': 15, 'return_volumes': True}},
+    {'name': 'split_failures', 'params': {'red_time': 5, 'red_occupancy_threshold': 0.80, 'green_occupancy_threshold': 0.80, 'by_approach': True, 'by_cycle': False}},
+    {'name': 'splits', 'params': {}},
+    {'name': 'terminations', 'params': {}},
+    {'name': 'yellow_red', 'params': {'latency_offset_seconds': 1.5, 'min_red_offset': -8}},
+    {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time': 60, 'maxtime': True}},
+    {'name': 'ped_delay', 'params': {}},
+    {'name': 'phase_wait', 'params': {'preempt_recovery_seconds': 120, 'assumed_cycle_length': 140, 'skip_multiplier': 1.5}},
+    {'name': 'coordination_agg', 'params': {}},
+  ]
+
+  # Try running the processor with an empty dataframe
+  processor = SignalDataProcessor(
+    raw_data=empty_df,
+    detector_config=detector_config,
+    bin_size=15,
+    verbose=0,
+    remove_incomplete=True,
+    aggregations=all_aggregations
+  )
+
+  # Load and aggregate should complete without errors
+  processor.load()
+  processor.aggregate()
+
+  # Verify each aggregation output table exists and is empty
+  for agg in all_aggregations:
+    agg_name = agg['name']
+    result_df = processor.conn.sql(f"SELECT * FROM {agg_name}").df()
+    assert len(result_df) == 0, f"{agg_name} should be empty when raw_data is empty"
+
+  # Clean up
+  processor.close()

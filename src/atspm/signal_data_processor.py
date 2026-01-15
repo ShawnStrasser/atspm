@@ -236,7 +236,13 @@ class SignalDataProcessor:
             if self.raw_data is not None:
                 self.min_timestamp = self.conn.execute("SELECT MIN(timestamp) FROM raw_data").fetchone()[0]
                 self.max_timestamp = self.conn.execute("SELECT MAX(timestamp) FROM raw_data").fetchone()[0]
-                v_print(f'Data loaded from {self.min_timestamp} to {self.max_timestamp}', self.verbose)
+                # Handle empty raw_data: use epoch timestamps so aggregations run with correct schema
+                if self.min_timestamp is None:
+                    self.min_timestamp = self.conn.execute("SELECT TIMESTAMP '1970-01-01 00:00:00'").fetchone()[0]
+                    self.max_timestamp = self.min_timestamp
+                    v_print('Empty raw_data detected!', self.verbose)
+                else:
+                    v_print(f'Data loaded from {self.min_timestamp} to {self.max_timestamp}', self.verbose)
             # free up memory
             del self.raw_data
             del self.detector_config

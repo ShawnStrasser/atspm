@@ -18,7 +18,8 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
     # Option to remove incomplete data (natural join with DeviceId, TimeStamp columns)
     if aggregation_name not in ['has_data', 'unmatched_events', 'timeline', 'split_failures'] and kwargs['remove_incomplete']:
         # Add natural join with has_data table
-        query = f"SELECT * FROM ({query}) main_query NATURAL JOIN has_data "
+        # Note: newline before closing paren ensures SQL comments in inner query don't break the wrapper
+        query = f"SELECT * FROM ({query}\n) main_query NATURAL JOIN has_data "
 
     # Split failures are different to allow for saving incomplete cycle data
     if aggregation_name == 'split_failures':

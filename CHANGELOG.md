@@ -1,5 +1,12 @@
 # Release Notes
 
+### Version 2.1.1 (January 14, 2026)
+
+#### Bug Fixes / Improvements:
+- Fixed crash when an empty dataframe is provided as `raw_data`. The processor now handles empty input gracefully by using epoch timestamps, allowing all aggregations to complete with empty outputs and correct schemas.
+- Fixed SQL parser error when `remove_incomplete=True` caused queries with SQL comments to break the `NATURAL JOIN has_data` wrapper.
+- Added unit test `test_empty_dataframe_input` covering all aggregations with empty input.
+
 ### Version 2.1.0 (January 6, 2026)
 
 #### New Features:
