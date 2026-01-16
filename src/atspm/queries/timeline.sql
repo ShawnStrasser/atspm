@@ -113,7 +113,7 @@ WITH
 PhaseWait_Source AS (
     SELECT * FROM raw_data WHERE EventId IN (43, 44, 1, 7)
     UNION ALL
-    SELECT * FROM unmatched_previous WHERE EventId IN (902, 903, 904)
+    SELECT TimeStamp, DeviceId, EventId, Parameter FROM unmatched_previous WHERE EventId IN (902, 903, 904)
 ),
 PhaseWait_WithCallState AS (
     SELECT *,

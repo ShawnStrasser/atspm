@@ -15,7 +15,7 @@ WITH cycle_lengths AS (
         StartTime AS ChangeTime,
         EventValue AS CycleLength
     FROM timeline
-    WHERE EventClass = 'Cycle Length Change'
+    WHERE EventClass = 'Cycle Length Change' AND IsValid
 ),
 
 -- Get preempt intervals and extend by 2 minutes
@@ -84,6 +84,7 @@ SELECT
     DeviceId,
     Phase,
     AVG(Duration) AS AvgPhaseWait,
+    MAX(Duration) AS MaxPhaseWait,
     SUM(IsSkipped) AS TotalSkips
 FROM phase_waits_classified
 GROUP BY 1, 2, 3

@@ -192,14 +192,21 @@ def load_data(conn,
 
                 if key == 'df_or_path':
                     parameter_select = _build_column_expression(column_map, 'Parameter')
+                    # Check if IsValid column exists (for incremental processing with has_data validity tracking)
+                    has_isvalid = 'isvalid' in [c.lower() for c in source_columns]
+                    if has_isvalid:
+                        isvalid_select = "IsValid::BOOLEAN AS IsValid"
+                    else:
+                        # Backward compatibility: if no IsValid column, assume all are valid
+                        isvalid_select = "TRUE AS IsValid"
                     load_sql = f"""
                     CREATE TABLE unmatched_previous AS
-                    SELECT {timestamp_select}, {device_select}, {eventid_select}, {parameter_select}
+                    SELECT {timestamp_select}, {device_select}, {eventid_select}, {parameter_select}, {isvalid_select}
                     FROM {reference} {where_clause};
                     CREATE VIEW raw_data_all AS
-                    SELECT * FROM raw_data
+                    SELECT TimeStamp, DeviceId, EventId, Parameter FROM raw_data
                     UNION ALL
-                    SELECT * FROM unmatched_previous;
+                    SELECT TimeStamp, DeviceId, EventId, Parameter FROM unmatched_previous;
                     """
                 elif key == 'split_fail_df_or_path':
                     load_sql = f"""

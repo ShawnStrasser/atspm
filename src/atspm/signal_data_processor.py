@@ -8,6 +8,65 @@ from .utils import round_down_15
 from .utils import v_print
 import os
 
+# Define aggregation dependencies: key requires values to run first
+# Example: 'phase_wait' requires 'timeline' to exist
+AGGREGATION_DEPENDENCIES = {
+    'timeline': ['has_data'],  # timeline needs has_data for IsValid check
+    'phase_wait': ['timeline'],
+    'ped_delay': ['timeline'],
+    'coordination_agg': ['timeline', 'has_data'],
+}
+
+
+def _sort_aggregations_by_dependency(aggregations, verbose=1):
+    """
+    Sort aggregations so dependencies run first.
+    Uses a simple approach: repeatedly move items that have unmet dependencies to run after their dependencies.
+    """
+    agg_names = [a['name'] for a in aggregations]
+    agg_dict = {a['name']: a for a in aggregations}
+    
+    # Only consider dependencies for aggregations that are actually in the list
+    relevant_deps = {}
+    for name in agg_names:
+        if name in AGGREGATION_DEPENDENCIES:
+            # Only include dependencies that are also in the aggregation list
+            deps = [d for d in AGGREGATION_DEPENDENCIES[name] if d in agg_names]
+            if deps:
+                relevant_deps[name] = deps
+    
+    # Simple topological sort
+    sorted_names = []
+    remaining = agg_names.copy()
+    
+    # Keep track of iterations to prevent infinite loops
+    max_iterations = len(remaining) * len(remaining)
+    iteration = 0
+    
+    while remaining and iteration < max_iterations:
+        iteration += 1
+        for name in remaining[:]:  # Copy list to allow modification during iteration
+            deps = relevant_deps.get(name, [])
+            # Check if all dependencies are already in sorted_names
+            if all(d in sorted_names for d in deps):
+                sorted_names.append(name)
+                remaining.remove(name)
+                break
+    
+    # If we couldn't sort (circular dependency), just return original order
+    if remaining:
+        v_print(f"Warning: Could not resolve aggregation dependencies, using original order", verbose)
+        return aggregations
+    
+    # Rebuild the aggregation list in sorted order
+    sorted_aggregations = [agg_dict[name] for name in sorted_names]
+    
+    # Log if order changed
+    if sorted_names != agg_names:
+        v_print(f"Reordered aggregations for dependencies: {sorted_names}", verbose, 2)
+    
+    return sorted_aggregations
+
 
 class SignalDataProcessor:
     '''
@@ -110,6 +169,10 @@ class SignalDataProcessor:
         for key, value in kwargs.items():
             setattr(self, key, value)
 
+        # Sort aggregations by dependency order (e.g., has_data before timeline, timeline before phase_wait)
+        if hasattr(self, 'aggregations') and self.aggregations:
+            self.aggregations = _sort_aggregations_by_dependency(self.aggregations, self.verbose)
+
         # Check for valid bin_size and no_data_min combo
         if self.remove_incomplete:
             # raise error if 'has_data' aggregation is not in aggregations
@@ -117,9 +180,6 @@ class SignalDataProcessor:
             # extract has_data parameters
             no_data_min = next(x['params']['no_data_min'] for x in self.aggregations if x['name'] == 'has_data')
             assert self.bin_size % no_data_min == 0, "bin_size / no_data_min must be a whole number"
-            # Make sure that has_data is the first aggregation
-            idx = [d['name'] for d in self.aggregations].index('has_data')
-            self.aggregations.insert(0, self.aggregations.pop(idx))
 
         # Check format of unmatched_event_settings
         # Duckdb needs quotes if it is a file path, but not if it is a dataframe
@@ -394,6 +454,162 @@ class SignalDataProcessor:
                     self.to_sql,
                     **params
                 )
+                
+                # After has_data aggregation, NO merge needed for incremental - validity is tracked per-event
+                # via the IsValid column in unmatched_events
+                
+                # After timeline aggregation, check if has_data table exists and mark events
+                # spanning missing data periods as invalid
+                if aggregation['name'] == 'timeline' and not self.to_sql:
+                    has_data_exists = self.conn.execute(
+                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'has_data'"
+                    ).fetchone()[0]
+                    
+                    if has_data_exists:
+                        v_print("Marking timeline events with missing has_data as invalid", self.verbose, 2)
+                        bin_size = self.bin_size
+                        
+                        if self.incremental_run:
+                            # Incremental mode: 
+                            # For events whose START came from unmatched_previous, use unmatched_previous.IsValid
+                            # AND check if END bin has has_data
+                            # For events whose START is in current chunk, check both START and END bins
+                            
+                            # First, handle events matched from unmatched_previous:
+                            # If their stored IsValid is FALSE, the event is invalid
+                            # Also check END bin has has_data
+                            unmatched_previous_exists = self.conn.execute(
+                                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_previous'"
+                            ).fetchone()[0]
+                            
+                            if unmatched_previous_exists:
+                                # Mark invalid if start was invalid (from unmatched_previous.IsValid=FALSE)
+                                # OR if END bin doesn't have has_data
+                                update_query = f"""
+                                UPDATE timeline t
+                                SET IsValid = FALSE
+                                WHERE t.IsValid = TRUE 
+                                  AND t.EndTime IS NOT NULL
+                                  AND (
+                                    -- Start came from unmatched_previous with IsValid=FALSE
+                                    EXISTS (
+                                        SELECT 1 FROM unmatched_previous u
+                                        WHERE u.DeviceId = t.DeviceId
+                                          AND u.TimeStamp = t.StartTime
+                                          AND u.IsValid = FALSE
+                                    )
+                                    OR
+                                    -- END bin doesn't have has_data
+                                    NOT EXISTS (
+                                        SELECT 1 FROM has_data h
+                                        WHERE h.DeviceId = t.DeviceId
+                                          AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', t.EndTime)
+                                    )
+                                  );
+                                """
+                                self.conn.execute(update_query)
+                                
+                                # For events that started in current chunk (not from unmatched_previous),
+                                # check both START and END bins
+                                update_query2 = f"""
+                                UPDATE timeline t
+                                SET IsValid = FALSE
+                                WHERE t.IsValid = TRUE 
+                                  AND t.EndTime IS NOT NULL
+                                  AND NOT EXISTS (
+                                    SELECT 1 FROM unmatched_previous u
+                                    WHERE u.DeviceId = t.DeviceId AND u.TimeStamp = t.StartTime
+                                  )
+                                  AND (
+                                    -- START bin doesn't have has_data
+                                    NOT EXISTS (
+                                        SELECT 1 FROM has_data h
+                                        WHERE h.DeviceId = t.DeviceId
+                                          AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', t.StartTime)
+                                    )
+                                    OR
+                                    -- END bin doesn't have has_data
+                                    NOT EXISTS (
+                                        SELECT 1 FROM has_data h
+                                        WHERE h.DeviceId = t.DeviceId
+                                          AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', t.EndTime)
+                                    )
+                                  );
+                                """
+                                self.conn.execute(update_query2)
+                            else:
+                                # First incremental chunk - no unmatched_previous yet
+                                # Check both START and END bins for all events
+                                update_query = f"""
+                                UPDATE timeline t
+                                SET IsValid = FALSE
+                                WHERE t.IsValid = TRUE 
+                                  AND t.EndTime IS NOT NULL
+                                  AND (
+                                    -- START bin doesn't have has_data
+                                    NOT EXISTS (
+                                        SELECT 1 FROM has_data h
+                                        WHERE h.DeviceId = t.DeviceId
+                                          AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', t.StartTime)
+                                    )
+                                    OR
+                                    -- END bin doesn't have has_data
+                                    NOT EXISTS (
+                                        SELECT 1 FROM has_data h
+                                        WHERE h.DeviceId = t.DeviceId
+                                          AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', t.EndTime)
+                                    )
+                                  );
+                                """
+                                self.conn.execute(update_query)
+                        else:
+                            # Batch mode: Check ALL bins spanned by the event
+                            # An event is invalid if any bin it spans is missing from has_data
+                            update_query = f"""
+                            UPDATE timeline t
+                            SET IsValid = FALSE
+                            WHERE t.IsValid = TRUE 
+                              AND t.EndTime IS NOT NULL
+                              AND EXISTS (
+                                -- Check if there's any bin that the event spans that is NOT in has_data
+                                SELECT 1
+                                FROM (
+                                    -- Generate all bins that this event could span
+                                    SELECT UNNEST(generate_series(
+                                        TIME_BUCKET(INTERVAL '{bin_size} minutes', t.StartTime),
+                                        TIME_BUCKET(INTERVAL '{bin_size} minutes', t.EndTime),
+                                        INTERVAL '{bin_size} minutes'
+                                    )) AS bin_ts
+                                ) bins
+                                WHERE NOT EXISTS (
+                                    SELECT 1 FROM has_data h
+                                    WHERE h.DeviceId = t.DeviceId
+                                      AND h.TimeStamp = bins.bin_ts
+                                )
+                              );
+                            """
+                            self.conn.execute(update_query)
+                        
+                        # Update unmatched_events.IsValid for events that now span gaps
+                        # in the current chunk's has_data (mark as False if gaps exist)
+                        unmatched_exists = self.conn.execute(
+                            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_events'"
+                        ).fetchone()[0]
+                        
+                        if unmatched_exists:
+                            # For unmatched events (start but no end yet), check if the START bin has has_data
+                            # If not, mark as invalid so future matching knows the event spanned a gap
+                            update_unmatched_query = f"""
+                            UPDATE unmatched_events u
+                            SET IsValid = FALSE
+                            WHERE u.IsValid = TRUE
+                              AND NOT EXISTS (
+                                SELECT 1 FROM has_data h
+                                WHERE h.DeviceId = u.DeviceId
+                                  AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', u.TimeStamp)
+                              );
+                            """
+                            self.conn.execute(update_unmatched_query)
                 
             end_time = time.time()
             # Store the runtime

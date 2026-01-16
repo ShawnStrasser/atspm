@@ -1,5 +1,6 @@
 --Aggregate Phase Splits in 15-minute Bins
 --Written in SQL for DuckDB. This is a jinja2 template, with variables inside curly braces.
+--MAXTIME Specific!
 
 SELECT 
 	TIME_BUCKET(interval '{{bin_size}} minutes', TimeStamp) as TimeStamp,

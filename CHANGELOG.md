@@ -1,5 +1,11 @@
 # Release Notes
 
+### Version 2.1.2 (January 15, 2026)
+
+#### Bug Fixes / Improvements:
+
+Bug fix to data processing by adding IsValid column tracking and updating logic for timeline events. This allows marking timeline events as invalid if they span over a missing data period. Introduce tests to validate behavior with and without has_data filtering.
+
 ### Version 2.1.1 (January 14, 2026)
 
 #### Bug Fixes / Improvements:

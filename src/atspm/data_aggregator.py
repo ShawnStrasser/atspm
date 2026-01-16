@@ -36,9 +36,15 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
         # Exclude synthetic EventId 901 (Phase Wait matched output - never unmatched by design)
         # Include 902 (Phase Wait pending) - this is how we track 43s that need Phase Wait matching
         # across chunks without interfering with PhaseCall matching of the same 43
+        # Include IsValid column: TRUE by default, will be updated by signal_data_processor if has_data exists
         query += f""" CREATE TABLE unmatched_events AS
-            SELECT StartTime AS TimeStamp, DeviceId, EventId, Parameter
-            FROM timeline
+            SELECT 
+                StartTime AS TimeStamp, 
+                DeviceId, 
+                EventId, 
+                Parameter,
+                TRUE AS IsValid
+            FROM timeline t
             WHERE EndTime IS NULL AND EventId != 901; """
         # Delete unmatched rows from timeline table, including 902 (Phase Wait state tracking)
         # which is only used for incremental processing and should never appear in output
@@ -50,6 +56,7 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
     # For coordination_agg aggregation, insert synthetic state events into unmatched_events
     # Uses synthetic EventIds 931-934 to carry coordination state across incremental runs:
     # 931: Pattern, 932: CycleLength, 933: ActualCycleLength, 934: ActualOffset
+    # These are coordination state markers, not timeline events, so IsValid is always TRUE
     if aggregation_name == 'coordination_agg':
         query += """
         INSERT INTO unmatched_events
@@ -57,7 +64,8 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
             MAX(TimeStamp) AS TimeStamp,
             DeviceId,
             931 AS EventId,
-            LAST(Pattern ORDER BY TimeStamp) AS Parameter
+            LAST(Pattern ORDER BY TimeStamp) AS Parameter,
+            TRUE AS IsValid
         FROM coordination_agg
         GROUP BY DeviceId
         HAVING LAST(Pattern ORDER BY TimeStamp) != 0;
@@ -67,7 +75,8 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
             MAX(TimeStamp) AS TimeStamp,
             DeviceId,
             932 AS EventId,
-            LAST(CycleLength ORDER BY TimeStamp) AS Parameter
+            LAST(CycleLength ORDER BY TimeStamp) AS Parameter,
+            TRUE AS IsValid
         FROM coordination_agg
         GROUP BY DeviceId
         HAVING LAST(CycleLength ORDER BY TimeStamp) != 0;
@@ -77,7 +86,8 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
             MAX(TimeStamp) AS TimeStamp,
             DeviceId,
             933 AS EventId,
-            LAST(ActualCycleLength ORDER BY TimeStamp) AS Parameter
+            LAST(ActualCycleLength ORDER BY TimeStamp) AS Parameter,
+            TRUE AS IsValid
         FROM coordination_agg
         GROUP BY DeviceId
         HAVING LAST(ActualCycleLength ORDER BY TimeStamp) != 0;
@@ -87,7 +97,8 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
             MAX(TimeStamp) AS TimeStamp,
             DeviceId,
             934 AS EventId,
-            LAST(ActualOffset ORDER BY TimeStamp) AS Parameter
+            LAST(ActualOffset ORDER BY TimeStamp) AS Parameter,
+            TRUE AS IsValid
         FROM coordination_agg
         GROUP BY DeviceId
         HAVING LAST(ActualOffset ORDER BY TimeStamp) != 0;
