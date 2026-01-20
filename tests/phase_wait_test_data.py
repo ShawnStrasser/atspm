@@ -192,6 +192,32 @@ raw_events.extend([
     # No phase call, no phase wait event expected
 ])
 
+# =============================================================================
+# SCENARIO 11: Invalid Phase Call → Invalid Phase Wait (Phase 10, Device A)
+# BUG FIX TEST: When a Phase Call (43) is not properly terminated with a Phase Drop (44)
+# before the next Phase Call (43), the Phase Call is "invalid".
+# Phase Wait events derived from an invalid Phase Call should also be invalid.
+#
+# Pattern: 43 → 1 → 7 → 43 → 1 → 7 → 44
+# - First 43 at 1300s: No 44 before next 43, so invalid Phase Call
+# - Second 43 at 1400s: Properly terminated with 44 at 1520s, so valid Phase Call
+#
+# Expected: 
+# - Phase Wait from 1300s→1330s = 30 seconds, IsValid=FALSE (invalid phase call)
+# - NO persistent Phase Wait because new 43 resets the call state
+# - Phase Wait from 1400s→1430s = 30 seconds, IsValid=TRUE (valid phase call)
+# =============================================================================
+raw_events.extend([
+    (ts(1300), DEVICE_A, PHASE_CALL, 10),   # First call at 1300s (NO 44 before next 43 = invalid!)
+    (ts(1330), DEVICE_A, GREEN_START, 10),  # Green at 1330s
+    (ts(1340), DEVICE_A, GREEN_END, 10),    # Green end at 1340s
+    # NO phase drop! But next event is another 43, which resets the call
+    (ts(1400), DEVICE_A, PHASE_CALL, 10),   # Second call at 1400s (overwrites first, this one is valid)
+    (ts(1430), DEVICE_A, GREEN_START, 10),  # Green at 1430s
+    (ts(1440), DEVICE_A, GREEN_END, 10),    # Green end at 1440s
+    (ts(1520), DEVICE_A, PHASE_DROP, 10),   # Call drops at 1520s (valid termination)
+])
+
 # Create the raw data DataFrame
 raw_df = pd.DataFrame(raw_events, columns=['TimeStamp', 'DeviceId', 'EventId', 'Parameter'])
 raw_df = raw_df.sort_values(['TimeStamp', 'DeviceId', 'EventId']).reset_index(drop=True)
@@ -232,9 +258,26 @@ expected_phase_wait = [
     (DEVICE_A, ts(1000), ts(1100), 100.0, True, 'Phase Wait', 8),
     
     # Scenario 10: No call - NO EVENT
+    
+    # Scenario 11: Invalid Phase Call → Only the valid Phase Wait is expected here
+    # The two INVALID Phase Waits from 1300-1330 and 1340-1400 are NOT included
+    # because this list only contains valid (IsValid=True) events
+    (DEVICE_A, ts(1400), ts(1430), 30.0, True, 'Phase Wait', 10),
+]
+
+# Expected INVALID Phase Wait events (for bug fix test)
+# These are Phase Wait events that should have IsValid=False
+expected_invalid_phase_wait = [
+    # Scenario 11: Invalid Phase Call creates invalid Phase Wait events
+    # The first 43 at 1300s has no 44 before the next 43 at 1400s, so it's invalid
+    (DEVICE_A, ts(1300), ts(1330), 30.0, False, 'Phase Wait', 10),   # Invalid: 43→1
 ]
 
 expected_df = pd.DataFrame(expected_phase_wait, columns=[
+    'DeviceId', 'StartTime', 'EndTime', 'Duration', 'IsValid', 'EventClass', 'EventValue'
+])
+
+expected_invalid_df = pd.DataFrame(expected_invalid_phase_wait, columns=[
     'DeviceId', 'StartTime', 'EndTime', 'Duration', 'IsValid', 'EventClass', 'EventValue'
 ])
 
@@ -243,11 +286,20 @@ expected_df['DeviceId'] = expected_df['DeviceId'].astype('int64')
 expected_df['Duration'] = expected_df['Duration'].astype('float32')
 expected_df['EventValue'] = expected_df['EventValue'].astype('int16')
 
+expected_invalid_df['DeviceId'] = expected_invalid_df['DeviceId'].astype('int64')
+expected_invalid_df['Duration'] = expected_invalid_df['Duration'].astype('float32')
+expected_invalid_df['EventValue'] = expected_invalid_df['EventValue'].astype('int16')
+
 if __name__ == '__main__':
     print("=== RAW SYNTHETIC DATA (Phase Events) ===")
     print(raw_df.to_string())
     print(f"\nTotal raw events: {len(raw_df)}")
     
-    print("\n\n=== EXPECTED PHASE WAIT EVENTS ===")
+    print("\n\n=== EXPECTED VALID PHASE WAIT EVENTS ===")
     print(expected_df.to_string())
-    print(f"\nTotal expected Phase Wait events: {len(expected_df)}")
+    print(f"\nTotal expected valid Phase Wait events: {len(expected_df)}")
+    
+    print("\n\n=== EXPECTED INVALID PHASE WAIT EVENTS ===")
+    print(expected_invalid_df.to_string())
+    print(f"\nTotal expected invalid Phase Wait events: {len(expected_invalid_df)}")
+

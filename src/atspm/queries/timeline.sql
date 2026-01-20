@@ -108,6 +108,7 @@ WITH
 -- 3. Track call state: call is active if most recent 43/44 was 43 (not 44)
 -- 4. 43→1 creates Phase Wait (and call state becomes active)
 -- 5. 7→1 creates Phase Wait ONLY if call is still active (no 44 since last 43)
+-- 6. Phase Wait validity is inherited from the Phase Call validity (43 must eventually be followed by 44)
 {% if unmatched %}
 -- Incremental mode: Include 43, 44, 1, 7 from raw_data, and 902/903/904 from unmatched_previous
 PhaseWait_Source AS (
@@ -146,51 +147,60 @@ PhaseWait_WithCallState AS (
 PhaseWait_Events AS (
     SELECT *,
         -- Call is active if the most recent call-state event was 43, 902, 903, or 904 (not 44)
-        -- 903 means "Green End with active call" so it proves the call is active
         COALESCE(LastCallChangeEvent IN (43, 902, 903, 904), FALSE) AS CallIsActive
     FROM PhaseWait_WithCallState
 ),
--- Case 1: Phase Call (43 or 902) directly followed by Green Start (1) = Valid Phase Wait
--- This is the first Phase Wait in a call sequence
+-- Case 1: Phase Call (43 or 902) directly followed by Green Start (1) = Phase Wait
 PhaseWait_CallToGreen AS (
-    SELECT TimeStamp, DeviceID, 901 AS EventID, Parameter, NextTime AS EndTime, TRUE AS IsValid
+    SELECT TimeStamp, DeviceID, 901 AS EventID, Parameter, NextTime AS EndTime
     FROM PhaseWait_Events
     WHERE EventId IN (43, 902) AND NextEventId = 1
 ),
 -- Case 2: Green End (7 or 903) directly followed by Green Start (1) = Persistent call Phase Wait
 -- This ONLY counts if call is still active (most recent 43/44 was 43)
 PhaseWait_PersistentCall AS (
-    SELECT TimeStamp, DeviceID, 901 AS EventID, Parameter, NextTime AS EndTime, TRUE AS IsValid
+    SELECT TimeStamp, DeviceID, 901 AS EventID, Parameter, NextTime AS EndTime
     FROM PhaseWait_Events
     WHERE EventId IN (7, 903) 
       AND NextEventId = 1 
-      AND CallIsActive = TRUE  -- Call must be active for persistent call to count
+      AND CallIsActive = TRUE
 ),
--- Unmatched: Phase Call (43 or 902) at end of chunk waiting for resolution
+-- Combine Phase Wait events and inherit validity from the PhaseCall CTE
+-- A Phase Wait is valid if the underlying Phase Call (43→44) is valid
+PhaseWait_Combined AS (
+    SELECT * FROM PhaseWait_CallToGreen
+    UNION ALL
+    SELECT * FROM PhaseWait_PersistentCall
+),
+PhaseWait_WithValidity AS (
+    SELECT 
+        pw.TimeStamp, pw.DeviceID, pw.EventID, pw.Parameter, pw.EndTime,
+        COALESCE(pc.IsValid, TRUE) AS IsValid
+    FROM PhaseWait_Combined pw
+    LEFT JOIN PhaseCall pc 
+        ON pw.DeviceID = pc.DeviceID 
+        AND pw.Parameter = pc.Parameter
+        AND pw.TimeStamp >= pc.TimeStamp 
+        AND pw.TimeStamp < pc.EndTime
+),
+-- Unmatched events for incremental processing
 PhaseWait_UnmatchedCall AS (
     SELECT TimeStamp, DeviceID, 902 AS EventID, Parameter, NULL::TIMESTAMP AS EndTime, FALSE AS IsValid
     FROM PhaseWait_Events
     WHERE EventId IN (43, 902) AND NextEventId IS NULL
 ),
--- Unmatched: Green End (7) at end of chunk with active call, waiting to see if 1 or 44 comes next
--- Only save if call is active, otherwise no point tracking this 7
 PhaseWait_UnmatchedGreenEnd AS (
     SELECT TimeStamp, DeviceID, 903 AS EventID, Parameter, NULL::TIMESTAMP AS EndTime, FALSE AS IsValid
     FROM PhaseWait_Events
     WHERE EventId IN (7, 903) AND NextEventId IS NULL AND CallIsActive = TRUE
 ),
--- NEW: Unmatched Green Start (1) at end of chunk with active call
--- This means: green started, call is active, but 7 (green end) is in next chunk
--- Save as 904 so next chunk knows the call was active when 7 arrives
 PhaseWait_UnmatchedGreenStart AS (
     SELECT TimeStamp, DeviceID, 904 AS EventID, Parameter, NULL::TIMESTAMP AS EndTime, FALSE AS IsValid
     FROM PhaseWait_Events
     WHERE EventId = 1 AND NextEventId IS NULL AND CallIsActive = TRUE
 ),
 PhaseWait AS (
-    SELECT * FROM PhaseWait_CallToGreen
-    UNION ALL
-    SELECT * FROM PhaseWait_PersistentCall
+    SELECT * FROM PhaseWait_WithValidity
     UNION ALL
     SELECT * FROM PhaseWait_UnmatchedCall
     UNION ALL

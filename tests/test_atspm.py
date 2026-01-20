@@ -640,6 +640,72 @@ def test_phase_wait_incremental(phase_wait_incremental_output):
   pd.testing.assert_frame_equal(actual_sorted, expected_sorted, check_dtype=False)
 
 
+def test_invalid_phase_call_creates_invalid_phase_wait():
+  """
+  BUG FIX TEST: Invalid Phase Call should create Invalid Phase Wait events.
+  
+  This test verifies the fix for a bug where Phase Wait events derived from
+  invalid Phase Calls were incorrectly marked as IsValid=True.
+  
+  A Phase Call (event 43) is "invalid" when it is not properly terminated
+  with a Phase Drop (event 44) before the next Phase Call (event 43).
+  
+  Scenario tested (Phase 10 from synthetic data):
+  - First 43 at 1300s: No 44 before next 43 at 1400s → invalid Phase Call
+  - This creates a Phase Wait event that should have IsValid=False
+  - Second 43 at 1400s: Properly terminated with 44 → valid Phase Call
+  - This creates a Phase Wait event that should have IsValid=True
+  """
+  from tests.phase_wait_test_data import raw_df, expected_invalid_df
+
+  # Run the timeline aggregation
+  params = {
+    'raw_data': raw_df,
+    'bin_size': 15,
+    'verbose': 0,
+    'aggregations': [
+      {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
+    ]
+  }
+
+  processor = SignalDataProcessor(**params)
+  processor.load()
+  processor.aggregate()
+
+  # Get ALL Phase Wait events for Phase 10 (the bug fix scenario)
+  result = processor.conn.query("""
+    SELECT * FROM timeline 
+    WHERE EventClass = 'Phase Wait' 
+      AND EventValue = 10
+    ORDER BY StartTime
+  """).df()
+  processor.close()
+
+  # Verify we have 2 Phase Wait events for Phase 10 (1 invalid + 1 valid)
+  assert len(result) == 2, f"Expected 2 Phase Wait events for Phase 10, got {len(result)}"
+
+  # Check that we have exactly 1 invalid and 1 valid Phase Wait
+  invalid_waits = result[result['IsValid'] == False]
+  valid_waits = result[result['IsValid'] == True]
+
+  assert len(invalid_waits) == 1, f"Expected 1 invalid Phase Wait event, got {len(invalid_waits)}"
+  assert len(valid_waits) == 1, f"Expected 1 valid Phase Wait event, got {len(valid_waits)}"
+
+  # Verify the invalid Phase Wait event matches expected data
+  actual_invalid = invalid_waits[['DeviceId', 'StartTime', 'EndTime', 'Duration', 'EventValue']].sort_values(
+      ['StartTime']).reset_index(drop=True)
+  expected_invalid = expected_invalid_df[['DeviceId', 'StartTime', 'EndTime', 'Duration', 'EventValue']].sort_values(
+      ['StartTime']).reset_index(drop=True)
+
+  # Align dtypes
+  actual_invalid['Duration'] = actual_invalid['Duration'].astype('float32')
+  expected_invalid['Duration'] = expected_invalid['Duration'].astype('float32')
+  actual_invalid['EventValue'] = actual_invalid['EventValue'].astype('int16')
+  expected_invalid['EventValue'] = expected_invalid['EventValue'].astype('int16')
+
+  pd.testing.assert_frame_equal(actual_invalid, expected_invalid, check_dtype=False)
+
+
 def test_empty_dataframe_input():
   """Test that the SignalDataProcessor handles empty input gracefully.
 

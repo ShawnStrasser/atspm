@@ -36,6 +36,7 @@ TEST_PARAMS = {
         #{'name': 'yellow_red', 'params': {'latency_offset_seconds': 1.5, 'min_red_offset': -8}},
         {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time':60, 'maxtime': True}},
         #{'name': 'ped_delay', 'params': {}},
+        {'name': 'phase_wait', 'params': {}},
     ],
     'remove_incomplete': False,
 }
