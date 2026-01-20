@@ -1,5 +1,11 @@
 # Release Notes
 
+### Version 2.1.3 (January 20, 2026)
+
+#### Bug Fixes / Improvements:
+
+Fixed bug where phase wait events were marked as valid even when the underlying phase call was not valid.
+
 ### Version 2.1.2 (January 15, 2026)
 
 #### Bug Fixes / Improvements:
