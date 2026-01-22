@@ -42,13 +42,15 @@ phase_waits_raw AS (
     WHERE EventClass = 'Phase Wait' AND IsValid
 ),
 
--- Flag phase waits that occur during preempt exclusion windows
+-- Flag phase waits that overlap with preempt exclusion windows
+-- Proper overlap detection: ranges overlap if Start1 < End2 AND Start2 < End1
 phase_waits_flagged AS (
     SELECT
         pw.*,
-        -- Flag TRUE if this phase wait starts during any preempt exclusion window
+        -- Flag TRUE if this phase wait overlaps with any preempt exclusion window
+        -- Overlap occurs when: PW.Start < Preempt.ExclusionEnd AND Preempt.PreemptStart < PW.End
         COALESCE(bool_or(
-            pw.StartTime >= p.PreemptStart AND pw.StartTime < p.ExclusionEnd
+            pw.StartTime < p.ExclusionEnd AND p.PreemptStart < pw.EndTime
         ), FALSE) AS PreemptFlag
     FROM phase_waits_raw pw
     LEFT JOIN preempt_intervals p ON pw.DeviceId = p.DeviceId

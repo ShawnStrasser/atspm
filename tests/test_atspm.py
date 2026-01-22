@@ -760,3 +760,196 @@ def test_empty_dataframe_input():
 
   # Clean up
   processor.close()
+
+
+# =============================================================================
+# PHASE WAIT BUG FIX TESTS
+# =============================================================================
+
+def test_phase_wait_preempt_overlap():
+    """
+    Test that Phase Wait events overlapping with preempt windows are filtered out.
+    
+    Bug: The current logic only checks if Phase Wait STARTS during preempt window.
+    This misses cases where:
+    - Phase Wait starts BEFORE preempt but overlaps with it
+    - Phase Wait completely contains the preempt event
+    
+    Proper overlap detection: ranges overlap if Start1 < End2 AND Start2 < End1
+    """
+    from datetime import datetime, timedelta
+    
+    base = datetime(2024, 6, 1, 8, 0, 0)
+    
+    # Synthetic events:
+    # - Phase call at 0s, green at 240s (4 min wait) for phase 1
+    # - Preempt starts at 60s, ends at 100s (preempt window: 60s to 220s with 120s recovery)
+    # - The Phase Wait (0s -> 240s) CONTAINS the preempt window but starts BEFORE it
+    # - This should be filtered out but current code doesn't catch it
+    raw_events = [
+        # Phase 1: Long wait containing preempt
+        (base, 1001, 43, 1),                                    # Phase call at 0s
+        (base + timedelta(seconds=240), 1001, 1, 1),            # Green at 240s  
+        (base + timedelta(seconds=250), 1001, 7, 1),            # Green end at 250s
+        (base + timedelta(seconds=250.2), 1001, 44, 1),         # Call drop
+        
+        # Preempt: 60s to 100s (inside the phase wait period)
+        (base + timedelta(seconds=60), 1001, 102, 1),           # Preempt start
+        (base + timedelta(seconds=100), 1001, 104, 1),          # Preempt end
+        
+        # Phase 2: Normal wait NOT overlapping preempt (for control)
+        (base + timedelta(seconds=300), 1001, 43, 2),           # Phase call at 300s
+        (base + timedelta(seconds=330), 1001, 1, 2),            # Green at 330s (30s wait)
+        (base + timedelta(seconds=340), 1001, 7, 2),            # Green end
+        (base + timedelta(seconds=340.2), 1001, 44, 2),         # Call drop
+    ]
+    
+    raw_df = pd.DataFrame(raw_events, columns=['TimeStamp', 'DeviceId', 'EventId', 'Parameter'])
+    raw_df['DeviceId'] = raw_df['DeviceId'].astype('int64')
+    raw_df['EventId'] = raw_df['EventId'].astype('int16')
+    raw_df['Parameter'] = raw_df['Parameter'].astype('int16')
+    
+    params = {
+        'raw_data': raw_df,
+        'bin_size': 15,
+        'verbose': 0,
+        'aggregations': [
+            {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+            {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
+            {'name': 'phase_wait', 'params': {'preempt_recovery_seconds': 120, 'assumed_cycle_length': 180, 'skip_multiplier': 1.5}},
+            {'name': 'coordination_agg', 'params': {}}
+        ]
+    }
+    
+    processor = SignalDataProcessor(**params)
+    processor.load()
+    processor.aggregate()
+    
+    # Get phase_wait aggregation results
+    phase_wait_agg = processor.conn.query("SELECT * FROM phase_wait ORDER BY TimeStamp, Phase").df()
+    
+    # Phase 1 wait should be EXCLUDED (overlaps with preempt)
+    # Phase 2 wait should be INCLUDED (no overlap)
+    phase1_waits = phase_wait_agg[phase_wait_agg['Phase'] == 1]
+    phase2_waits = phase_wait_agg[phase_wait_agg['Phase'] == 2]
+    
+    processor.close()
+    
+    # Phase 1 should have 0 records (filtered due to preempt overlap)
+    assert len(phase1_waits) == 0, (
+        f"Phase 1 wait should be filtered (overlaps with preempt), but got {len(phase1_waits)} records.\n"
+        f"The Phase Wait (0s->240s) contains the preempt (60s->100s) but wasn't filtered.\n"
+        f"Phase 1 data: {phase1_waits.to_string()}"
+    )
+    
+    # Phase 2 should have 1 record (normal wait, no preempt overlap)
+    assert len(phase2_waits) == 1, (
+        f"Phase 2 wait should be included (no preempt overlap), got {len(phase2_waits)} records"
+    )
+
+
+def test_phase_wait_invalid_event_propagation():
+    """
+    Test that Phase Wait events spanning over invalid events are marked invalid.
+    
+    Bug: A Phase Wait marked valid can span over invalid Green/Yellow events, 
+    which means the timing data during that period is unreliable.
+    
+    If there are invalid events (due to missing data) during a Phase Wait period,
+    the Phase Wait should also be marked invalid because:
+    1. Missing data could have included a green for the waiting phase
+    2. The wait duration calculation is potentially incorrect
+    """
+    from datetime import datetime, timedelta
+    
+    base = datetime(2024, 6, 1, 8, 0, 0)
+    
+    # Synthetic events:
+    # - Phase 1: Phase call at 0s, green at 200s (200s wait)
+    # - During this wait, there are invalid events for phase 2 (two Green starts in a row)
+    #   The paired_event macro marks Green as invalid when NextEventId != 7
+    # - Phase 1's wait spans over these invalid events and should be marked invalid
+    #
+    # Also include a control case: Phase 3 with a wait that doesn't overlap invalid events
+    raw_events = [
+        # Phase 1: Long wait that will span over invalid events
+        (base, 1002, 43, 1),                                    # Phase call at 0s
+        (base + timedelta(seconds=200), 1002, 1, 1),            # Green at 200s
+        (base + timedelta(seconds=210), 1002, 7, 1),            # Green end
+        (base + timedelta(seconds=210.2), 1002, 44, 1),         # Call drop
+        
+        # Phase 2: Create INVALID Green (Green start followed by Green start, not Green end)
+        # This simulates a data gap where the Green end (7) was lost
+        (base + timedelta(seconds=50), 1002, 1, 2),             # Green start at 50s (INVALID: NextEvent=1)
+        (base + timedelta(seconds=100), 1002, 1, 2),            # Another Green start at 100s (creates invalid pair)
+        (base + timedelta(seconds=150), 1002, 7, 2),            # Green end at 150s
+        
+        # Phase 3: Normal wait AFTER the invalid period (control case)
+        (base + timedelta(seconds=250), 1002, 43, 3),           # Phase call at 250s
+        (base + timedelta(seconds=280), 1002, 1, 3),            # Green at 280s (30s wait)
+        (base + timedelta(seconds=290), 1002, 7, 3),            # Green end
+        (base + timedelta(seconds=290.2), 1002, 44, 3),         # Call drop
+    ]
+    
+    raw_df = pd.DataFrame(raw_events, columns=['TimeStamp', 'DeviceId', 'EventId', 'Parameter'])
+    raw_df['DeviceId'] = raw_df['DeviceId'].astype('int64')
+    raw_df['EventId'] = raw_df['EventId'].astype('int16')
+    raw_df['Parameter'] = raw_df['Parameter'].astype('int16')
+    
+    params = {
+        'raw_data': raw_df,
+        'bin_size': 15,
+        'verbose': 0,
+        'aggregations': [
+            {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
+        ]
+    }
+    
+    processor = SignalDataProcessor(**params)
+    processor.load()
+    processor.aggregate()
+    
+    # Check for invalid events
+    invalid_events = processor.conn.query("""
+        SELECT * FROM timeline WHERE IsValid = FALSE
+    """).df()
+    
+    # Get Phase Wait events 
+    phase_waits = processor.conn.query("""
+        SELECT * FROM timeline 
+        WHERE EventClass = 'Phase Wait'
+        ORDER BY StartTime
+    """).df()
+    
+    processor.close()
+    
+    # We need at least one invalid event for this test to be meaningful
+    assert len(invalid_events) > 0, (
+        f"Expected at least one invalid event in the timeline, got {len(invalid_events)}.\n"
+        f"This test requires invalid events to exist for overlap checking."
+    )
+    
+    # Get the invalid event time range
+    invalid_start = invalid_events['StartTime'].min()
+    invalid_end = invalid_events['EndTime'].max()
+    
+    # Get Phase 1 wait events
+    phase1_waits = phase_waits[phase_waits['EventValue'] == 1]
+    
+    # Check if Phase 1 wait overlaps with invalid events period
+    if len(phase1_waits) > 0:
+        pw1 = phase1_waits.iloc[0]
+        pw1_start = pw1['StartTime']
+        pw1_end = pw1['EndTime']
+        
+        # Check for overlap: ranges overlap if Start1 < End2 AND Start2 < End1
+        overlaps = pw1_start < invalid_end and invalid_start < pw1_end
+        
+        if overlaps:
+            # If Phase 1 wait overlaps with invalid events, it should be marked invalid
+            assert pw1['IsValid'] == False, (
+                f"Phase 1 wait spans over invalid events and should be marked IsValid=False.\n"
+                f"Phase Wait: {pw1_start} -> {pw1_end}\n"
+                f"Invalid period: {invalid_start} -> {invalid_end}\n"
+                f"But IsValid={pw1['IsValid']}"
+            )

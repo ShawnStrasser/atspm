@@ -172,10 +172,30 @@ PhaseWait_Combined AS (
     UNION ALL
     SELECT * FROM PhaseWait_PersistentCall
 ),
+-- Invalid signal state events indicate missing/corrupt data during that time period
+InvalidEvents AS (
+    SELECT DeviceID, TimeStamp AS StartTime, EndTime FROM Green WHERE IsValid = FALSE
+    UNION ALL
+    SELECT DeviceID, TimeStamp AS StartTime, EndTime FROM Yellow WHERE IsValid = FALSE
+    UNION ALL
+    SELECT DeviceID, TimeStamp AS StartTime, EndTime FROM Red WHERE IsValid = FALSE
+),
 PhaseWait_WithValidity AS (
     SELECT 
         pw.TimeStamp, pw.DeviceID, pw.EventID, pw.Parameter, pw.EndTime,
-        COALESCE(pc.IsValid, TRUE) AS IsValid
+        -- Phase Wait is invalid if: (1) underlying Phase Call is invalid, or
+        -- (2) any invalid event overlaps with this Phase Wait period
+        -- Using proper overlap detection: ranges overlap if Start1 < End2 AND Start2 < End1
+        CASE 
+            WHEN COALESCE(pc.IsValid, TRUE) = FALSE THEN FALSE
+            WHEN EXISTS (
+                SELECT 1 FROM InvalidEvents ie 
+                WHERE ie.DeviceID = pw.DeviceID
+                AND pw.TimeStamp < ie.EndTime 
+                AND ie.StartTime < pw.EndTime
+            ) THEN FALSE
+            ELSE TRUE
+        END AS IsValid
     FROM PhaseWait_Combined pw
     LEFT JOIN PhaseCall pc 
         ON pw.DeviceID = pc.DeviceID 
