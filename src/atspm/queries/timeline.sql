@@ -173,12 +173,14 @@ PhaseWait_Combined AS (
     SELECT * FROM PhaseWait_PersistentCall
 ),
 -- Invalid signal state events indicate missing/corrupt data during that time period
+-- Only include matched events (EndTime IS NOT NULL) - unmatched events at chunk boundaries
+-- will be resolved in subsequent chunks and shouldn't invalidate Phase Wait events
 InvalidEvents AS (
-    SELECT DeviceID, TimeStamp AS StartTime, EndTime FROM Green WHERE IsValid = FALSE
+    SELECT DeviceID, TimeStamp AS StartTime, EndTime FROM Green WHERE IsValid = FALSE AND EndTime IS NOT NULL
     UNION ALL
-    SELECT DeviceID, TimeStamp AS StartTime, EndTime FROM Yellow WHERE IsValid = FALSE
+    SELECT DeviceID, TimeStamp AS StartTime, EndTime FROM Yellow WHERE IsValid = FALSE AND EndTime IS NOT NULL
     UNION ALL
-    SELECT DeviceID, TimeStamp AS StartTime, EndTime FROM Red WHERE IsValid = FALSE
+    SELECT DeviceID, TimeStamp AS StartTime, EndTime FROM Red WHERE IsValid = FALSE AND EndTime IS NOT NULL
 ),
 PhaseWait_WithValidity AS (
     SELECT 

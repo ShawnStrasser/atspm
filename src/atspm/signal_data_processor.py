@@ -156,6 +156,7 @@ class SignalDataProcessor:
         self.detector_config = None
         self.unmatched_event_settings = None # For incremental processing of timeline, split failure, arrival on green, and yellow red)
         self.unmatched_found = False
+        self.sf_unmatched_found = False  # Separate flag for split_failures unmatched file
         self.known_detectors_settings = None # For incremental processing of actuations to track detectors with zero counts
         self.known_detectors_found = False
         self.incremental_run = False
@@ -186,6 +187,7 @@ class SignalDataProcessor:
         if self.unmatched_event_settings is not None:
             self.incremental_run = True
             self.unmatched_found = True
+            self.sf_unmatched_found = True  # Separate flag for split_failures
             for key, value in self.unmatched_event_settings.items():
                 if key == 'max_days_old':
                     continue
@@ -194,10 +196,18 @@ class SignalDataProcessor:
                         self.unmatched_event_settings[key] = f"'{value}'"
                     else:
                         v_print(f"Warning, {key} file '{value}' does not exist or is blank. This is expected only for the first run.", self.verbose)
-                        self.unmatched_found = False
+                        # Set the appropriate flag based on which file is missing
+                        if key == 'split_fail_df_or_path':
+                            self.sf_unmatched_found = False
+                        else:
+                            self.unmatched_found = False
                 elif value is None:
                     v_print(f"Warning, {key} file is None. This is expected only for the first run.", self.verbose)
-                    self.unmatched_found = False
+                    # Set the appropriate flag based on which file is missing
+                    if key == 'split_fail_df_or_path':
+                        self.sf_unmatched_found = False
+                    else:
+                        self.unmatched_found = False
 
         # Check for known_detectors parameters in actuations aggregation
         # If found, extract them and create known_detectors_settings
@@ -429,7 +439,13 @@ class SignalDataProcessor:
                 # These are views that have the relateded unmatched events unioned to them
                 if self.incremental_run and aggregation['name'] in ['timeline', 'arrival_on_green', 'yellow_red', 'split_failures']:
                     params['incremental_run'] = True #lets the aggregation know to save unmatched events for next run
-                    if self.unmatched_found:
+                    # split_failures uses its own unmatched file (sf_unmatched), others use the main unmatched file
+                    if aggregation['name'] == 'split_failures':
+                        unmatched_available = self.sf_unmatched_found
+                    else:
+                        unmatched_available = self.unmatched_found
+                    
+                    if unmatched_available:
                         v_print(f"Incremental run using previous events for {aggregation['name']}", self.verbose, 2)
                         params['unmatched'] = True #lets the aggregation know to use the unmatched events from previous run
                         # split_failures uses its own view

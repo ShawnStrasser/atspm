@@ -172,6 +172,10 @@ def load_data(conn,
             for key, value in unmatched_events.items():
                 if isinstance(value, str):
                     source_path = _strip_wrapping_quotes(value)
+                    # Skip this file if it doesn't exist (file not created yet on first run)
+                    if not os.path.exists(source_path):
+                        v_print(f"Skipping {key} - file does not exist yet: {source_path}", verbose, 2)
+                        continue
                     reference = _quote_path(source_path)
                     source_columns = _get_columns_from_path(conn, source_path)
                     source_label = source_path
