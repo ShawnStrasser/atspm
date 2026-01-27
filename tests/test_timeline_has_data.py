@@ -44,19 +44,26 @@ class TestTimelineHasDataIntegration:
     
     def test_timeline_without_has_data_phase_wait_is_valid(self):
         """
-        Test that WITHOUT has_data checking, the Phase Wait event spanning the gap is marked as VALID.
-        This is the baseline behavior - the event is "valid" because start/end pair matched.
+        Test that with lenient has_data settings (allowing the sparse data to pass), 
+        the Phase Wait event spanning the gap can still be marked as VALID when 
+        all time periods have has_data coverage (even if data is sparse).
+        
+        Note: timeline now requires has_data as a dependency. This test uses very
+        lenient settings (900-minute bins covering the entire day) so that all 
+        events fall within has_data coverage, resulting in IsValid=True.
         """
         raw_data = create_synthetic_data()
         
-        # Run only timeline aggregation (no has_data)
+        # Use very large bin_size (900 mins = 15 hours) so all data falls in one or two bins
+        # This simulates the "no gap detection" scenario
         with SignalDataProcessor(
             raw_data=raw_data,
             detector_config=pd.DataFrame(columns=['DeviceId', 'Phase', 'Parameter', 'Function']),
-            bin_size=15,
+            bin_size=900,  # Very large bins - entire dataset fits in ~1 bin
             verbose=0,
             remove_incomplete=False,
             aggregations=[
+                {'name': 'has_data', 'params': {'no_data_min': 900, 'min_data_points': 1}},
                 {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60}},
             ]
         ) as processor:
@@ -70,9 +77,9 @@ class TestTimelineHasDataIntegration:
                 WHERE EventClass = 'Phase Wait'
             """).df()
         
-        # Verify the Phase Wait event exists and is marked as valid (no has_data check)
+        # Verify the Phase Wait event exists and is marked as valid (no gaps detected with large bins)
         assert len(result) == 1, f"Expected 1 Phase Wait event, got {len(result)}"
-        assert result.iloc[0]['IsValid'] == True, "Phase Wait event should be valid without has_data check"
+        assert result.iloc[0]['IsValid'] == True, "Phase Wait event should be valid with lenient has_data settings"
         assert result.iloc[0]['Duration'] > 40000, "Duration should be ~44468 seconds (12+ hours)"
     
     def test_timeline_with_has_data_phase_wait_is_invalid(self):

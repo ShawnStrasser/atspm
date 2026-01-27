@@ -31,6 +31,7 @@ TEST_PARAMS = {
   'remove_incomplete': True,
   'to_sql': False,
   'verbose': 0,
+  'controller_type': 'maxtime',  # Enable MAXTIME-specific measures (splits, coordination)
   'aggregations': [
       {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
       {'name': 'actuations', 'params': {}},
@@ -528,12 +529,13 @@ def phase_wait_synthetic_output():
   # Import the synthetic test data
   from tests.phase_wait_test_data import raw_df, expected_df
 
-  # Run the timeline aggregation
+  # Run the timeline aggregation (use lenient has_data for sparse synthetic data)
   params = {
     'raw_data': raw_df,
     'bin_size': 15,
     'verbose': 0,
     'aggregations': [
+      {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
       {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
     ]
   }
@@ -609,6 +611,7 @@ def phase_wait_incremental_output():
         'max_days_old': 14
       },
       'aggregations': [
+        {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
         {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
       ]
     }
@@ -672,12 +675,13 @@ def test_invalid_phase_call_creates_invalid_phase_wait():
   """
   from tests.phase_wait_test_data import raw_df, expected_invalid_df
 
-  # Run the timeline aggregation
+  # Run the timeline aggregation (use lenient has_data for sparse synthetic data)
   params = {
     'raw_data': raw_df,
     'bin_size': 15,
     'verbose': 0,
     'aggregations': [
+      {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
       {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
     ]
   }
@@ -759,6 +763,7 @@ def test_empty_dataframe_input():
     bin_size=15,
     verbose=0,
     remove_incomplete=True,
+    controller_type='maxtime',  # Enable MAXTIME measures
     aggregations=all_aggregations
   )
 
@@ -915,6 +920,7 @@ def test_phase_wait_invalid_event_propagation():
         'bin_size': 15,
         'verbose': 0,
         'aggregations': [
+            {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
             {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
         ]
     }

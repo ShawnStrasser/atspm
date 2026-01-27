@@ -1,5 +1,16 @@
 # Release Notes
 
+### Version 2.2.0 (January 26, 2026)
+
+#### Bug Fixes / Improvements:
+
+- **Phase Wait ASOF join for accurate skip detection**: `phase_wait` now uses ASOF join on cycle length events instead of binned aggregation. This prevents false positive skip detection when cycle length changes mid-phase-wait by using the `GREATEST` of start and end cycle lengths.
+- **MAXTIME ActualCycleLength support**: Added `controller_type` as a global setting. When set to `'maxtime'`, `phase_wait` uses the more accurate `ActualCycleLength` events (EventId 316) directly from raw data via ASOF join. 
+- **Incremental processing**: Added support for incremental runs for `phase_wait` and `coordination_agg`, carrying forward previous state via synthetic events in `unmatched_events`.
+- **Dependency validation and Sorting**: The processor now automatically validates and sorts aggregations based on their requirements (e.g., `timeline` after `has_data`).
+- **Global Settings and Performance**: Added `controller_type` as a global parameter. Non-MAXTIME controllers now automatically skip MAXTIME-specific measures (`splits`, `coordination`).
+- **Documentation**: Added aggregation dependencies table and updated README to reflect new global parameters and internal logic improvements.
+
 ### Version 2.1.3 (January 20, 2026)
 
 #### Bug Fixes / Improvements:

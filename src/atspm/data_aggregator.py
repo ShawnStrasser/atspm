@@ -57,7 +57,8 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
     # Uses synthetic EventIds 931-934 to carry coordination state across incremental runs:
     # 931: Pattern, 932: CycleLength, 933: ActualCycleLength, 934: ActualOffset
     # These are coordination state markers, not timeline events, so IsValid is always TRUE
-    if aggregation_name == 'coordination_agg':
+    # Only save state if running incrementally (unmatched_events table exists)
+    if aggregation_name == 'coordination_agg' and kwargs.get('incremental_run', False):
         query += """
         INSERT INTO unmatched_events
         SELECT 

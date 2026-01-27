@@ -12,10 +12,28 @@ import os
 # Example: 'phase_wait' requires 'timeline' to exist
 AGGREGATION_DEPENDENCIES = {
     'timeline': ['has_data'],  # timeline needs has_data for IsValid check
-    'phase_wait': ['timeline'],
+    'phase_wait': ['timeline'],  # phase_wait uses ASOF join on cycle length events from timeline
     'ped_delay': ['timeline'],
     'coordination_agg': ['timeline', 'has_data'],
 }
+
+
+def _validate_aggregation_dependencies(aggregations, verbose=1):
+    """
+    Validate that all required dependencies are present in the aggregation list.
+    Raises ValueError if a dependency is missing.
+    """
+    agg_names = [a['name'] for a in aggregations]
+    
+    for name in agg_names:
+        if name in AGGREGATION_DEPENDENCIES:
+            required_deps = AGGREGATION_DEPENDENCIES[name]
+            missing_deps = [dep for dep in required_deps if dep not in agg_names]
+            if missing_deps:
+                raise ValueError(
+                    f"Aggregation '{name}' requires the following aggregations to be included: {missing_deps}. "
+                    f"Please add them to your aggregations list."
+                )
 
 
 def _sort_aggregations_by_dependency(aggregations, verbose=1):
@@ -165,13 +183,33 @@ class SignalDataProcessor:
         self.remove_incomplete = False
         self.to_sql = False
         self.verbose = 1 # 0: only print errors, 1: print performance, 2: print debug statements
+        self.controller_type = '' # Controller type: '' (default) or 'maxtime' (case-insensitive)
         
         # Extract parameters from kwargs
         for key, value in kwargs.items():
             setattr(self, key, value)
 
-        # Sort aggregations by dependency order (e.g., has_data before timeline, timeline before phase_wait)
+        # Normalize controller_type to lowercase for consistent comparison
+        if hasattr(self, 'controller_type') and self.controller_type:
+            self.controller_type = str(self.controller_type).lower()
+
+        # MAXTIME-specific measures that should be skipped for non-MAXTIME controllers
+        MAXTIME_MEASURES = {'splits', 'coordination'}
+        
+        # Filter out MAXTIME-specific measures if controller_type is not 'maxtime'
+        if hasattr(self, 'aggregations') and self.aggregations and self.controller_type != 'maxtime':
+            original_count = len(self.aggregations)
+            self.aggregations = [agg for agg in self.aggregations if agg['name'] not in MAXTIME_MEASURES]
+            removed_count = original_count - len(self.aggregations)
+            if removed_count > 0:
+                removed_names = [agg['name'] for agg in kwargs.get('aggregations', []) if agg['name'] in MAXTIME_MEASURES]
+                v_print(f"Skipped {removed_count} MAXTIME-specific measure(s): {removed_names}. Set controller_type='maxtime' to enable.", self.verbose)
+
+        # Validate and sort aggregations by dependency order
         if hasattr(self, 'aggregations') and self.aggregations:
+            # First validate that all required dependencies are present
+            _validate_aggregation_dependencies(self.aggregations, self.verbose)
+            # Then sort by dependency order (e.g., has_data before timeline, timeline before phase_wait)
             self.aggregations = _sort_aggregations_by_dependency(self.aggregations, self.verbose)
 
         # Check for valid bin_size and no_data_min combo
@@ -413,6 +451,7 @@ class SignalDataProcessor:
                 params['bin_size'] = self.bin_size
                 params['from_table'] = 'raw_data'
                 params['remove_incomplete'] = self.remove_incomplete
+                params['controller_type'] = self.controller_type  # Global controller type setting
                 
                 #######################
                 ### Phase Wait ###
@@ -437,7 +476,8 @@ class SignalDataProcessor:
                 ### Unmatched Events ##
                 # If unmatched_event_settings is supplied, then change the from_table for timeline, split_failures, arrival_on_green, and yellow_red
                 # These are views that have the relateded unmatched events unioned to them
-                if self.incremental_run and aggregation['name'] in ['timeline', 'arrival_on_green', 'yellow_red', 'split_failures']:
+                # coordination_agg and phase_wait also use unmatched events to store previous coordination state
+                if self.incremental_run and aggregation['name'] in ['timeline', 'arrival_on_green', 'yellow_red', 'split_failures', 'coordination_agg', 'phase_wait']:
                     params['incremental_run'] = True #lets the aggregation know to save unmatched events for next run
                     # split_failures uses its own unmatched file (sf_unmatched), others use the main unmatched file
                     if aggregation['name'] == 'split_failures':
@@ -448,8 +488,8 @@ class SignalDataProcessor:
                     if unmatched_available:
                         v_print(f"Incremental run using previous events for {aggregation['name']}", self.verbose, 2)
                         params['unmatched'] = True #lets the aggregation know to use the unmatched events from previous run
-                        # split_failures uses its own view
-                        if aggregation['name'] != 'split_failures':
+                        # split_failures, coordination_agg, and phase_wait use their own logic
+                        if aggregation['name'] not in ['split_failures', 'coordination_agg', 'phase_wait']:
                             params['from_table'] = 'raw_data_all'
                     else:
                         v_print(f"First Run For {aggregation['name']}", self.verbose, 2)

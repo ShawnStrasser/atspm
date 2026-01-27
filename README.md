@@ -86,6 +86,9 @@ params = {
     'remove_incomplete': True,              # Remove bins with insufficient data (requires 'has_data' agg)
     'verbose': 1,                           # 0: Errors only, 1: Performance, 2: Debug
     'to_sql': False,                        # If True, returns SQL strings instead of executing
+    'controller_type': 'maxtime',           # Global: '' (default) or 'maxtime' (case-insensitive)
+                                            # When 'maxtime': phase_wait uses ActualCycleLength
+                                            # When not 'maxtime': splits & coordination are skipped
 
     # --- Incremental Processing Settings ---
     'unmatched_event_settings': {
@@ -157,8 +160,8 @@ params = {
         },
         {'name': 'ped_delay', 'params': {}},
         {'name': 'terminations', 'params': {}},
-        {'name': 'splits', 'params': {}},
-        {'name': 'coordination', 'params': {}}, # MAXTIME-specific
+        {'name': 'splits', 'params': {}},        # MAXTIME-specific (skipped if controller_type != 'maxtime')
+        {'name': 'coordination', 'params': {}},  # MAXTIME-specific (skipped if controller_type != 'maxtime')
         {'name': 'coordination_agg', 'params': {}} # General coordination state (Pattern, Cycle, etc.)
     ]
 }
@@ -212,7 +215,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Coordination Aggregate** (`coordination_agg`): Binned coordination state per interval. Provides the active Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME) for every bin using fill-forward logic.
 - **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations.
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
-- **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length).
+- **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
 - **Detector Health** (`detector_health`): Time-series anomaly scores for detector actuations (using the `traffic-anomaly` package), typically run on binned `actuations` data.
 
 ### Timeline events (non-binned)
@@ -227,6 +230,19 @@ The **`timeline`** table is an event-level dimension for troubleshooting and vis
 - `IsValid` (whether the start/end pair is complete)
 
 Passing `maxtime=True` to the `timeline` aggregation adds MAXTIME-only events such as splits and alarm group events (Event 175).
+
+### Aggregation Dependencies
+
+Some aggregations require other aggregations to be included in your processing run. The processor will automatically validate these dependencies and raise an error if a required dependency is missing:
+
+| Aggregation | Required Dependencies |
+| --- | --- |
+| `timeline` | `has_data` |
+| `coordination_agg` | `timeline`, `has_data` |
+| `phase_wait` | `timeline` |
+| `ped_delay` | `timeline` |
+
+The processor automatically sorts aggregations to ensure dependencies run first, so you don't need to worry about the order in your aggregations list.
 
 The table below lists all `EventClass` values and their associated `EventValue` ranges produced by the `timeline` aggregation.
 
