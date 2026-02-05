@@ -455,7 +455,7 @@ FROM (
         END
       ELSE c.EventClass
     END AS EventClass,
-    CASE
+    (CASE
       WHEN t.EventId = 175 THEN t.Parameter
       WHEN a.alarm_type IS NOT NULL THEN NULL
       WHEN c.EventClass = 'Split' THEN t.Parameter
@@ -469,7 +469,7 @@ FROM (
                             'Manual Control', 'Stop Time Input', 'Interval Advance', 'Phase Wait',
                             'Cycle Length Change') THEN t.Parameter
       ELSE NULL
-    END AS EventValue
+    END)::INT16 AS EventValue
   FROM 
   (
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, TRUE AS IsValid FROM Transition
