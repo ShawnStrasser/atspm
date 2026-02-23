@@ -711,7 +711,10 @@ class SignalDataProcessor:
                 SELECT 
                     u.DeviceId,
                     u.Detector,
-                    COALESCE(MAX(kd.LastSeen), MAX(cd.LastSeen)) as LastSeen
+                    GREATEST(
+                        COALESCE(MAX(kd.LastSeen), TIMESTAMP '1970-01-01 00:00:00'),
+                        COALESCE(MAX(cd.LastSeen), TIMESTAMP '1970-01-01 00:00:00')
+                    ) as LastSeen
                 FROM 
                     (SELECT DISTINCT DeviceId, Detector FROM known_detectors_previous 
                      UNION 
