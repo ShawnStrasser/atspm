@@ -1,5 +1,13 @@
 # Release Notes
 
+### Version 2.3.0 (February 23, 2026)
+
+#### Bug Fixes / Improvements:
+
+- **Known detector retention fix (`known_detectors_max_days_old`)**: Fixed incremental `actuations` zero-fill behavior so `known_detectors.LastSeen` is correctly updated to the most recent timestamp across current and prior runs. This prevents detectors from aging out early (for example, dropping around 24 hours when configured for 2 days) and restores expected retention for detector health flatline continuity.
+- **Timeline live mode**: Added `live` option to `timeline` aggregation. When `live=True`, incomplete timeline events are emitted instead of dropped, marked `IsValid=False`, and assigned one common `EndTime` aligned to the current bin end; they can still be matched in subsequent incremental runs.
+- **Tests**: Added regression test for known-detector retention and timeline live-mode tests for incomplete event behavior.
+
 ### Version 2.2.0 (January 26, 2026)
 
 #### Bug Fixes / Improvements:

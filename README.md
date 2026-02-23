@@ -140,7 +140,8 @@ params = {
             'params': {
                 'maxtime': True,            # Include MAXTIME-specific events
                 'min_duration': 1,          # Filter out events shorter than n seconds
-                'cushion_time': 1           # Padding for instant events (seconds)
+                'cushion_time': 1,          # Padding for instant events (seconds)
+                'live': False               # If True, keep incomplete events as IsValid=False with common EndTime. This is for troubleshooting.
             }
         },
         {
@@ -230,6 +231,7 @@ The **`timeline`** table is an event-level dimension for troubleshooting and vis
 - `IsValid` (whether the start/end pair is complete)
 
 Passing `maxtime=True` to the `timeline` aggregation adds MAXTIME-only events such as splits and alarm group events (Event 175).
+Passing `live=True` keeps incomplete timeline events (normally dropped), marks them `IsValid=False`, and assigns a common `EndTime` at the current bin boundary. This is useful for near-real-time dashboards.
 
 ### Aggregation Dependencies
 
