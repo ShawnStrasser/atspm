@@ -465,6 +465,14 @@ class SignalDataProcessor:
                         params['skip_multiplier'] = 1.5
 
                 #######################
+                ### Timeline ###
+                # live mode keeps incomplete events in timeline output.
+                # Supports `live_transform` as a backward-compatible alias.
+                if aggregation['name'] == 'timeline':
+                    if 'live' not in params:
+                        params['live'] = bool(params.get('live_transform', False))
+
+                #######################
                 ### Full Pedestrian ###
                 # Add min_timestamp and max_timestamp to params if detector_faults or full_ped
                 if aggregation['name'] == 'full_ped':

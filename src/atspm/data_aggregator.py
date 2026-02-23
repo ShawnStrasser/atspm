@@ -14,6 +14,7 @@ def render_query(query_name, **kwargs):
 
 def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
     query = render_query(aggregation_name, **kwargs)
+    live_mode = bool(kwargs.get('live', False))
 
     # Option to remove incomplete data (natural join with DeviceId, TimeStamp columns)
     if aggregation_name not in ['has_data', 'unmatched_events', 'timeline', 'split_failures'] and kwargs['remove_incomplete']:
@@ -46,9 +47,40 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
                 TRUE AS IsValid
             FROM timeline t
             WHERE EndTime IS NULL AND EventId != 901; """
-        # Delete unmatched rows from timeline table, including 902 (Phase Wait state tracking)
-        # which is only used for incremental processing and should never appear in output
-        query += f" DELETE FROM timeline WHERE EndTime IS NULL OR Duration < {kwargs['min_duration']} OR EventId = 902; "
+        if live_mode:
+            # In live mode, keep incomplete rows in timeline output by assigning a common EndTime:
+            # end of the bin containing max raw_data timestamp (floor + one bin).
+            query += f"""
+            WITH live_cutoff AS (
+                SELECT
+                    TIME_BUCKET(INTERVAL '{kwargs['bin_size']} minutes', MAX(TimeStamp))
+                    + INTERVAL '{kwargs['bin_size']} minutes' AS EndTimeCutoff
+                FROM raw_data
+            )
+            UPDATE timeline t
+            SET
+                EndTime = lc.EndTimeCutoff,
+                Duration = DATE_DIFF('millisecond', t.StartTime, lc.EndTimeCutoff)::FLOAT / 1000,
+                IsValid = FALSE
+            FROM live_cutoff lc
+            WHERE t.EndTime IS NULL;
+            """
+            # Keep all incomplete rows; still remove short completed rows if requested.
+            query += f"""
+            DELETE FROM timeline t
+            WHERE t.Duration < {kwargs['min_duration']}
+              AND NOT EXISTS (
+                SELECT 1 FROM unmatched_events u
+                WHERE u.TimeStamp = t.StartTime
+                  AND u.DeviceId = t.DeviceId
+                  AND u.EventId = t.EventId
+                  AND u.Parameter = t.Parameter
+              );
+            """
+        else:
+            # Delete unmatched rows from timeline table, including 902 (Phase Wait state tracking)
+            # which is only used for incremental processing and should never appear in output
+            query += f" DELETE FROM timeline WHERE EndTime IS NULL OR Duration < {kwargs['min_duration']} OR EventId = 902; "
         # Drop columns not needed in saved output
         query += " ALTER TABLE timeline DROP COLUMN Parameter; "
         query += " ALTER TABLE timeline DROP COLUMN EventId; "
