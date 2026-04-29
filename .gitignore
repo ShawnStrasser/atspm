@@ -154,3 +154,4 @@ pyvenv.cfg
 *.egg-info/
 _notes.txt
 package_tester.ipynb
+scripts/test_detector_health_local.py

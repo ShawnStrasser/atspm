@@ -318,7 +318,8 @@ OverlapEvents AS /* intermediate step */
   SELECT
     *,
     LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS EndTime,
-    LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId
+    LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId,
+    MAX(CASE WHEN EventId = 65 THEN 1 ELSE 0 END) OVER (PARTITION BY DeviceID, Parameter) AS HasOverlapOff
   FROM {{from_table}}
   WHERE EventId BETWEEN 61 AND 66
 ),
@@ -346,7 +347,7 @@ OverlapYellow AS (
 OverlapRed AS (
   -- Overlap Red: starts with EventId 64
   SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime,
-         CASE WHEN NextEventId <> 64 THEN TRUE ELSE FALSE END AS IsValid
+         CASE WHEN NextEventId = 65 OR (NextEventId = 61 AND HasOverlapOff = 0) THEN TRUE ELSE FALSE END AS IsValid
   FROM OverlapEvents
   WHERE EventId = 64
 ),
