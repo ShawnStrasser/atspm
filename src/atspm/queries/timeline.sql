@@ -338,9 +338,9 @@ OverlapTrailGreen AS (
   WHERE EventId = 62
 ),
 OverlapYellow AS (
-  -- Overlap Yellow: starts with EventId 63
+  -- Overlap Yellow: starts with EventId 63; consecutive begin events are legitimate
   SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime,
-         CASE WHEN NextEventId <> 63 THEN TRUE ELSE FALSE END AS IsValid
+         TRUE AS IsValid
   FROM OverlapEvents
   WHERE EventId = 63
 ),
