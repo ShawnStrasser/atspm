@@ -3,7 +3,8 @@
 --jinja2 macros are used to reduce code duplication for common patterns.
 
 -- Pair matching start/end events into intervals with a validity flag.
-{% macro paired_event(name, start_event, end_event, partition_cols='DeviceID, Parameter', order_by='TimeStamp') -%}
+-- max_duration (seconds), when given, is a sanity check: intervals longer than that are marked invalid.
+{% macro paired_event(name, start_event, end_event, partition_cols='DeviceID, Parameter', order_by='TimeStamp', max_duration=none) -%}
 {{ name }}1 AS
 	(
 	SELECT *,
@@ -15,7 +16,9 @@
 {{ name }} AS
 	(
 	SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime,
-		   CASE WHEN EventId = {{ start_event }} AND NextEventId = {{ end_event }} THEN TRUE ELSE FALSE END AS IsValid
+		   CASE WHEN EventId = {{ start_event }} AND NextEventId = {{ end_event }}
+				{%- if max_duration is not none %} AND DATE_DIFF('millisecond', TimeStamp, EndTime) <= {{ max_duration * 1000 }}{% endif %}
+				THEN TRUE ELSE FALSE END AS IsValid
 	FROM {{ name }}1
 	WHERE EventId = {{ start_event }} OR (EventId = {{ end_event }} AND NextEventId = {{ end_event }})
 	)
@@ -58,8 +61,9 @@ WITH
 {{ paired_event('AdvanceWarningPhase', 55, 56, order_by='TimeStamp, EventId') }},
 {{ paired_event('FYA', 32, 33) }},
 {{ paired_event('Green', 1, 7) }},
-{{ paired_event('Yellow', 8, 9) }},
-{{ paired_event('Red', 10, 11) }},
+-- Phase yellow/red clearance intervals over 10 seconds indicate bad data, so flag them invalid.
+{{ paired_event('Yellow', 8, 9, max_duration=10) }},
+{{ paired_event('Red', 10, 11, max_duration=10) }},
 {{ paired_event('OverlapPed', 67, 65) }},
 {{ paired_event('Ped', 21, 23) }},
 {{ paired_event('PhaseCall', 43, 44) }},
