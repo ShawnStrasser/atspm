@@ -233,6 +233,8 @@ The **`timeline`** table is an event-level dimension for troubleshooting and vis
 - `EventValue` (phase/overlap or a coded value, depending on `EventClass`)
 - `IsValid` (whether the start/end pair is complete; intervals that overlap a controller clock update are also marked invalid)
 
+When `has_data` is available, an interval is also marked invalid if any `bin_size` bin it spans has no `has_data` row for that device, since events may have been missed while the device was not reporting. This works the same for incremental runs: each run saves a marker per device in the unmatched events (synthetic `EventId` 935) holding the last bin that had data, so a gap between or across runs is still detected when the interval finally ends.
+
 Clock Update events have no reliable size, since the controller's time correction (`EventValue`) is optional and often 0. Any interval overlapping a 10-second window around each clock update, from 5 seconds before to 5 seconds after, is therefore marked invalid. The Clock Update row itself is shown like other point-in-time events, starting at the update and lasting `cushion_time` seconds.
 
 Passing `maxtime=True` to the `timeline` aggregation adds MAXTIME-only events such as splits and alarm group events (Event 175).

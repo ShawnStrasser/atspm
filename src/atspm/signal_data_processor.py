@@ -363,6 +363,115 @@ class SignalDataProcessor:
             v_print('*'*50, self.verbose)
             raise e
         
+    def _invalidate_timeline_data_gaps(self):
+        """Marks timeline rows and unmatched events invalid when they span a bin missing from has_data.
+
+        Every bin an interval spans is checked, not just the ones it starts and ends in. has_data only
+        covers the current run, so incremental runs carry a marker per device in unmatched_events
+        (synthetic EventId 935) holding its last bin with data. The next run treats that bin as known and
+        checks from it onward, which exposes a gap lying between runs or across runs that were skipped.
+        Bins before the marker were checked by earlier runs, with the result kept in IsValid.
+        """
+        bin_interval = f"INTERVAL '{self.bin_size} minutes'"
+        has_previous = self.conn.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_previous'"
+        ).fetchone()[0]
+        if has_previous:
+            previous_markers = "SELECT DeviceId, MAX(TimeStamp) AS MarkerBin FROM unmatched_previous WHERE EventId = 935 GROUP BY DeviceId"
+        else:
+            previous_markers = "SELECT DeviceId, TimeStamp AS MarkerBin FROM has_data WHERE FALSE"
+
+        # Bins known to have data, and per device where checking starts (FirstBin) and how far the
+        # current data reaches (LastBin). Without a marker, checking starts at the first bin of this run.
+        self.conn.execute(f"""
+            CREATE OR REPLACE TEMP TABLE gap_markers AS {previous_markers};
+            CREATE OR REPLACE TEMP TABLE gap_known_bins AS
+                SELECT DeviceId, TimeStamp FROM has_data
+                UNION
+                SELECT DeviceId, MarkerBin FROM gap_markers;
+            CREATE OR REPLACE TEMP TABLE gap_bounds AS
+                SELECT d.DeviceId,
+                       COALESCE(m.MarkerBin, (SELECT TIME_BUCKET({bin_interval}, MIN(TimeStamp)) FROM raw_data)) AS FirstBin,
+                       h.LastBin
+                FROM (SELECT DISTINCT DeviceId FROM timeline UNION SELECT DISTINCT DeviceId FROM unmatched_events) d
+                LEFT JOIN gap_markers m USING (DeviceId)
+                LEFT JOIN (SELECT DeviceId, MAX(TimeStamp) AS LastBin FROM has_data GROUP BY DeviceId) h USING (DeviceId);
+        """)
+
+        # Completed intervals: check from the start bin (or FirstBin if later) through the end bin
+        self.conn.execute(f"""
+            UPDATE timeline SET IsValid = FALSE
+            WHERE rowid IN (
+                SELECT s.rid
+                FROM (
+                    SELECT t.rowid AS rid, t.DeviceId,
+                           UNNEST(generate_series(
+                               GREATEST(TIME_BUCKET({bin_interval}, t.StartTime), COALESCE(b.FirstBin, TIME_BUCKET({bin_interval}, t.StartTime))),
+                               TIME_BUCKET({bin_interval}, t.EndTime),
+                               {bin_interval})) AS bin_ts
+                    FROM timeline t
+                    LEFT JOIN gap_bounds b USING (DeviceId)
+                    WHERE t.IsValid = TRUE AND t.EndTime IS NOT NULL
+                ) s
+                ANTI JOIN gap_known_bins k ON k.DeviceId = s.DeviceId AND k.TimeStamp = s.bin_ts
+            );
+        """)
+
+        # Unmatched events: check from the start bin (or FirstBin if later) through the last bin with
+        # data. Nothing past that is judged yet, the next run does it from the marker.
+        self.conn.execute(f"""
+            UPDATE unmatched_events SET IsValid = FALSE
+            WHERE rowid IN (
+                SELECT s.rid
+                FROM (
+                    SELECT u.rowid AS rid, u.DeviceId,
+                           UNNEST(generate_series(
+                               GREATEST(TIME_BUCKET({bin_interval}, u.TimeStamp), COALESCE(b.FirstBin, TIME_BUCKET({bin_interval}, u.TimeStamp))),
+                               GREATEST(TIME_BUCKET({bin_interval}, u.TimeStamp), COALESCE(b.LastBin, TIME_BUCKET({bin_interval}, u.TimeStamp))),
+                               {bin_interval})) AS bin_ts
+                    FROM unmatched_events u
+                    LEFT JOIN gap_bounds b USING (DeviceId)
+                    WHERE u.IsValid = TRUE
+                ) s
+                ANTI JOIN gap_known_bins k ON k.DeviceId = s.DeviceId AND k.TimeStamp = s.bin_ts
+            );
+        """)
+
+        if has_previous:
+            # Rows whose start came from an earlier run inherit that run's verdict, whether the row was
+            # completed in this run or is still unmatched
+            self.conn.execute("""
+                UPDATE timeline t SET IsValid = FALSE
+                WHERE t.IsValid = TRUE
+                  AND EXISTS (
+                    SELECT 1 FROM unmatched_previous u
+                    WHERE u.DeviceId = t.DeviceId AND u.TimeStamp = t.StartTime AND u.IsValid = FALSE
+                      AND u.EventId NOT BETWEEN 931 AND 935 -- state markers, not interval starts
+                  );
+                UPDATE unmatched_events e SET IsValid = FALSE
+                WHERE e.IsValid = TRUE
+                  AND EXISTS (
+                    SELECT 1 FROM unmatched_previous u
+                    WHERE u.DeviceId = e.DeviceId AND u.TimeStamp = e.TimeStamp
+                      AND u.EventId = e.EventId AND u.Parameter = e.Parameter AND u.IsValid = FALSE
+                  );
+            """)
+
+        if self.incremental_run:
+            # Save each device's last bin with data for the next run. A device with no data in this run
+            # keeps its previous marker, so the gap is still measured from where its data stopped.
+            self.conn.execute("""
+                INSERT INTO unmatched_events
+                SELECT TimeStamp, DeviceId, 935 AS EventId, 0 AS Parameter, TRUE AS IsValid
+                FROM (
+                    SELECT DeviceId, MAX(TimeStamp) AS TimeStamp FROM has_data GROUP BY DeviceId
+                    UNION ALL
+                    SELECT DeviceId, MarkerBin FROM gap_markers WHERE DeviceId NOT IN (SELECT DeviceId FROM has_data)
+                );
+            """)
+
+        self.conn.execute("DROP TABLE gap_markers; DROP TABLE gap_known_bins; DROP TABLE gap_bounds;")
+
     def aggregate(self):
         """Runs all aggregations."""
         # Instantiate a dictionary to store runtimes
@@ -537,149 +646,7 @@ class SignalDataProcessor:
                     
                     if has_data_exists:
                         v_print("Marking timeline events with missing has_data as invalid", self.verbose, 2)
-                        bin_size = self.bin_size
-                        
-                        if self.incremental_run:
-                            # Incremental mode: 
-                            # For events whose START came from unmatched_previous, use unmatched_previous.IsValid
-                            # AND check if END bin has has_data
-                            # For events whose START is in current chunk, check both START and END bins
-                            
-                            # First, handle events matched from unmatched_previous:
-                            # If their stored IsValid is FALSE, the event is invalid
-                            # Also check END bin has has_data
-                            unmatched_previous_exists = self.conn.execute(
-                                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_previous'"
-                            ).fetchone()[0]
-                            
-                            if unmatched_previous_exists:
-                                # Mark invalid if start was invalid (from unmatched_previous.IsValid=FALSE)
-                                # OR if END bin doesn't have has_data
-                                update_query = f"""
-                                UPDATE timeline t
-                                SET IsValid = FALSE
-                                WHERE t.IsValid = TRUE 
-                                  AND t.EndTime IS NOT NULL
-                                  AND (
-                                    -- Start came from unmatched_previous with IsValid=FALSE
-                                    EXISTS (
-                                        SELECT 1 FROM unmatched_previous u
-                                        WHERE u.DeviceId = t.DeviceId
-                                          AND u.TimeStamp = t.StartTime
-                                          AND u.IsValid = FALSE
-                                    )
-                                    OR
-                                    -- END bin doesn't have has_data
-                                    NOT EXISTS (
-                                        SELECT 1 FROM has_data h
-                                        WHERE h.DeviceId = t.DeviceId
-                                          AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', t.EndTime)
-                                    )
-                                  );
-                                """
-                                self.conn.execute(update_query)
-                                
-                                # For events that started in current chunk (not from unmatched_previous),
-                                # check both START and END bins
-                                update_query2 = f"""
-                                UPDATE timeline t
-                                SET IsValid = FALSE
-                                WHERE t.IsValid = TRUE 
-                                  AND t.EndTime IS NOT NULL
-                                  AND NOT EXISTS (
-                                    SELECT 1 FROM unmatched_previous u
-                                    WHERE u.DeviceId = t.DeviceId AND u.TimeStamp = t.StartTime
-                                  )
-                                  AND (
-                                    -- START bin doesn't have has_data
-                                    NOT EXISTS (
-                                        SELECT 1 FROM has_data h
-                                        WHERE h.DeviceId = t.DeviceId
-                                          AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', t.StartTime)
-                                    )
-                                    OR
-                                    -- END bin doesn't have has_data
-                                    NOT EXISTS (
-                                        SELECT 1 FROM has_data h
-                                        WHERE h.DeviceId = t.DeviceId
-                                          AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', t.EndTime)
-                                    )
-                                  );
-                                """
-                                self.conn.execute(update_query2)
-                            else:
-                                # First incremental chunk - no unmatched_previous yet
-                                # Check both START and END bins for all events
-                                update_query = f"""
-                                UPDATE timeline t
-                                SET IsValid = FALSE
-                                WHERE t.IsValid = TRUE 
-                                  AND t.EndTime IS NOT NULL
-                                  AND (
-                                    -- START bin doesn't have has_data
-                                    NOT EXISTS (
-                                        SELECT 1 FROM has_data h
-                                        WHERE h.DeviceId = t.DeviceId
-                                          AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', t.StartTime)
-                                    )
-                                    OR
-                                    -- END bin doesn't have has_data
-                                    NOT EXISTS (
-                                        SELECT 1 FROM has_data h
-                                        WHERE h.DeviceId = t.DeviceId
-                                          AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', t.EndTime)
-                                    )
-                                  );
-                                """
-                                self.conn.execute(update_query)
-                        else:
-                            # Batch mode: Check ALL bins spanned by the event
-                            # An event is invalid if any bin it spans is missing from has_data
-                            update_query = f"""
-                            UPDATE timeline t
-                            SET IsValid = FALSE
-                            WHERE t.IsValid = TRUE 
-                              AND t.EndTime IS NOT NULL
-                              AND EXISTS (
-                                -- Check if there's any bin that the event spans that is NOT in has_data
-                                SELECT 1
-                                FROM (
-                                    -- Generate all bins that this event could span
-                                    SELECT UNNEST(generate_series(
-                                        TIME_BUCKET(INTERVAL '{bin_size} minutes', t.StartTime),
-                                        TIME_BUCKET(INTERVAL '{bin_size} minutes', t.EndTime),
-                                        INTERVAL '{bin_size} minutes'
-                                    )) AS bin_ts
-                                ) bins
-                                WHERE NOT EXISTS (
-                                    SELECT 1 FROM has_data h
-                                    WHERE h.DeviceId = t.DeviceId
-                                      AND h.TimeStamp = bins.bin_ts
-                                )
-                              );
-                            """
-                            self.conn.execute(update_query)
-                        
-                        # Update unmatched_events.IsValid for events that now span gaps
-                        # in the current chunk's has_data (mark as False if gaps exist)
-                        unmatched_exists = self.conn.execute(
-                            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_events'"
-                        ).fetchone()[0]
-                        
-                        if unmatched_exists:
-                            # For unmatched events (start but no end yet), check if the START bin has has_data
-                            # If not, mark as invalid so future matching knows the event spanned a gap
-                            update_unmatched_query = f"""
-                            UPDATE unmatched_events u
-                            SET IsValid = FALSE
-                            WHERE u.IsValid = TRUE
-                              AND NOT EXISTS (
-                                SELECT 1 FROM has_data h
-                                WHERE h.DeviceId = u.DeviceId
-                                  AND h.TimeStamp = TIME_BUCKET(INTERVAL '{bin_size} minutes', u.TimeStamp)
-                              );
-                            """
-                            self.conn.execute(update_unmatched_query)
+                        self._invalidate_timeline_data_gaps()
 
                     # timeline.sql invalidates completed intervals that overlap a controller clock update (181)
                     # window of 5 seconds either side. An unmatched event starting before a window ends will
@@ -689,6 +656,7 @@ class SignalDataProcessor:
                         UPDATE unmatched_events u
                         SET IsValid = FALSE
                         WHERE u.IsValid = TRUE
+                          AND u.EventId NOT BETWEEN 931 AND 935 -- state markers, not interval starts
                           AND EXISTS (
                             SELECT 1 FROM raw_data r
                             WHERE r.EventId = 181

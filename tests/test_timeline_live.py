@@ -51,7 +51,9 @@ def test_timeline_live_keeps_incomplete_and_uses_bin_endtime():
     expected_end = chunk1["TimeStamp"].max().floor("15min") + pd.Timedelta(minutes=15)
 
     assert len(unmatched1) > 0, "Expected unmatched events to be captured for incremental processing"
-    assert len(timeline1) == len(unmatched1), "Expected live mode to keep incomplete timeline events"
+    # EventId 935 is the per-device has_data marker, not an incomplete timeline event
+    incomplete1 = unmatched1[unmatched1["EventId"] != 935]
+    assert len(timeline1) == len(incomplete1), "Expected live mode to keep incomplete timeline events"
     assert timeline1["EndTime"].nunique() == 1, "All incomplete live rows should use one common EndTime"
     assert timeline1["EndTime"].iloc[0] == expected_end
     assert (timeline1["IsValid"] == False).all(), "Incomplete live rows must be marked invalid"
