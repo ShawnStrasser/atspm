@@ -231,7 +231,9 @@ The **`timeline`** table is an event-level dimension for troubleshooting and vis
 - `Duration` (seconds between `StartTime` and `EndTime`)
 - `EventClass` (for example, Green, Yellow, Ped Service, Split, Preempt)
 - `EventValue` (phase/overlap or a coded value, depending on `EventClass`)
-- `IsValid` (whether the start/end pair is complete)
+- `IsValid` (whether the start/end pair is complete; intervals that overlap a controller clock update are also marked invalid)
+
+Clock Update events have no reliable size, since the controller's time correction (`EventValue`) is optional and often 0. Any interval overlapping a 10-second window around each clock update, from 5 seconds before to 5 seconds after, is therefore marked invalid. The Clock Update row itself is shown like other point-in-time events, starting at the update and lasting `cushion_time` seconds.
 
 Passing `maxtime=True` to the `timeline` aggregation adds MAXTIME-only events such as splits and alarm group events (Event 175).
 Passing `live=True` keeps incomplete timeline events (normally dropped), marks them `IsValid=False`, and assigns a common `EndTime` at the current bin boundary. This is useful for near-real-time dashboards.
@@ -277,6 +279,7 @@ The table below lists all `EventClass` values and their associated `EventValue` 
 | Split | 1-16 |
 | Pattern Change | 0-255 |
 | Cycle Length Change | 0-255 |
+| Offset Change | 0-255 |
 | Coord | 0-255 |
 | Preempt | 1-16 |
 | TSP Call | 1-16 |
@@ -288,6 +291,7 @@ The table below lists all `EventClass` values and their associated `EventValue` 
 | Stuck Off | 1-128 |
 | Stuck On | 1-128 |
 | Erratic | 1-128 |
+| Ped Detector Failed | 1-255 |
 | Transition | NULL |
 | Transition Shortway | NULL |
 | Transition Longway | NULL |
@@ -309,6 +313,7 @@ The table below lists all `EventClass` values and their associated `EventValue` 
 | Alarm Group State | NULL |
 | Power Failure | NULL |
 | Power Restored | NULL |
+| Clock Update | 0-255 |
 | Stop Time Input | NULL |
 | Manual Control | NULL |
 | Aux Switch | 1-64 |

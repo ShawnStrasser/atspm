@@ -680,7 +680,23 @@ class SignalDataProcessor:
                               );
                             """
                             self.conn.execute(update_unmatched_query)
-                
+
+                    # timeline.sql invalidates completed intervals that overlap a controller clock update (181)
+                    # window of 5 seconds either side. An unmatched event starting before a window ends will
+                    # overlap it once matched, so mark it invalid now and the next incremental run inherits
+                    # that through unmatched_previous.IsValid
+                    self.conn.execute("""
+                        UPDATE unmatched_events u
+                        SET IsValid = FALSE
+                        WHERE u.IsValid = TRUE
+                          AND EXISTS (
+                            SELECT 1 FROM raw_data r
+                            WHERE r.EventId = 181
+                              AND r.DeviceId = u.DeviceId
+                              AND r.TimeStamp + INTERVAL 5 SECOND > u.TimeStamp
+                          );
+                    """)
+
             end_time = time.time()
             # Store the runtime
             self.runtimes[aggregation['name']] = end_time - start_time

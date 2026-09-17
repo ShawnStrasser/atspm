@@ -70,6 +70,7 @@ WITH
 {{ paired_event('PhaseHold', 41, 42) }},
 {{ paired_event('PhaseOmit', 46, 47) }},
 {{ paired_event('PedOmit', 48, 49) }},
+{{ paired_event('PedDetectorFailed', 91, 92) }},
 {{ paired_event('Preempt', 102, 104, order_by='TimeStamp, EventId') }},
 {{ paired_event('SpecialFunction', 176, 177) }},
 {{ paired_event('TSP_Checkin', 112, 115, order_by='TimeStamp, EventId') }},
@@ -83,11 +84,27 @@ WITH
 {{ parameter_toggle('ManualControl', 178) }},
 
 -- Instant event macros
+-- Instant events have no real duration, so keep their EventIds in the clock update exemption list in the final SELECT.
 {{ instant_event('Coord', 131) }},
 {{ instant_event('IntervalAdvance', 179) }},
 {{ instant_event('PowerFailure', 182) }},
 {{ instant_event('PowerRestored', 184) }},
 {{ instant_event('CycleLengthChange', 132) }},
+{{ instant_event('OffsetChange', 133) }},
+{{ instant_event('ClockUpdate', 181) }},
+
+-- Controller clock update (181) windows used only for invalidation, not output. The Parameter
+-- (correction in seconds) is optional and often 0, so the size of the jump is unknown. A fixed window
+-- of 5 seconds either side of the event covers most updates; intervals overlapping it are marked
+-- invalid in the final SELECT.
+ClockUpdateWindow AS
+	(
+	SELECT DeviceID,
+	       TimeStamp - INTERVAL 5 SECOND AS StartTime,
+	       TimeStamp + INTERVAL 5 SECOND AS EndTime
+	FROM {{from_table}}
+	WHERE EventId = 181
+	),
 
 
 -- Phase Wait Logic (Revised)
@@ -434,6 +451,9 @@ categories AS (
     (184, 'Power Restored'),
     (202, 'Aux Switch'),
     (132, 'Cycle Length Change'),
+    (133, 'Offset Change'),
+    (181, 'Clock Update'),
+    (91, 'Ped Detector Failed'),
     (22, 'Ped Delay')--just for unmatched events, 22 is begin FDW, but 21 (begin walk) is already covered
   ) AS t(EventId, EventClass)
 )
@@ -472,10 +492,21 @@ FROM (
                             'Overlap Trail Green', 'Overlap Yellow', 'Overlap Red',
                             'Phase Hold', 'Phase Omit', 'Ped Omit', 'Aux Switch',
                             'Manual Control', 'Stop Time Input', 'Interval Advance', 'Phase Wait',
-                            'Cycle Length Change') THEN t.Parameter
+                            'Cycle Length Change', 'Offset Change', 'Clock Update',
+                            'Ped Detector Failed') THEN t.Parameter
       ELSE NULL
     END)::INT16 AS EventValue
-  FROM 
+  FROM
+  (
+  -- A controller clock update (181) during an interval shifts its end relative to its start, so the
+  -- duration can't be trusted. The ASOF join finds the latest clock update window starting before
+  -- EndTime; if that window also ends after StartTime they overlap. Windows are all the same length,
+  -- so no earlier window can overlap when the latest one doesn't.
+  -- Instant events have no real duration and are exempt, as is the clock update itself.
+  SELECT u.TimeStamp, u.DeviceID, u.EventID, u.Parameter, u.EndTime,
+         u.IsValid AND NOT COALESCE(u.EventId NOT IN (131, 132, 133, 179, 181, 182, 184)
+                                    AND cu.EndTime > u.TimeStamp, FALSE) AS IsValid
+  FROM
   (
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, TRUE AS IsValid FROM Transition
     UNION ALL
@@ -551,7 +582,15 @@ FROM (
     UNION ALL
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM CycleLengthChange
     UNION ALL
+    SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM OffsetChange
+    UNION ALL
+    SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM ClockUpdate
+    UNION ALL
+    SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM PedDetectorFailed
+    UNION ALL
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM AlarmStatus
+  ) u
+  ASOF LEFT JOIN ClockUpdateWindow cu ON u.DeviceID = cu.DeviceID AND u.EndTime > cu.StartTime
   ) t
   LEFT JOIN alarm_definitions a ON t.EventId = a.event_id AND 
     ((a.alarm_class = 'bitmap' AND (t.Parameter & a.bit_mask) > 0) OR
