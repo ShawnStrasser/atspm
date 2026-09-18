@@ -1,10 +1,40 @@
 # Release Notes
 
-### Unreleased
+### Version 2.5.0 (September 17, 2026)
 
 #### New Features:
 
-- **Platoon Ratio (`platoon_ratio`)**: New aggregation implementing the HCM platoon ratio, `Rp = Percent_AOG / (g/C)`, by phase and bin, plus the HCM arrival type (1–6). The green ratio is estimated from phase green intervals (EventId 1 → 8) clipped to bin boundaries, with open intervals at the edges of the data extended to the bin boundary so results are exact under bin-aligned incremental processing. Depends on `arrival_on_green` (registered in `AGGREGATION_DEPENDENCIES`). Closes #6.
+- **Platoon Ratio (`platoon_ratio`)**: New aggregation implementing the HCM platoon ratio, `Rp = Percent_AOG / (g/C)`, by phase and bin, plus the HCM arrival type (1–6). The green ratio is measured from phase green intervals (EventId 1 → 8) clipped to bin boundaries, with open intervals at the edges of the data extended to the bin boundary so results are exact under bin-aligned incremental processing. Depends on `arrival_on_green` (registered in `AGGREGATION_DEPENDENCIES`). Contributed by @Abimbola08 in #26, closes #6.
+- **Raw counts in `platoon_ratio` output**: Added `Green_Actuations` and `Green_Seconds` columns. `Platoon_Ratio` is a ratio of two ratios and cannot be averaged across bins, so rolling it up to an hour, a day or a time of day requires summing the raw parts and dividing once. Those two columns plus `Total_Actuations` make that possible without hardcoding the bin size downstream, and because greens are clipped at bin boundaries, `Green_Seconds` sums exactly across consecutive bins. See the `platoon_ratio` schema in the README for the aggregation query.
+- **Timeline clock update, offset change and ped detector failure**: Controller Clock Updated (181) is now a timeline event, Clock Update, shown as a point-in-time event lasting `cushion_time` with `EventValue` holding the reported correction in seconds. Because the controller stamps every event with its own clock, any interval overlapping a window from 5 seconds before to 5 seconds after a clock update is marked `IsValid=False`. Offset change and ped detector failure were added as timeline events as well.
+
+#### Bug Fixes / Improvements:
+
+- **Timeline validity across data gaps in incremental runs**: A timeline interval should be invalid when the device has no `has_data` row for any bin it spans. Single-pass runs checked every bin, but incremental runs only checked the bins the interval started and ended in, so a device that dropped out mid-window and returned hours later produced a valid interval with a duration of hours, and `phase_wait` counted the Phase Wait as a skipped phase. The opposite case is also fixed: a still-open event had its start bin re-checked against each new run's `has_data`, where it can never appear, so any interval open across two or more runs was marked invalid even with continuous data.
+
+### Version 2.4.0 (August 2026)
+
+#### Bug Fixes / Improvements:
+
+- **Relaxed phase skip threshold when TSP adjusted the cycle (`tsp_skip_multiplier`)**: Phase waits overlapping a preempt are dropped outright, but TSP delays service without skipping it, so at a signal calling TSP every cycle the 1.5x multiplier reported skips for phases that were actually served. Rather than dropping those waits, which would blind the check at signals that have TSP, the wait is kept and judged against the new `tsp_skip_multiplier`, defaulting to 2.0.
+
+### Version 2.3.3 (2026)
+
+#### Bug Fixes / Improvements:
+
+- **Duration sanity check on phase yellow/red timeline validity**: Phase yellow (8/9) and red (10/11) clearance intervals longer than 10 seconds are implausible and indicate bad data, so they are marked `IsValid=False`. Implemented as an optional `max_duration` argument on the `paired_event` macro; overlap yellow/red (63/64) are unaffected.
+
+### Version 2.3.2 (2026)
+
+#### Bug Fixes / Improvements:
+
+- **Overlap yellow timeline validity**: Fixed validity determination for overlap yellow intervals.
+
+### Version 2.3.1 (2026)
+
+#### Bug Fixes / Improvements:
+
+- **Overlap red timeline validity**: Fixed validity determination for overlap red intervals.
 
 ### Version 2.3.0 (February 23, 2026)
 

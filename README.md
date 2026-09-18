@@ -350,10 +350,23 @@ The following tables are produced by the aggregation process, depending on the c
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `Phase` (INT16): Phase number.
 *   `Total_Actuations` (INT16): Total actuations on the advance detector (from `arrival_on_green`).
-*   `Percent_AOG` (FLOAT): Fraction of actuations arriving on green (from `arrival_on_green`).
-*   `Green_Ratio` (FLOAT): Seconds of green for the phase within the bin divided by bin length (g/C when the phase cycles continuously). Green intervals that straddle a bin boundary are split between bins.
+*   `Green_Actuations` (INT16): Of those, the ones that arrived during green.
+*   `Percent_AOG` (FLOAT): Fraction of actuations arriving on green (from `arrival_on_green`), equal to `Green_Actuations / Total_Actuations`.
+*   `Green_Seconds` (FLOAT): Seconds the phase displayed green within the bin. Green intervals that straddle a bin boundary are split between bins, so this column sums exactly across consecutive bins.
+*   `Green_Ratio` (FLOAT): `Green_Seconds` divided by bin length (g/C when the phase cycles continuously).
 *   `Platoon_Ratio` (FLOAT): `Percent_AOG / Green_Ratio`. 1.0 = random arrivals; > 1 = platoons arriving on green; < 1 = arriving on red. Bins with no green for the phase are excluded.
 *   `Arrival_Type` (UTINYINT): HCM arrival type from `Platoon_Ratio`: 1 (≤ 0.50), 2 (≤ 0.85), 3 (≤ 1.15), 4 (≤ 1.50), 5 (≤ 2.00), 6 (> 2.00).
+
+`Platoon_Ratio` is a ratio of two ratios, so it cannot be averaged across bins: the mean of the per-bin values is not the value for the period, and it comes out biased high because bins with a small `Green_Ratio` inflate the quotient. To aggregate over any longer period (an hour, a day, a time of day), sum the four raw columns and divide once:
+
+```sql
+SELECT SUM(Green_Actuations) / SUM(Total_Actuations)
+       / (SUM(Green_Seconds) / (COUNT(*) * <bin_size> * 60.0)) AS Platoon_Ratio
+FROM platoon_ratio
+GROUP BY DeviceId, Phase
+```
+
+`Green_Actuations` and `Green_Seconds` are output for exactly this purpose.
 
 #### communications
 *   `TimeStamp` (DATETIME): Bin start time.

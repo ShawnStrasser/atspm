@@ -26,6 +26,7 @@ TEST_PARAMS = {
         {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
         {'name': 'actuations', 'params': {}},
         {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
+        {'name': 'platoon_ratio', 'params': {}},  # Requires arrival_on_green
         {'name': 'communications', 'params': {'event_codes': '400,503,502'}},
         {'name': 'coordination', 'params': {}},
         {'name': 'ped', 'params': {}},

@@ -98,7 +98,13 @@ platoon AS (
         a.DeviceId,
         a.Phase,
         a.Total_Actuations,
+        -- Green_Actuations and Green_Seconds are the raw counts behind Percent_AOG and
+        -- Green_Ratio. They are output because a ratio of ratios cannot be averaged: rolling
+        -- Platoon_Ratio up to an hour, a day or a time of day means summing these four parts
+        -- and dividing once, not averaging the per-bin ratios.
+        ROUND(a.Percent_AOG::DOUBLE * a.Total_Actuations)::INT16 AS Green_Actuations,
         a.Percent_AOG,
+        gb.Green_Seconds::FLOAT AS Green_Seconds,
         (gb.Green_Seconds / ({{bin_size}} * 60.0))::FLOAT AS Green_Ratio,
         (a.Percent_AOG / (gb.Green_Seconds / ({{bin_size}} * 60.0)))::FLOAT AS Platoon_Ratio
     FROM arrival_on_green a
