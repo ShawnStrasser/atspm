@@ -49,6 +49,7 @@ TEST_PARAMS = {
       {'name': 'ped_delay', 'params': {}},
       {'name': 'phase_wait', 'params': {'preempt_recovery_seconds': 120, 'assumed_cycle_length': 140, 'skip_multiplier': 1.5}},
       {'name': 'coordination_agg', 'params': {}},  # Requires has_data and timeline
+      {'name': 'platoon_ratio', 'params': {}},  # Requires arrival_on_green
   ]
 }
 

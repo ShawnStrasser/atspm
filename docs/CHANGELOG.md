@@ -1,5 +1,11 @@
 # Release Notes
 
+### Unreleased
+
+#### New Features:
+
+- **Platoon Ratio (`platoon_ratio`)**: New aggregation implementing the HCM platoon ratio, `Rp = Percent_AOG / (g/C)`, by phase and bin, plus the HCM arrival type (1–6). The green ratio is estimated from phase green intervals (EventId 1 → 8) clipped to bin boundaries, with open intervals at the edges of the data extended to the bin boundary so results are exact under bin-aligned incremental processing. Depends on `arrival_on_green` (registered in `AGGREGATION_DEPENDENCIES`). Closes #6.
+
 ### Version 2.3.0 (February 23, 2026)
 
 #### Bug Fixes / Improvements:

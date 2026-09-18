@@ -15,6 +15,7 @@ AGGREGATION_DEPENDENCIES = {
     'phase_wait': ['timeline'],  # phase_wait uses ASOF join on cycle length events from timeline
     'ped_delay': ['timeline'],
     'coordination_agg': ['timeline', 'has_data'],
+    'platoon_ratio': ['arrival_on_green'],  # platoon_ratio divides Percent_AOG by the green ratio
 }
 
 

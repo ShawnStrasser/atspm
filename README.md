@@ -161,6 +161,7 @@ params = {
             }
         },
         {'name': 'ped_delay', 'params': {}},
+        {'name': 'platoon_ratio', 'params': {}},  # Requires arrival_on_green
         {'name': 'terminations', 'params': {}},
         {'name': 'splits', 'params': {}},        # MAXTIME-specific (skipped if controller_type != 'maxtime')
         {'name': 'coordination', 'params': {}},  # MAXTIME-specific (skipped if controller_type != 'maxtime')
@@ -209,6 +210,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Has Data** (`has_data`): Marks intervals where each controller produced sufficient data (proxy for controller online/communications health). Also used to filter incomplete periods for other measures.
 - **Actuations** (`actuations`): Detector actuations per detector and interval (with optional zero-filling of missing intervals).
 - **Arrival on Green** (`arrival_on_green`): Percentage of detector actuations that occur during green by phase.
+- **Platoon Ratio** (`platoon_ratio`): HCM platoon ratio by phase and interval, `Rp = Percent_AOG / (g/C)`, with the green ratio estimated from phase green time within each bin and the HCM arrival type (1–6). Unlike arrival on green, it is comparable across phases with different splits. Requires `arrival_on_green`.
 - **Yellow and Red Actuations** (`yellow_red`): Distribution of detector actuations relative to the start of red, including red offset and signal state.
 - **Split Failures** (`split_failures`): Green and red occupancies by phase (and optionally detector/approach) and a count of cycles that meet split-failure thresholds; can be returned either per cycle or aggregated into time bins.
 - **Terminations** (`terminations`): Counts of GapOut, MaxOut, and ForceOff terminations by phase.
@@ -244,6 +246,7 @@ Some aggregations require other aggregations to be included in your processing r
 | `coordination_agg` | `timeline`, `has_data` |
 | `phase_wait` | `timeline` |
 | `ped_delay` | `timeline` |
+| `platoon_ratio` | `arrival_on_green` |
 
 The processor automatically sorts aggregations to ensure dependencies run first, so you don't need to worry about the order in your aggregations list.
 
@@ -334,6 +337,16 @@ The following tables are produced by the aggregation process, depending on the c
 *   `Phase` (INT16): Phase number.
 *   `Total_Actuations` (BIGINT): Total actuations on the advance detector.
 *   `Percent_AOG` (FLOAT): Fraction of actuations arriving on green (0.0 - 1.0).
+
+#### platoon_ratio
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Phase` (INT16): Phase number.
+*   `Total_Actuations` (INT16): Total actuations on the advance detector (from `arrival_on_green`).
+*   `Percent_AOG` (FLOAT): Fraction of actuations arriving on green (from `arrival_on_green`).
+*   `Green_Ratio` (FLOAT): Seconds of green for the phase within the bin divided by bin length (g/C when the phase cycles continuously). Green intervals that straddle a bin boundary are split between bins.
+*   `Platoon_Ratio` (FLOAT): `Percent_AOG / Green_Ratio`. 1.0 = random arrivals; > 1 = platoons arriving on green; < 1 = arriving on red. Bins with no green for the phase are excluded.
+*   `Arrival_Type` (UTINYINT): HCM arrival type from `Platoon_Ratio`: 1 (≤ 0.50), 2 (≤ 0.85), 3 (≤ 1.15), 4 (≤ 1.50), 5 (≤ 2.00), 6 (> 2.00).
 
 #### communications
 *   `TimeStamp` (DATETIME): Bin start time.
