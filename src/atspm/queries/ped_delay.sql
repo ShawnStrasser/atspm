@@ -10,4 +10,3 @@ FROM timeline
 WHERE EventClass = 'Ped Delay'
   AND IsValid
 GROUP BY 1, 2, 3
-ORDER BY 1, 2, 3

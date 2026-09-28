@@ -171,4 +171,3 @@ SELECT
     SUM(IsSkipped) AS TotalSkips
 FROM phase_waits_classified
 GROUP BY 1, 2, 3
-ORDER BY 1, 2, 3

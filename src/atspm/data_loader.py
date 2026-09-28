@@ -45,10 +45,11 @@ def _strip_wrapping_quotes(path):
 
 
 def _get_columns_from_dataframe_like(source):
-    if hasattr(source, 'columns'):
-        return list(source.columns)
+    # Arrow tables also have .columns, but it holds the column arrays rather than their names
     if hasattr(source, 'column_names'):
         return list(source.column_names)
+    if hasattr(source, 'columns'):
+        return list(source.columns)
     raise ValueError("Unable to determine columns from the provided DataFrame-like source.")
 
 

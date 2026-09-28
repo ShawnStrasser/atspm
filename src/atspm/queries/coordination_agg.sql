@@ -147,4 +147,3 @@ SELECT
     f.ActualOffset
 FROM filled f
 INNER JOIN time_buckets tb ON f.TimeStamp = tb.TimeStamp AND f.DeviceId = tb.DeviceId
-ORDER BY f.TimeStamp, f.DeviceId

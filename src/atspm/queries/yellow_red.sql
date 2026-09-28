@@ -94,7 +94,6 @@ view5 AS (
             Cycle_Number
         FROM view4
         WHERE EventId = 10 and Cycle_Number > 0
-        ORDER BY TimeStamp
     ),
     renamed_table AS (
         SELECT 

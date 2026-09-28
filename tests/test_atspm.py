@@ -508,6 +508,85 @@ def test_detector_health(detector_health_output):
   compare_dataframes(detector_health_df, precalc_df)
 
 
+def _detector_health_actuations():
+  """Binned actuations from the test data, as the detector_health fixture builds them."""
+  data = duckdb.query("select * from 'tests/hires_test_data.parquet'").df()
+  configs = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
+  with SignalDataProcessor(raw_data=data, detector_config=configs, bin_size=15, verbose=0,
+                           aggregations=[{'name': 'actuations', 'params': {'fill_in_missing': True}}]) as processor:
+    processor.load()
+    processor.aggregate()
+    return processor.conn.query("SELECT * FROM actuations ORDER BY TimeStamp").df()
+
+
+_DH_COMMON = {'datetime_column': 'TimeStamp', 'value_column': 'Total', 'entity_grouping_columns': ['DeviceId', 'Detector']}
+_DH_DECOMPOSE = {**_DH_COMMON, 'freq_minutes': 15, 'min_time_of_day_samples': 0, 'rolling_window_enable': False}
+_DH_ANOMALY = {**_DH_COMMON, 'entity_threshold': 6.0, 'group_threshold': 3.0, 'GEH': True, 'log_adjust_negative': True}
+
+
+def test_detector_health_from_path(tmp_path):
+  """detector_health accepts a parquet path for data and returns the same result as a DataFrame"""
+  path = tmp_path / 'actuations.parquet'
+  _detector_health_actuations().to_parquet(path, index=False)
+  with SignalDataProcessor(verbose=0, aggregations=[{'name': 'detector_health', 'params': {
+      'data': str(path), 'device_groups': None, 'return_last_n_days': 1,
+      'decompose_params': _DH_DECOMPOSE, 'anomaly_params': _DH_ANOMALY}}]) as processor:
+    processor.aggregate()
+    result = processor.conn.query("SELECT * FROM detector_health").df()
+  compare_dataframes(result, pd.read_parquet("tests/precalculated/detector_health.parquet"))
+
+
+def test_detector_health_with_groups():
+  """With device_groups, detector_health matches running traffic-anomaly directly on DataFrames"""
+  import traffic_anomaly
+  # Two weeks of synthetic daily-pattern counts for six detectors in two groups, with one detector
+  # dropping to zero on the last day so both anomaly levels have something to find
+  rng = numpy.random.default_rng(0)
+  times = pd.date_range('2024-01-01', periods=14 * 96, freq='15min')
+  daily = 20 + 15 * numpy.sin(2 * numpy.pi * (times.hour * 4 + times.minute // 15) / 96)
+  frames = []
+  for device in ['d1', 'd2', 'd3', 'd4']:
+    for detector in [1, 2]:
+      total = rng.poisson(daily)
+      if device == 'd1' and detector == 1:
+        total[-60:] = 0
+      frames.append(pd.DataFrame({'TimeStamp': times, 'DeviceId': device, 'Detector': detector, 'Total': total}))
+  actuations = pd.concat(frames, ignore_index=True)
+  device_groups = pd.DataFrame({'DeviceId': ['d1', 'd2', 'd3', 'd4'], 'group_name': ['a', 'a', 'b', 'b']})
+  # Four detectors per group cap a group z-score near 1.5, so the group threshold is lowered to let it fire
+  anomaly_params = {**_DH_ANOMALY, 'group_threshold': 1.0, 'group_grouping_columns': ['group_name']}
+  return_last_n_days = 3
+
+  # Reference: traffic-anomaly's own pandas path, filtered to the last days as detector_health documents
+  decomp = traffic_anomaly.decompose(actuations, **_DH_DECOMPOSE).merge(device_groups, on='DeviceId')
+  expected = traffic_anomaly.anomaly(decomposed_data=decomp, **anomaly_params).drop(columns=['group_name'])
+  cutoff = expected['TimeStamp'].max().normalize() - pd.Timedelta(days=return_last_n_days - 1)
+  expected = expected[expected['TimeStamp'] >= cutoff]
+  assert expected['anomaly'].sum() > 0, "synthetic data should produce anomalies"
+
+  params = {'data': actuations, 'device_groups': device_groups, 'return_last_n_days': return_last_n_days,
+            'decompose_params': _DH_DECOMPOSE, 'anomaly_params': anomaly_params}
+  with SignalDataProcessor(verbose=0, aggregations=[{'name': 'detector_health', 'params': params}]) as processor:
+    processor.aggregate()
+    result = processor.conn.query("SELECT * FROM detector_health").df()
+
+  assert len(result) > 0
+  compare_dataframes(result, expected)
+  # The caller's params still hold their inputs
+  assert params['data'] is actuations and params['device_groups'] is device_groups
+
+
+def test_sample_data_relations():
+  """The docstring example: sample_data relations from DuckDB's default connection load and aggregate"""
+  from src.atspm import sample_data
+  with SignalDataProcessor(raw_data=sample_data.data, detector_config=sample_data.config, bin_size=15, verbose=0,
+                           aggregations=[{'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+                                         {'name': 'actuations', 'params': {}}]) as processor:
+    processor.load()
+    processor.aggregate()
+    assert processor.conn.query("SELECT count(*) FROM actuations").fetchone()[0] > 0
+
+
 # =============================================================================
 # PHASE WAIT LOGIC TESTS
 # =============================================================================

@@ -1,7 +1,8 @@
 import duckdb
+import ibis
 import time
 import traffic_anomaly
-from .data_loader import load_data
+from .data_loader import load_data, _quote_path, _strip_wrapping_quotes
 from .data_aggregator import aggregate_data
 from .data_saver import save_data
 from .utils import round_down_15
@@ -17,6 +18,13 @@ AGGREGATION_DEPENDENCIES = {
     'coordination_agg': ['timeline', 'has_data'],
     'platoon_ratio': ['arrival_on_green'],  # platoon_ratio divides Percent_AOG by the green ratio
 }
+
+
+def _to_arrow(relation):
+    """A DuckDB relation as an Arrow table (to_arrow_table replaced fetch_arrow_table in newer DuckDB)."""
+    if hasattr(relation, 'to_arrow_table'):
+        return relation.to_arrow_table()
+    return relation.fetch_arrow_table()
 
 
 def _validate_aggregation_dependencies(aggregations, verbose=1):
@@ -309,6 +317,14 @@ class SignalDataProcessor:
                 self.device_groups = self.aggregations[idx]['params']['device_groups']
             except KeyError:
                 raise ValueError("detector_health aggregation requires 'data' and 'device_groups' parameters. 'device_groups' can be set to None.")
+            # Keep the inputs only on self, which aggregate() clears, so a large frame is not held
+            # through the aggregation list for the life of the processor. Copies leave the caller's
+            # list and dicts untouched.
+            detector_health = self.aggregations[idx]
+            self.aggregations = list(self.aggregations)
+            self.aggregations[idx] = {**detector_health, 'params': {
+                k: v for k, v in detector_health['params'].items() if k not in ('data', 'device_groups')
+            }}
      
         # Establish a connection to the database
         self.conn = duckdb.connect()
@@ -331,6 +347,12 @@ class SignalDataProcessor:
         if self.to_sql:
             v_print("to_sql option is True, data will not be loaded.", self.verbose)
             return
+        # A DuckDB relation (e.g. sample_data) belongs to the connection that created it and cannot
+        # be scanned from this one, so hand it over as Arrow, which stays columnar.
+        if isinstance(self.raw_data, duckdb.DuckDBPyRelation):
+            self.raw_data = _to_arrow(self.raw_data)
+        if isinstance(self.detector_config, duckdb.DuckDBPyRelation):
+            self.detector_config = _to_arrow(self.detector_config)
         try:
             load_data(self.conn,
                     self.verbose,
@@ -343,8 +365,9 @@ class SignalDataProcessor:
             # delete self.raw_data and self.detector_config to free up memory
             self.data_loaded = True
             if self.raw_data is not None:
-                self.min_timestamp = self.conn.execute("SELECT MIN(timestamp) FROM raw_data").fetchone()[0]
-                self.max_timestamp = self.conn.execute("SELECT MAX(timestamp) FROM raw_data").fetchone()[0]
+                self.min_timestamp, self.max_timestamp = self.conn.execute(
+                    "SELECT MIN(timestamp), MAX(timestamp) FROM raw_data"
+                ).fetchone()
                 # Handle empty raw_data: use epoch timestamps so aggregations run with correct schema
                 if self.min_timestamp is None:
                     self.min_timestamp = self.conn.execute("SELECT TIMESTAMP '1970-01-01 00:00:00'").fetchone()[0]
@@ -496,44 +519,57 @@ class SignalDataProcessor:
             if aggregation['name'] == 'detector_health':
                 if self.to_sql:
                     raise ValueError("to_sql option is  supported for detector_health")
+                # traffic-anomaly builds ibis expressions; compiling them to SQL and running that here
+                # keeps weeks of binned actuations inside DuckDB, which can spill to disk. Executing
+                # them instead converts every intermediate result to pandas, and at tens of millions
+                # of rows the string columns alone run to gigabytes per copy.
+                self._register_detector_health_table('detector_health_input', self.binned_actuations)
+                self.binned_actuations = None  # Clear reference
                 decomp = traffic_anomaly.decompose(
-                    self.binned_actuations,
+                    self._ibis_table('detector_health_input'),
                     **aggregation['params']['decompose_params']
                 )
-                del self.binned_actuations
-                self.binned_actuations = None  # Clear reference
                 # Join groups to decomp
                 if self.device_groups is not None:
-                    device_groups = self.device_groups # DuckDB needs a direct pointer to see the table
-                    decomp = self.conn.sql("SELECT * FROM decomp NATURAL JOIN device_groups").df()
-                    del device_groups  # Clear local reference after DuckDB query
+                    self._register_detector_health_table('detector_health_groups', self.device_groups)
+                    groups = self._ibis_table('detector_health_groups')
+                    shared = [c for c in decomp.columns if c in groups.columns]
+                    decomp = decomp.join(groups, shared)
                     # Exclude group_grouping_columns in anomaly_params
                     exclude_col = ', '.join(["'{}'".format(x) for x in aggregation['params']['anomaly_params']['group_grouping_columns']])
                     exclude_col = f"EXCLUDE ({exclude_col})"
-                    
+
                 else:
                     exclude_col = ""
                 # Find Anomalies
-                anomaly_df = traffic_anomaly.anomaly(
+                anomaly_sql = traffic_anomaly.anomaly(
                     decomposed_data=decomp,
+                    return_sql=True,
+                    dialect='duckdb',
                     **aggregation['params']['anomaly_params']
                 )
-                del decomp  # Free memory after anomaly calculation
-                # Extract max date from anomaly table and subtract return_last_n_days
-                sql = f"""
-                    SELECT CAST(MAX(TimeStamp)::DATE - INTERVAL '{aggregation['params']['return_last_n_days']-1}' DAY AS VARCHAR) AS max_date_minus_one
-                    FROM anomaly_df
-                    """
-                max_date = self.conn.query(sql).fetchone()[0]
-
-                # Save anomaly table to DuckDB
+                # Keep the last return_last_n_days calendar days. The cutoff comes from the input so the
+                # anomaly results can be filtered as they are written, rather than held in full just
+                # to find their latest date.
+                cutoff = self.conn.execute(f"""
+                    SELECT MAX(TimeStamp)::DATE - INTERVAL '{aggregation['params']['return_last_n_days']-1}' DAY
+                    FROM detector_health_input
+                    """).fetchone()[0]
+                # A nanosecond pandas TimeStamp arrives as TIMESTAMP_NS; store plain TIMESTAMP, as the
+                # results always were when they came back through pandas
+                timestamp_type = self.conn.execute(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_name = 'detector_health_input' AND column_name = 'TimeStamp'"
+                ).fetchone()[0]
+                replace_col = ("REPLACE (TimeStamp::TIMESTAMP AS TimeStamp)"
+                               if timestamp_type in ('TIMESTAMP_NS', 'TIMESTAMP_MS', 'TIMESTAMP_S') else "")
                 query = f"""CREATE OR REPLACE TABLE detector_health AS
-                        SELECT * {exclude_col}
-                        FROM anomaly_df
-                        WHERE TimeStamp >= '{max_date}'
+                        SELECT * {exclude_col} {replace_col}
+                        FROM ({anomaly_sql})
+                        WHERE TimeStamp >= ?
                         """
-                self.conn.execute(query)
-                del anomaly_df  # Free memory after saving to DuckDB
+                self.conn.execute(query, [cutoff])
+                self._drop_detector_health_tables()
                 # no external sql file like other aggregations, so just continue
                 end_time = time.time()
                 self.runtimes[aggregation['name']] = end_time - start_time
@@ -743,6 +779,29 @@ class SignalDataProcessor:
         self.close()
         return False
     
+    def _register_detector_health_table(self, name, source):
+        """Expose a DataFrame, or a file path DuckDB can read, as a view for detector_health."""
+        if isinstance(source, str):
+            path = _quote_path(_strip_wrapping_quotes(source))
+            self.conn.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {path}")
+        else:
+            self.conn.register(name, source)
+
+    def _drop_detector_health_tables(self):
+        """Remove the detector_health input views, releasing any DataFrame registered behind them."""
+        for name in ('detector_health_input', 'detector_health_groups'):
+            try:
+                self.conn.unregister(name)
+            except Exception:
+                pass  # not a registered DataFrame
+            self.conn.execute(f"DROP VIEW IF EXISTS {name}")
+
+    def _ibis_table(self, name):
+        """An unbound ibis table with the schema of a view in this connection, so the traffic-anomaly
+        expressions built on it compile to SQL that reads that view."""
+        arrow_schema = _to_arrow(self.conn.sql(f"SELECT * FROM {name} LIMIT 0")).schema
+        return ibis.table(ibis.Schema.from_pyarrow(arrow_schema), name=name)
+
     def close(self):
         """Closes the database connection. Safe to call multiple times."""
         if self._closed:

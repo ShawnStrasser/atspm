@@ -1,6 +1,6 @@
 [project]
 name = "atspm"
-version = "2.5.0"
+version = "2.5.1"
 authors = [
   { name="Shawn Strasser", email="shawn.strasser@odot.oregon.gov" },
 ]
@@ -15,6 +15,7 @@ classifiers = [
 
 dependencies = [
     "traffic-anomaly>=2.4.0",
+    "ibis-framework[duckdb]>=11,<12",
     "jinja2",
     "pyarrow",
     "pyarrow_hotfix",

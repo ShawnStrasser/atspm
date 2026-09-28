@@ -51,7 +51,6 @@ LEFT JOIN base_counts b
     ON t.TimeStamp = b.TimeStamp 
     AND d.DeviceId = b.DeviceId 
     AND d.Detector = b.Detector
-ORDER BY d.DeviceId, d.Detector, t.TimeStamp
 {% else %}
 SELECT *
 FROM base_counts
