@@ -123,6 +123,12 @@ def load_data(conn,
               known_detectors=None,
               use_known_detectors=False):
 
+    # Reference point for the max_days_old filters below. A run whose raw data is empty has no
+    # MIN(TimeStamp), and a bare None would be interpolated into SQL as the string 'None'. The
+    # epoch keeps carried-over unmatched state instead of dropping it, matching how
+    # SignalDataProcessor dates an empty run.
+    min_timestamp = '1970-01-01 00:00:00'
+
     if raw_data is not None:
         if isinstance(raw_data, str):
             raw_path = _strip_wrapping_quotes(raw_data)
@@ -147,8 +153,10 @@ def load_data(conn,
         """
 
         conn.query(load_sql)
-        # Get the minimum timestamp from the raw data
-        min_timestamp = conn.query("SELECT MIN(TimeStamp) FROM raw_data").fetchone()[0]
+        # Get the minimum timestamp from the raw data, keeping the epoch fallback when empty
+        raw_min_timestamp = conn.query("SELECT MIN(TimeStamp) FROM raw_data").fetchone()[0]
+        if raw_min_timestamp is not None:
+            min_timestamp = raw_min_timestamp
 
     # Load Configurations (if provided)
     load_sql = """

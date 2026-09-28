@@ -1198,3 +1198,23 @@ def test_phase_wait_invalid_event_propagation():
                 f"Invalid period: {invalid_start} -> {invalid_end}\n"
                 f"But IsValid={pw1['IsValid']}"
             )
+
+
+def test_empty_raw_data_with_carried_state():
+  """A run with no raw data still loads carried-over known_detectors state instead of failing on MIN(TimeStamp) = None"""
+  raw = duckdb.query("select * from 'tests/hires_test_data.parquet'").df()
+  configs = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
+  with SignalDataProcessor(raw_data=raw, detector_config=configs, bin_size=15, verbose=0,
+                           aggregations=[{'name': 'actuations', 'params': {'fill_in_missing': True,
+                                          'known_detectors_df_or_path': None}}]) as processor:
+    processor.load()
+    processor.aggregate()
+    known = processor.conn.query("SELECT * FROM known_detectors").df()
+  assert len(known) > 0
+
+  with SignalDataProcessor(raw_data=raw.iloc[0:0], detector_config=configs, bin_size=15, verbose=0,
+                           aggregations=[{'name': 'actuations', 'params': {'fill_in_missing': True,
+                                          'known_detectors_df_or_path': known}}]) as processor:
+    processor.load()
+    processor.aggregate()
+    assert processor.conn.query("SELECT count(*) FROM known_detectors").fetchone()[0] == len(known)
