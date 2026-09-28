@@ -1,5 +1,15 @@
 # Release Notes
 
+### Version 2.5.1 (September 28, 2026)
+
+#### Bug Fixes / Improvements:
+
+- **Detector health out of memory on large inputs**: `detector_health` passed every step (decompose, the `device_groups` join, anomaly) back through pandas, making several full copies with string columns as Python objects, and ran out of memory at around 70M rows. The traffic-anomaly steps are now compiled to SQL and run in the processor's DuckDB connection, which can spill to disk. Output is unchanged. `data` also accepts a file path (e.g. parquet), and the processor no longer holds its own reference to the input DataFrame.
+- **Empty raw data with carried-over state**: a run with no raw data failed with a timestamp conversion error when loading unmatched events or known detectors. It now falls back to the epoch, as `SignalDataProcessor` already did for an empty run.
+- **DuckDB relations as input**: relations such as `sample_data.data` belong to DuckDB's default connection and failed to load. They are now converted to Arrow first, and Arrow tables report their column names correctly.
+- **Less sorting and scanning**: removed `ORDER BY`s when tables are created (exports still sort) and combined the raw data MIN/MAX lookups into one query.
+- Declared `ibis-framework[duckdb]` as a dependency, now imported directly.
+
 ### Version 2.5.0 (September 17, 2026)
 
 #### New Features:
