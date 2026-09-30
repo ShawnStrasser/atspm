@@ -1,5 +1,11 @@
 # Release Notes
 
+### Version 2.6.1 (unreleased)
+
+#### Bug Fixes / Improvements:
+
+- **`actuations` zero-fill during data outages**: `fill_in_missing` filled every known detector with 0 for every bin from the earliest to the latest actuation across all devices, without checking whether the device sent anything in that bin. A device with a feed outage got zero counts on all its detectors, which `detector_health` then flagged as failed. Detectors are now zero-filled only in bins where their device has at least one raw event; bins with no events for a device produce no rows for it. Detectors known only from `known_detectors` are still zero-filled while their device reports.
+
 ### Version 2.6.0 (October 6, 2026)
 
 #### New Features:

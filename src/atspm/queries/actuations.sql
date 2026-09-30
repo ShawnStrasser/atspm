@@ -12,14 +12,13 @@ WITH base_counts AS (
     GROUP BY ALL
 )
 {% if fill_in_missing | default(false) %}
-,time_series AS (
-    SELECT UNNEST(
-        GENERATE_SERIES(
-            (SELECT MIN(TimeStamp)::TIMESTAMP FROM base_counts),
-            (SELECT MAX(TimeStamp)::TIMESTAMP FROM base_counts),
-            INTERVAL '{{bin_size}} minutes'
-        )
-    ) as TimeStamp
+-- Bins where each device sent any event. Missing detector counts are only filled with 0
+-- in these bins, so a device with a data outage gets no rows rather than zero counts.
+,device_bins AS (
+    SELECT DISTINCT
+        TIME_BUCKET(interval '{{bin_size}} minutes', TimeStamp) as TimeStamp,
+        DeviceId
+    FROM {{from_table}}
 ),
 device_detectors AS (
     {% if known_detectors_found | default(false) %}
@@ -45,8 +44,9 @@ SELECT
     d.DeviceId,
     d.Detector::int16 as Detector,
     COALESCE(b.Total, 0::int16) as Total
-FROM time_series t
-CROSS JOIN device_detectors d
+FROM device_bins t
+JOIN device_detectors d
+    ON t.DeviceId = d.DeviceId
 LEFT JOIN base_counts b 
     ON t.TimeStamp = b.TimeStamp 
     AND d.DeviceId = b.DeviceId 

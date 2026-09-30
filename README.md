@@ -110,7 +110,7 @@ params = {
         {
             'name': 'actuations', 
             'params': {
-                'fill_in_missing': True,    # Zero-fill missing detector intervals
+                'fill_in_missing': True,    # Zero-fill silent detectors in bins where the device has data
                 'known_detectors_df_or_path': 'known_detectors.csv', # For zero-filling
                 'known_detectors_max_days_old': 2
             }
