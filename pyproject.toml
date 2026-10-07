@@ -1,6 +1,6 @@
 [project]
 name = "atspm"
-version = "2.5.1"
+version = "2.6.0"
 authors = [
   { name="Shawn Strasser", email="shawn.strasser@odot.oregon.gov" },
 ]

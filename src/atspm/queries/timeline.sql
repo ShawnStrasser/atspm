@@ -106,6 +106,45 @@ ClockUpdateWindow AS
 	WHERE EventId = 181
 	),
 
+{% if controller_type|default('')|lower == 'siemens' %}
+-- Siemens controllers write a new log each hour. Logging stops at the top of the hour and resumes a few
+-- seconds later (sometimes 30 or more) with EventId 1000 and a snapshot of the current state, all stamped
+-- with the restart time. Events in between are lost, so an interval running across the hour has its true
+-- start or end replaced by the snapshot time. The window runs from the device's last event before the
+-- restart, but no earlier than the top of the hour, through the restart itself, which catches intervals
+-- that start in the snapshot.
+SiemensLogStart AS
+	(
+	SELECT DISTINCT DeviceID, TimeStamp
+	FROM {{from_table}}
+	WHERE EventId = 1000
+	),
+SiemensLogGapWindow AS
+	(
+	SELECT s.DeviceID,
+	       GREATEST(COALESCE(r.TimeStamp, DATE_TRUNC('hour', s.TimeStamp)), DATE_TRUNC('hour', s.TimeStamp)) AS StartTime,
+	       s.TimeStamp + INTERVAL 1 MILLISECOND AS EndTime
+	FROM SiemensLogStart s
+	ASOF LEFT JOIN {{from_table}} r ON s.DeviceID = r.DeviceID AND s.TimeStamp > r.TimeStamp
+	),
+{% endif %}
+
+-- Windows where event timestamps can't be trusted. EndTime is the latest end of any window starting at or
+-- before this one, so the ASOF join in the final SELECT only needs the latest window starting before an
+-- interval ends, even when windows differ in length.
+InvalidWindow AS
+	(
+	SELECT DeviceID, StartTime,
+	       MAX(EndTime) OVER (PARTITION BY DeviceID ORDER BY StartTime ROWS UNBOUNDED PRECEDING) AS EndTime
+	FROM (
+		SELECT DeviceID, StartTime, EndTime FROM ClockUpdateWindow
+		{% if controller_type|default('')|lower == 'siemens' %}
+		UNION ALL
+		SELECT DeviceID, StartTime, EndTime FROM SiemensLogGapWindow
+		{% endif %}
+	)
+	),
+
 
 -- Phase Wait Logic (Revised)
 -- Measures how long a phase waits after being called until it gets green.
@@ -498,10 +537,10 @@ FROM (
     END)::INT16 AS EventValue
   FROM
   (
-  -- A controller clock update (181) during an interval shifts its end relative to its start, so the
-  -- duration can't be trusted. The ASOF join finds the latest clock update window starting before
-  -- EndTime; if that window also ends after StartTime they overlap. Windows are all the same length,
-  -- so no earlier window can overlap when the latest one doesn't.
+  -- A controller clock update (181) during an interval shifts its end relative to its start, and a Siemens
+  -- hourly log restart (1000) loses its true start or end, so the duration can't be trusted. The ASOF join
+  -- finds the latest invalid window starting before EndTime; if any window up to it ends after StartTime
+  -- they overlap.
   -- Instant events have no real duration and are exempt, as is the clock update itself.
   SELECT u.TimeStamp, u.DeviceID, u.EventID, u.Parameter, u.EndTime,
          u.IsValid AND NOT COALESCE(u.EventId NOT IN (131, 132, 133, 179, 181, 182, 184)
@@ -590,7 +629,7 @@ FROM (
     UNION ALL
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM AlarmStatus
   ) u
-  ASOF LEFT JOIN ClockUpdateWindow cu ON u.DeviceID = cu.DeviceID AND u.EndTime > cu.StartTime
+  ASOF LEFT JOIN InvalidWindow cu ON u.DeviceID = cu.DeviceID AND u.EndTime > cu.StartTime
   ) t
   LEFT JOIN alarm_definitions a ON t.EventId = a.event_id AND 
     ((a.alarm_class = 'bitmap' AND (t.Parameter & a.bit_mask) > 0) OR
