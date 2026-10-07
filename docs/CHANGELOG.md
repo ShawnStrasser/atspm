@@ -1,5 +1,11 @@
 # Release Notes
 
+### Version 2.6.0 (October 6, 2026)
+
+#### New Features:
+
+- **Siemens controller type (`controller_type='siemens'`)**: Siemens controllers write a new log each hour. Logging stops at the top of the hour and resumes a few seconds later (sometimes 30 or more) with EventId 1000 and a snapshot of the current state, all stamped with the restart time. Events in between are lost, so an interval running across the hour had its true start or end replaced by the snapshot time, showing up as short or long yellow and red clearances every hour. With the Siemens controller type, the timeline marks any interval overlapping the window from the device's last event before the restart (no earlier than the top of the hour) through the restart itself as `IsValid=False`, including still-open intervals carried into the next incremental run. Event 1000 is vendor-specific, so nothing changes for other controller types.
+
 ### Version 2.5.1 (September 28, 2026)
 
 #### Bug Fixes / Improvements:

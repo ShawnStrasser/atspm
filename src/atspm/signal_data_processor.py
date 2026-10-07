@@ -192,7 +192,7 @@ class SignalDataProcessor:
         self.remove_incomplete = False
         self.to_sql = False
         self.verbose = 1 # 0: only print errors, 1: print performance, 2: print debug statements
-        self.controller_type = '' # Controller type: '' (default) or 'maxtime' (case-insensitive)
+        self.controller_type = '' # Controller type: '' (default), 'maxtime' or 'siemens' (case-insensitive)
         
         # Extract parameters from kwargs
         for key, value in kwargs.items():
@@ -700,6 +700,22 @@ class SignalDataProcessor:
                               AND r.TimeStamp + INTERVAL 5 SECOND > u.TimeStamp
                           );
                     """)
+
+                    # Same for a Siemens hourly log restart (1000): its window ends at the restart, so an
+                    # event still open afterwards overlaps it if it started at or before the restart
+                    if self.controller_type == 'siemens':
+                        self.conn.execute("""
+                            UPDATE unmatched_events u
+                            SET IsValid = FALSE
+                            WHERE u.IsValid = TRUE
+                              AND u.EventId NOT BETWEEN 931 AND 935
+                              AND EXISTS (
+                                SELECT 1 FROM raw_data r
+                                WHERE r.EventId = 1000
+                                  AND r.DeviceId = u.DeviceId
+                                  AND r.TimeStamp >= u.TimeStamp
+                              );
+                        """)
 
             end_time = time.time()
             # Store the runtime
