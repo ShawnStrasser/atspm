@@ -64,19 +64,20 @@ class TestTimelineHasDataIntegration:
             remove_incomplete=False,
             aggregations=[
                 {'name': 'has_data', 'params': {'no_data_min': 900, 'min_data_points': 1}},
-                {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60}},
+                # The 12-hour silence would also be caught by the event gap check, which this test is not about
+                {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60, 'max_event_gap_seconds': None}},
             ]
         ) as processor:
             processor.load()
             processor.aggregate()
-            
+
             # Get the Phase Wait timeline result
             result = processor.conn.sql("""
                 SELECT DeviceId, StartTime, EndTime, Duration, IsValid, EventClass, EventValue
                 FROM timeline
                 WHERE EventClass = 'Phase Wait'
             """).df()
-        
+
         # Verify the Phase Wait event exists and is marked as valid (no gaps detected with large bins)
         assert len(result) == 1, f"Expected 1 Phase Wait event, got {len(result)}"
         assert result.iloc[0]['IsValid'] == True, "Phase Wait event should be valid with lenient has_data settings"

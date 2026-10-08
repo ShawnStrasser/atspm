@@ -1,6 +1,12 @@
 # Release Notes
 
-### Version 2.6.1 (unreleased)
+### Version 2.6.2 (October 8, 2026)
+
+#### Bug Fixes / Improvements:
+
+- **Timeline intervals across a device silence (false phase skips)**: an interval paired across a stretch where the device logged nothing kept `IsValid=True` unless the stretch emptied a whole `has_data` sub-bin. With `has_data` at `no_data_min=15, min_data_points=1`, outages under 15 minutes were never caught. On 2026-10-07 one signal logged nothing for 11.5 minutes; Green 2/6, Overlap Green, Phase Call and a 794.6 s Phase Wait 4 bridged the outage, and `phase_wait` reported a skip with `MaxPhaseWait=794.6`. Across 19 days of one agency's data, about 18% of reported skips were outages like this. The timeline now marks any interval that overlaps a device silence as `IsValid=False`. A silence is two consecutive events from a device, of any `EventId`, further apart than the new timeline parameter `max_event_gap_seconds`. The threshold depends on the time of day the silence starts, because controllers resting in green overnight can log nothing for minutes. The default is 120 s from 06:00, 300 s from 21:00, 900 s from 23:00 and 300 s from 05:00. It takes a dict of `'HH:MM'` to seconds, a single number for all day, or `None` to turn it off. Incremental runs carry each device's last event time in the unmatched events (synthetic `EventId` 936), so results match a single pass. `phase_wait` already ignores invalid waits, so these no longer count as skips or inflate `AvgPhaseWait`/`MaxPhaseWait`. `has_data` is unchanged.
+
+### Version 2.6.1 (October 8, 2026)
 
 #### Bug Fixes / Improvements:
 

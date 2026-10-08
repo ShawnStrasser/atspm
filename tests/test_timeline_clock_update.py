@@ -24,7 +24,8 @@ def _build_processor(raw_data, unmatched_df=None):
         remove_incomplete=False,
         aggregations=[
             {"name": "has_data", "params": {"no_data_min": 15, "min_data_points": 1}},
-            {"name": "timeline", "params": {"min_duration": 0, "cushion_time": 60}},
+            # The sparse synthetic events leave minutes of silence, which is not what these tests are about
+            {"name": "timeline", "params": {"min_duration": 0, "cushion_time": 60, "max_event_gap_seconds": None}},
         ],
         **kwargs,
     )

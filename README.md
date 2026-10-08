@@ -142,6 +142,7 @@ params = {
                 'maxtime': True,            # Include MAXTIME-specific events
                 'min_duration': 1,          # Filter out events shorter than n seconds
                 'cushion_time': 1,          # Padding for instant events (seconds)
+                'max_event_gap_seconds': {'05:00': 300, '06:00': 120, '21:00': 300, '23:00': 900},  # Longest device silence by time of day (default shown); a number for all day, None to disable
                 'live': False               # If True, keep incomplete events as IsValid=False with common EndTime. This is for troubleshooting.
             }
         },
@@ -232,9 +233,11 @@ The **`timeline`** table is an event-level dimension for troubleshooting and vis
 - `Duration` (seconds between `StartTime` and `EndTime`)
 - `EventClass` (for example, Green, Yellow, Ped Service, Split, Preempt)
 - `EventValue` (phase/overlap or a coded value, depending on `EventClass`)
-- `IsValid` (whether the start/end pair is complete; intervals that overlap a controller clock update, or a Siemens hourly log restart, are also marked invalid)
+- `IsValid` (whether the start/end pair is complete; intervals that overlap a controller clock update, a Siemens hourly log restart, or a device silence are also marked invalid)
 
 When `has_data` is available, an interval is also marked invalid if any `bin_size` bin it spans has no `has_data` row for that device, since events may have been missed while the device was not reporting. This works the same for incremental runs: each run saves a marker per device in the unmatched events (synthetic `EventId` 935) holding the last bin that had data, so a gap between or across runs is still detected when the interval finally ends.
+
+`has_data` can only see an outage that empties a whole sub-bin, so the timeline also looks for device silences: two consecutive events from a device, of any `EventId`, further apart than `max_event_gap_seconds`. An interval paired across a silence (a green, phase call or phase wait bridging an 11-minute outage, say) is marked invalid. A controller resting in green overnight can log nothing for many minutes, so the threshold depends on the time of day the silence starts. The default is 120 seconds from 06:00, 300 from 21:00, 900 from 23:00 and 300 from 05:00. These were set from a full day of high-resolution data for 420 signals, where silences over 120 seconds outside outages were almost all overnight. Pass a dict of `'HH:MM'` start times to seconds for a different schedule, a single number for all day, or `None` to turn the check off. Incremental runs save each device's last event time in the unmatched events (synthetic `EventId` 936), so a silence across runs is found and the result matches a single pass over the same data.
 
 Clock Update events have no reliable size, since the controller's time correction (`EventValue`) is optional and often 0. Any interval overlapping a 10-second window around each clock update, from 5 seconds before to 5 seconds after, is therefore marked invalid. The Clock Update row itself is shown like other point-in-time events, starting at the update and lasting `cushion_time` seconds.
 

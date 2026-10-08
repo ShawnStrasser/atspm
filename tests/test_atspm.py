@@ -1001,7 +1001,9 @@ def test_phase_wait_tsp_relaxed_threshold():
         'verbose': 0,
         'aggregations': [
             {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
-            {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
+            # The sparse synthetic waits have no events for minutes, which the event gap check would flag
+            {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True,
+                                            'max_event_gap_seconds': None}},
             {'name': 'phase_wait', 'params': {'preempt_recovery_seconds': 120,
                                               'assumed_cycle_length': 100,
                                               'skip_multiplier': 1.5,

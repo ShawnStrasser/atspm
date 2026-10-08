@@ -3,7 +3,7 @@ import ibis
 import time
 import traffic_anomaly
 from .data_loader import load_data, _quote_path, _strip_wrapping_quotes
-from .data_aggregator import aggregate_data
+from .data_aggregator import aggregate_data, render_query
 from .data_saver import save_data
 from .utils import round_down_15
 from .utils import v_print
@@ -18,6 +18,40 @@ AGGREGATION_DEPENDENCIES = {
     'coordination_agg': ['timeline', 'has_data'],
     'platoon_ratio': ['arrival_on_green'],  # platoon_ratio divides Percent_AOG by the green ratio
 }
+
+
+# Default timeline max_event_gap_seconds: the longest silence, by the time of day it starts, before a device
+# is treated as having dropped out. Overnight a controller resting in green with no traffic logs nothing for
+# minutes at a time, so the threshold steps up through the evening and back down in the early morning.
+DEFAULT_MAX_EVENT_GAP_SECONDS = {'05:00': 300, '06:00': 120, '21:00': 300, '23:00': 900}
+
+
+def _event_gap_schedule(value):
+    """timeline max_event_gap_seconds as [[minute of day, seconds], ...] sorted by minute, or None if disabled.
+
+    Accepts None (disabled), a number of seconds for all day, or a dict of 'HH:MM' start times to seconds.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = {'00:00': value}
+    if not isinstance(value, dict) or not value:
+        raise ValueError("max_event_gap_seconds must be None, a number of seconds, or a dict of 'HH:MM' to seconds")
+    schedule = []
+    for start, seconds in value.items():
+        try:
+            hour, minute = (int(x) for x in str(start).split(':'))
+        except ValueError:
+            raise ValueError(f"max_event_gap_seconds start time '{start}' must be 'HH:MM'") from None
+        if not (0 <= hour < 24 and 0 <= minute < 60):
+            raise ValueError(f"max_event_gap_seconds start time '{start}' must be 'HH:MM'")
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds <= 0:
+            raise ValueError(f"max_event_gap_seconds threshold for '{start}' must be a positive number of seconds")
+        schedule.append([hour * 60 + minute, seconds])
+    schedule.sort()
+    if len({minute for minute, _ in schedule}) < len(schedule):
+        raise ValueError("max_event_gap_seconds has the same start time more than once")
+    return schedule
 
 
 def _to_arrow(relation):
@@ -187,6 +221,7 @@ class SignalDataProcessor:
         self.known_detectors_settings = None # For incremental processing of actuations to track detectors with zero counts
         self.known_detectors_found = False
         self.incremental_run = False
+        self.event_gap_schedule = None  # Set from the timeline params when timeline runs
         self.binned_actuations = None # For detector_health aggregation
         self.device_groups = None # For detector_health aggregation if groups are provided
         self.remove_incomplete = False
@@ -469,7 +504,7 @@ class SignalDataProcessor:
                   AND EXISTS (
                     SELECT 1 FROM unmatched_previous u
                     WHERE u.DeviceId = t.DeviceId AND u.TimeStamp = t.StartTime AND u.IsValid = FALSE
-                      AND u.EventId NOT BETWEEN 931 AND 935 -- state markers, not interval starts
+                      AND u.EventId NOT BETWEEN 931 AND 936 -- state markers, not interval starts
                   );
                 UPDATE unmatched_events e SET IsValid = FALSE
                 WHERE e.IsValid = TRUE
@@ -494,6 +529,42 @@ class SignalDataProcessor:
             """)
 
         self.conn.execute("DROP TABLE gap_markers; DROP TABLE gap_known_bins; DROP TABLE gap_bounds;")
+
+    def _invalidate_unmatched_event_gaps(self):
+        """Marks unmatched events invalid when a device silence follows them, and saves each device's last event.
+
+        timeline.sql already invalidates completed intervals that overlap a silence (event_gaps.sql). An event
+        still unmatched at a silence will overlap it once matched, so it is marked invalid now and the next
+        run inherits that through unmatched_previous.IsValid. Incremental runs save each device's last event
+        time (synthetic EventId 936) so the next run measures a silence that crosses runs from it. A device
+        with no data in this run keeps its previous marker.
+        """
+        has_previous = self.conn.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_previous'"
+        ).fetchone()[0] > 0
+        event_gaps = render_query('event_gaps', unmatched=has_previous, event_gap_schedule=self.event_gap_schedule)
+        self.conn.execute(f"""
+            CREATE OR REPLACE TEMP TABLE event_gaps AS {event_gaps};
+            UPDATE unmatched_events u SET IsValid = FALSE
+            WHERE u.IsValid = TRUE
+              AND u.EventId NOT BETWEEN 931 AND 936 -- state markers, not interval starts
+              AND EXISTS (
+                SELECT 1 FROM event_gaps g
+                WHERE g.DeviceID = u.DeviceId AND g.StartTime >= u.TimeStamp
+              );
+            DROP TABLE event_gaps;
+        """)
+
+        if self.incremental_run:
+            previous_markers = (
+                "UNION ALL SELECT DeviceId, TimeStamp FROM unmatched_previous WHERE EventId = 936" if has_previous else ""
+            )
+            self.conn.execute(f"""
+                INSERT INTO unmatched_events
+                SELECT MAX(TimeStamp), DeviceId, 936 AS EventId, 0 AS Parameter, TRUE AS IsValid
+                FROM (SELECT DeviceId, TimeStamp FROM raw_data {previous_markers})
+                GROUP BY DeviceId;
+            """)
 
     def aggregate(self):
         """Runs all aggregations."""
@@ -622,6 +693,9 @@ class SignalDataProcessor:
                 if aggregation['name'] == 'timeline':
                     if 'live' not in params:
                         params['live'] = bool(params.get('live_transform', False))
+                    self.event_gap_schedule = _event_gap_schedule(
+                        params.pop('max_event_gap_seconds', DEFAULT_MAX_EVENT_GAP_SECONDS))
+                    params['event_gap_schedule'] = self.event_gap_schedule
 
                 #######################
                 ### Full Pedestrian ###
@@ -692,7 +766,7 @@ class SignalDataProcessor:
                         UPDATE unmatched_events u
                         SET IsValid = FALSE
                         WHERE u.IsValid = TRUE
-                          AND u.EventId NOT BETWEEN 931 AND 935 -- state markers, not interval starts
+                          AND u.EventId NOT BETWEEN 931 AND 936 -- state markers, not interval starts
                           AND EXISTS (
                             SELECT 1 FROM raw_data r
                             WHERE r.EventId = 181
@@ -708,7 +782,7 @@ class SignalDataProcessor:
                             UPDATE unmatched_events u
                             SET IsValid = FALSE
                             WHERE u.IsValid = TRUE
-                              AND u.EventId NOT BETWEEN 931 AND 935
+                              AND u.EventId NOT BETWEEN 931 AND 936
                               AND EXISTS (
                                 SELECT 1 FROM raw_data r
                                 WHERE r.EventId = 1000
@@ -716,6 +790,9 @@ class SignalDataProcessor:
                                   AND r.TimeStamp >= u.TimeStamp
                               );
                         """)
+
+                    if self.event_gap_schedule:
+                        self._invalidate_unmatched_event_gaps()
 
             end_time = time.time()
             # Store the runtime

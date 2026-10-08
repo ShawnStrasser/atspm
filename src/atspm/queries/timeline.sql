@@ -129,6 +129,16 @@ SiemensLogGapWindow AS
 	),
 {% endif %}
 
+{% if event_gap_schedule %}
+-- A device that logs nothing for longer than the threshold has dropped out, and an interval paired across
+-- the silence has lost whatever happened during it. The window is the silence itself, from the last
+-- event before it to the first event after it.
+EventGapWindow AS
+	(
+	{% include 'event_gaps.sql' %}
+	),
+{% endif %}
+
 -- Windows where event timestamps can't be trusted. EndTime is the latest end of any window starting at or
 -- before this one, so the ASOF join in the final SELECT only needs the latest window starting before an
 -- interval ends, even when windows differ in length.
@@ -141,6 +151,10 @@ InvalidWindow AS
 		{% if controller_type|default('')|lower == 'siemens' %}
 		UNION ALL
 		SELECT DeviceID, StartTime, EndTime FROM SiemensLogGapWindow
+		{% endif %}
+		{% if event_gap_schedule %}
+		UNION ALL
+		SELECT DeviceID, StartTime, EndTime FROM EventGapWindow
 		{% endif %}
 	)
 	),
@@ -538,7 +552,7 @@ FROM (
   FROM
   (
   -- A controller clock update (181) during an interval shifts its end relative to its start, and a Siemens
-  -- hourly log restart (1000) loses its true start or end, so the duration can't be trusted. The ASOF join
+  -- hourly log restart (1000) or a device silence loses its true start or end, so the duration can't be trusted. The ASOF join
   -- finds the latest invalid window starting before EndTime; if any window up to it ends after StartTime
   -- they overlap.
   -- Instant events have no real duration and are exempt, as is the clock update itself.
