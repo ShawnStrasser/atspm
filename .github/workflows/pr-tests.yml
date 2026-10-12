@@ -5,6 +5,7 @@ on:
     branches: [ main ]
     paths:
       - 'src/**'
+      - '.github/workflows/pr-tests.yml'
   pull_request:
     branches: [ main ]
     paths:
@@ -14,7 +15,31 @@ on:
   workflow_dispatch:
 
 jobs:
+  # On a release, skip the test matrix if this workflow already passed for the same commit
+  # (for example on the push to main). Otherwise tests run as usual.
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      tested: ${{ steps.check.outputs.tested }}
+    steps:
+    - id: check
+      if: github.event_name == 'release'
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        count=$(gh api "repos/${{ github.repository }}/actions/workflows/pr-tests.yml/runs?head_sha=${{ github.sha }}&status=success" --jq '.total_count')
+        if [ "${count:-0}" -gt 0 ]; then
+          echo "Tests already passed for ${{ github.sha }}, skipping them"
+          echo "tested=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "tested=false" >> "$GITHUB_OUTPUT"
+        fi
+
   test:
+    needs: check
+    if: needs.check.outputs.tested != 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -57,9 +82,12 @@ jobs:
       if: ${{ always() }}
 
   publish:
-    needs: test
+    needs: [check, test]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && success()
+    if: >-
+      always() && github.event_name == 'release' &&
+      (needs.test.result == 'success' ||
+       (needs.test.result == 'skipped' && needs.check.outputs.tested == 'true'))
 
     steps:
     - uses: actions/checkout@v4
