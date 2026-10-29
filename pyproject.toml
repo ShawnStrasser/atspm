@@ -1,28 +1,32 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "atspm"
-version = "2.6.1"
+version = "3.0.0"
 authors = [
   { name="Shawn Strasser", email="shawn.strasser@odot.oregon.gov" },
 ]
 description = "Aggregates hi-res data from ATC traffic signal controllers into 15-minute binned ATSPM/performance measures."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Operating System :: OS Independent",
 ]
 
 dependencies = [
-    "traffic-anomaly>=2.4.0",
-    "ibis-framework[duckdb]>=11,<12",
+    "duckdb>=2.0.0",
+    "traffic-anomaly>=3.0.0",
     "jinja2",
     "pyarrow",
-    "pyarrow_hotfix",
+    "pytz",
 ]
-
-[tools.setuptools]
-include_package_data = true
-package_data = {"atspm" = ["queries/*", "data/*"]}
-
-

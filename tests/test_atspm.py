@@ -5,15 +5,15 @@ import shutil
 from src.atspm import SignalDataProcessor
 import duckdb
 import numpy
-import toml
+import tomllib
 from src.atspm import __version__
 from pandas.api.types import is_integer_dtype, is_float_dtype
 
 def test_version_consistency():
   """Test that the version in __init__.py matches the one in pyproject.toml"""
   # Read version from pyproject.toml
-  with open('pyproject.toml', 'r') as f:
-    pyproject = toml.load(f)
+  with open('pyproject.toml', 'rb') as f:
+    pyproject = tomllib.load(f)
   pyproject_version = pyproject['project']['version']
 
   # Compare versions
@@ -584,7 +584,7 @@ def test_sample_data_relations():
                                          {'name': 'actuations', 'params': {}}]) as processor:
     processor.load()
     processor.aggregate()
-    assert processor.conn.query("SELECT count(*) FROM actuations").fetchone()[0] > 0
+    assert processor.conn.query("SELECT count(*) FROM actuations").fetchall()[0][0] > 0
 
 
 # =============================================================================
@@ -1087,7 +1087,7 @@ def test_phase_wait_tsp_multiplier_defaults_to_two():
     )
     processor.load()
     processor.aggregate()
-    total_skips = processor.conn.query("SELECT SUM(TotalSkips) FROM phase_wait").fetchone()[0]
+    total_skips = processor.conn.query("SELECT SUM(TotalSkips) FROM phase_wait").fetchall()[0][0]
     processor.close()
 
     # 180s wait against the default 2.0 x 100s TSP threshold: not a skip.
@@ -1219,4 +1219,4 @@ def test_empty_raw_data_with_carried_state():
                                           'known_detectors_df_or_path': known}}]) as processor:
     processor.load()
     processor.aggregate()
-    assert processor.conn.query("SELECT count(*) FROM known_detectors").fetchone()[0] == len(known)
+    assert processor.conn.query("SELECT count(*) FROM known_detectors").fetchall()[0][0] == len(known)

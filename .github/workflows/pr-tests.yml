@@ -5,11 +5,15 @@ on:
     branches: [ main ]
     paths:
       - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
       - '.github/workflows/pr-tests.yml'
   pull_request:
     branches: [ main ]
     paths:
       - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
   release:
     types: [created]
   workflow_dispatch:
@@ -45,19 +49,19 @@ jobs:
       fail-fast: true
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12']
+        python-version: ['3.11', '3.12', '3.13', '3.14', '3.15']
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }}
 
     - name: Install dependencies
       run: |
-        pip install pytest pytest-cov build pandas pyarrow toml
+        pip install pytest pytest-cov build pandas pyarrow
         pip install .
 
     - name: Build package
@@ -72,10 +76,10 @@ jobs:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: ./coverage.xml
         fail_ci_if_error: false
-      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.15'
 
     - name: Upload pytest results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: pytest-results-${{ matrix.os }}-${{ matrix.python-version }}
         path: pytest-results.xml
@@ -90,10 +94,10 @@ jobs:
        (needs.test.result == 'skipped' && needs.check.outputs.tested == 'true'))
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: '3.x'
 

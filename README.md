@@ -56,9 +56,9 @@ pip install atspm
 ```
 Or pinned to a specific version:
 ```bash
-pip install atspm==2.x.x 
+pip install atspm==3.x.x
 ```
-`atspm` works on Python 3.10-3.12 and is tested on Ubuntu, Windows, and MacOS.
+`atspm` works on Python 3.11-3.15 with DuckDB 2 and is tested on Ubuntu, Windows, and MacOS.
 
 ## Quick Start
 
@@ -222,7 +222,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations.
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
 - **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
-- **Detector Health** (`detector_health`): Time-series anomaly scores for detector actuations (using the `traffic-anomaly` package), typically run on binned `actuations` data.
+- **Detector Health** (`detector_health`): Time-series anomaly scores for detector actuations (using the `traffic-anomaly` package, which runs inside the processor's DuckDB connection), typically run on binned `actuations` data.
 
 ### Timeline events (non-binned)
 
@@ -499,11 +499,10 @@ GROUP BY DeviceId, Phase
 *   `Parameter` (INT16): Parameter value.
 ## Release Notes
 
-See [CHANGELOG.md](CHANGELOG.md) for a full history of changes.
+See [CHANGELOG.md](docs/CHANGELOG.md) for a full history of changes.
 
 ## Future Plans
 
-- Integration with [Ibis](https://ibis-project.org/) for compatibility with any SQL backend.
 - Implement use of detector distance to stopbar for Arrival on Green calculations.
 - Develop comprehensive documentation for each performance measure.
 

@@ -154,7 +154,7 @@ def load_data(conn,
 
         conn.query(load_sql)
         # Get the minimum timestamp from the raw data, keeping the epoch fallback when empty
-        raw_min_timestamp = conn.query("SELECT MIN(TimeStamp) FROM raw_data").fetchone()[0]
+        raw_min_timestamp = conn.query("SELECT MIN(TimeStamp) FROM raw_data").fetchall()[0][0]
         if raw_min_timestamp is not None:
             min_timestamp = raw_min_timestamp
 

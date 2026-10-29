@@ -1,5 +1,4 @@
 import duckdb
-import ibis
 import time
 import traffic_anomaly
 from .data_loader import load_data, _quote_path, _strip_wrapping_quotes
@@ -371,7 +370,7 @@ class SignalDataProcessor:
         # Use connection to get current timestamp
         # This is a placeholder for when to_sql is True. After the class is instantiated, 
         # timestamps need to be set by the user for the full_ped query to work.
-        self.max_timestamp = self.conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
+        self.max_timestamp = self.conn.execute("SELECT CURRENT_TIMESTAMP").fetchall()[0][0]
         self.min_timestamp = self.max_timestamp
 
     def load(self):
@@ -402,10 +401,10 @@ class SignalDataProcessor:
             if self.raw_data is not None:
                 self.min_timestamp, self.max_timestamp = self.conn.execute(
                     "SELECT MIN(timestamp), MAX(timestamp) FROM raw_data"
-                ).fetchone()
+                ).fetchall()[0]
                 # Handle empty raw_data: use epoch timestamps so aggregations run with correct schema
                 if self.min_timestamp is None:
-                    self.min_timestamp = self.conn.execute("SELECT TIMESTAMP '1970-01-01 00:00:00'").fetchone()[0]
+                    self.min_timestamp = self.conn.execute("SELECT TIMESTAMP '1970-01-01 00:00:00'").fetchall()[0][0]
                     self.max_timestamp = self.min_timestamp
                     v_print('Empty raw_data detected!', self.verbose)
                 else:
@@ -433,7 +432,7 @@ class SignalDataProcessor:
         bin_interval = f"INTERVAL '{self.bin_size} minutes'"
         has_previous = self.conn.execute(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_previous'"
-        ).fetchone()[0]
+        ).fetchall()[0][0]
         if has_previous:
             previous_markers = "SELECT DeviceId, MAX(TimeStamp) AS MarkerBin FROM unmatched_previous WHERE EventId = 935 GROUP BY DeviceId"
         else:
@@ -541,7 +540,7 @@ class SignalDataProcessor:
         """
         has_previous = self.conn.execute(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_previous'"
-        ).fetchone()[0] > 0
+        ).fetchall()[0][0] > 0
         event_gaps = render_query('event_gaps', unmatched=has_previous, event_gap_schedule=self.event_gap_schedule)
         self.conn.execute(f"""
             CREATE OR REPLACE TEMP TABLE event_gaps AS {event_gaps};
@@ -589,34 +588,37 @@ class SignalDataProcessor:
             # Decompose data
             if aggregation['name'] == 'detector_health':
                 if self.to_sql:
-                    raise ValueError("to_sql option is  supported for detector_health")
-                # traffic-anomaly builds ibis expressions; compiling them to SQL and running that here
-                # keeps weeks of binned actuations inside DuckDB, which can spill to disk. Executing
-                # them instead converts every intermediate result to pandas, and at tens of millions
-                # of rows the string columns alone run to gigabytes per copy.
+                    raise ValueError("to_sql option is not supported for detector_health")
+                # traffic-anomaly returns SQL that reads the input views by name, so weeks of binned
+                # actuations stay inside DuckDB, which can spill to disk. Results passed back through
+                # pandas instead make full copies, and at tens of millions of rows the string columns
+                # alone run to gigabytes per copy.
                 self._register_detector_health_table('detector_health_input', self.binned_actuations)
                 self.binned_actuations = None  # Clear reference
-                decomp = traffic_anomaly.decompose(
-                    self._ibis_table('detector_health_input'),
+                decomp_sql = traffic_anomaly.decompose(
+                    'detector_health_input',
+                    conn=self.conn,
+                    return_sql=True,
                     **aggregation['params']['decompose_params']
                 )
                 # Join groups to decomp
                 if self.device_groups is not None:
                     self._register_detector_health_table('detector_health_groups', self.device_groups)
-                    groups = self._ibis_table('detector_health_groups')
-                    shared = [c for c in decomp.columns if c in groups.columns]
-                    decomp = decomp.join(groups, shared)
+                    groups = self.conn.sql("SELECT * FROM detector_health_groups").columns
+                    shared = ', '.join(f'"{c}"' for c in self.conn.sql(decomp_sql).columns if c in groups)
+                    decomp_sql = f"SELECT * FROM ({decomp_sql}) JOIN detector_health_groups USING ({shared})"
                     # Exclude group_grouping_columns in anomaly_params
                     exclude_col = ', '.join(["'{}'".format(x) for x in aggregation['params']['anomaly_params']['group_grouping_columns']])
                     exclude_col = f"EXCLUDE ({exclude_col})"
 
                 else:
                     exclude_col = ""
+                self.conn.execute(f"CREATE OR REPLACE VIEW detector_health_decomposed AS {decomp_sql}")
                 # Find Anomalies
                 anomaly_sql = traffic_anomaly.anomaly(
-                    decomposed_data=decomp,
+                    'detector_health_decomposed',
+                    conn=self.conn,
                     return_sql=True,
-                    dialect='duckdb',
                     **aggregation['params']['anomaly_params']
                 )
                 # Keep the last return_last_n_days calendar days. The cutoff comes from the input so the
@@ -625,13 +627,13 @@ class SignalDataProcessor:
                 cutoff = self.conn.execute(f"""
                     SELECT MAX(TimeStamp)::DATE - INTERVAL '{aggregation['params']['return_last_n_days']-1}' DAY
                     FROM detector_health_input
-                    """).fetchone()[0]
+                    """).fetchall()[0][0]
                 # A nanosecond pandas TimeStamp arrives as TIMESTAMP_NS; store plain TIMESTAMP, as the
                 # results always were when they came back through pandas
                 timestamp_type = self.conn.execute(
                     "SELECT data_type FROM information_schema.columns "
                     "WHERE table_name = 'detector_health_input' AND column_name = 'TimeStamp'"
-                ).fetchone()[0]
+                ).fetchall()[0][0]
                 replace_col = ("REPLACE (TimeStamp::TIMESTAMP AS TimeStamp)"
                                if timestamp_type in ('TIMESTAMP_NS', 'TIMESTAMP_MS', 'TIMESTAMP_S') else "")
                 query = f"""CREATE OR REPLACE TABLE detector_health AS
@@ -650,7 +652,7 @@ class SignalDataProcessor:
                 if aggregation['name'] in ('ped_delay', 'phase_wait', 'coordination_agg') and not self.to_sql:
                     has_timeline = self.conn.execute(
                         "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'timeline'"
-                    ).fetchone()[0]
+                    ).fetchall()[0][0]
                     if has_timeline == 0:
                         raise ValueError(f"{aggregation['name']} aggregation requires the timeline table. Run timeline first.")
                 
@@ -658,7 +660,7 @@ class SignalDataProcessor:
                 if aggregation['name'] == 'coordination_agg' and not self.to_sql:
                     has_has_data = self.conn.execute(
                         "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'has_data'"
-                    ).fetchone()[0]
+                    ).fetchall()[0][0]
                     if has_has_data == 0:
                         raise ValueError(f"{aggregation['name']} aggregation requires the has_data table. Run has_data first.")
 
@@ -752,7 +754,7 @@ class SignalDataProcessor:
                 if aggregation['name'] == 'timeline' and not self.to_sql:
                     has_data_exists = self.conn.execute(
                         "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'has_data'"
-                    ).fetchone()[0]
+                    ).fetchall()[0][0]
                     
                     if has_data_exists:
                         v_print("Marking timeline events with missing has_data as invalid", self.verbose, 2)
@@ -881,19 +883,14 @@ class SignalDataProcessor:
             self.conn.register(name, source)
 
     def _drop_detector_health_tables(self):
-        """Remove the detector_health input views, releasing any DataFrame registered behind them."""
+        """Remove the detector_health views, releasing any DataFrame registered behind them."""
+        self.conn.execute("DROP VIEW IF EXISTS detector_health_decomposed")
         for name in ('detector_health_input', 'detector_health_groups'):
             try:
                 self.conn.unregister(name)
             except Exception:
                 pass  # not a registered DataFrame
             self.conn.execute(f"DROP VIEW IF EXISTS {name}")
-
-    def _ibis_table(self, name):
-        """An unbound ibis table with the schema of a view in this connection, so the traffic-anomaly
-        expressions built on it compile to SQL that reads that view."""
-        arrow_schema = _to_arrow(self.conn.sql(f"SELECT * FROM {name} LIMIT 0")).schema
-        return ibis.table(ibis.Schema.from_pyarrow(arrow_schema), name=name)
 
     def close(self):
         """Closes the database connection. Safe to call multiple times."""

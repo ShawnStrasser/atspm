@@ -1,5 +1,18 @@
 # Release Notes
 
+### Version 3.0.0 (October 29, 2026)
+
+#### Breaking Changes:
+
+- **DuckDB 2 and Python 3.11+**: `atspm` now requires `duckdb>=2.0.0` (declared directly; it used to arrive through Ibis) and Python 3.11 or newer, and is tested on Python 3.11 to 3.15. Queries that read a single row now use `fetchall()`, since DuckDB 2.0 relations no longer have `fetchone()`.
+- **No more Ibis**: `ibis-framework` and `pyarrow_hotfix` are no longer dependencies. `detector_health` uses `traffic-anomaly>=3.0.0`, which is plain DuckDB SQL: decompose and anomaly SQL is generated against views in the processor's connection and run there, as before. Its output is unchanged, checked row for row (all columns and types) on 35 days of real detector counts with and without device groups, under DuckDB 1.5 and 2.0. `decompose_params` and `anomaly_params` are passed to traffic-anomaly as before; the `dialect` option no longer exists there.
+
+#### Bug Fixes / Improvements:
+
+- **pandas 3**: `pytz` is now a dependency. pandas 3 no longer installs it, and DuckDB needs it to return time zone aware timestamps, so `SignalDataProcessor()` failed on creation without it.
+- The error for `to_sql=True` with `detector_health` now says it is not supported (it read "is  supported").
+- Removed the misspelled `[tools.setuptools]` section from `pyproject.toml`, which setuptools always ignored; the package contents are unchanged.
+
 ### Version 2.6.1 (October 12, 2026)
 
 #### Bug Fixes / Improvements:
