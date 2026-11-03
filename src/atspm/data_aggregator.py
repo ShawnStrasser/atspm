@@ -20,7 +20,12 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
     if aggregation_name not in ['has_data', 'unmatched_events', 'timeline', 'split_failures'] and kwargs['remove_incomplete']:
         # Add natural join with has_data table
         # Note: newline before closing paren ensures SQL comments in inner query don't break the wrapper
-        query = f"SELECT * FROM ({query}\n) main_query NATURAL JOIN has_data "
+        complete_bins = 'has_data'
+        # These can write a bin that an earlier run saw in has_data, see arrival_on_green_carry.sql
+        if aggregation_name in ['arrival_on_green', 'platoon_ratio'] and kwargs.get('unmatched', False):
+            complete_bins = ("(SELECT TimeStamp, DeviceId FROM has_data "
+                             "UNION SELECT TimeStamp, DeviceId FROM unmatched_previous WHERE EventId = 942)")
+        query = f"SELECT * FROM ({query}\n) main_query NATURAL JOIN {complete_bins} "
 
     # Split failures are different to allow for saving incomplete cycle data
     if aggregation_name == 'split_failures':

@@ -24,6 +24,9 @@ AGGREGATION_DEPENDENCIES = {
 # minutes at a time, so the threshold steps up through the evening and back down in the early morning.
 DEFAULT_MAX_EVENT_GAP_SECONDS = {'05:00': 300, '06:00': 120, '21:00': 300, '23:00': 900}
 
+# Aggregations that read what arrival_on_green carries between runs (see arrival_on_green_carry.sql).
+ARRIVAL_CARRY_AGGREGATIONS = ('arrival_on_green', 'platoon_ratio')
+
 # Aggregations that count unique ped actuations, and the default time lapse before a new one is counted.
 PED_CARRY_AGGREGATIONS = ('unique_ped', 'full_ped')
 DEFAULT_SECONDS_BETWEEN_ACTUATIONS = 15
@@ -145,7 +148,8 @@ class SignalDataProcessor:
     raw_data : str or DataFrame
         The raw data to be processed, either as a file path or a DataFrame.
     detector_config : str or DataFrame
-        The detector configuration, either as a file path or a DataFrame.
+        The detector configuration, either as a file path or a DataFrame. Columns: DeviceId, Phase, Parameter, Function,
+        and optionally DistanceFromStopBar (feet) and MPH, which arrival_on_green uses to project arrivals to the stop bar.
     bin_size : int
         The size of the time bins for aggregation, in minutes.
     output_dir : str
@@ -408,7 +412,7 @@ class SignalDataProcessor:
             v_print('*'*50, self.verbose)
             v_print('WARNING: problem loading data!', self.verbose)
             v_print('Make sure raw_data column names are: TimeStamp, DeviceId, EventId, Parameter', self.verbose)
-            v_print('Make sure detector_config column names are: DeviceId, Phase, Parameter, Function', self.verbose)
+            v_print('Make sure detector_config column names are: DeviceId, Phase, Parameter, Function (and optionally DistanceFromStopBar, MPH)', self.verbose)
             v_print('*'*50, self.verbose)
             raise e
         
@@ -557,6 +561,32 @@ class SignalDataProcessor:
                 GROUP BY DeviceId;
             """)
 
+    def _table_exists(self, name):
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [name]
+        ).fetchall()[0][0] > 0
+
+    def _save_arrival_carry(self):
+        """Saves what arrival_on_green and platoon_ratio have not written yet to unmatched_events.
+
+        See arrival_on_green_carry.sql. A run without timeline has no unmatched_events yet, so the table is
+        created here.
+        """
+        params = next(agg for agg in self.aggregations if agg['name'] == 'arrival_on_green')['params']
+        carry = render_query(
+            'arrival_on_green_carry',
+            **params,
+            bin_size=self.bin_size,
+            from_table='raw_data',
+            remove_incomplete=self.remove_incomplete,
+            carry_arrivals=True,
+            unmatched=self._table_exists('unmatched_previous'),
+        )
+        if self._table_exists('unmatched_events'):
+            self.conn.execute(f"INSERT INTO unmatched_events {carry}")
+        else:
+            self.conn.execute(f"CREATE TABLE unmatched_events AS {carry}")
+
     def _save_last_ped_presses(self):
         """Saves each input's last press to unmatched_events (synthetic EventId 937), one row per input.
 
@@ -564,19 +594,16 @@ class SignalDataProcessor:
         this run keeps its previous row until max_days_old drops it. A run without timeline has no
         unmatched_events yet, so the table is created here if a main unmatched file was asked for.
         """
-        table_exists = lambda name: self.conn.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [name]
-        ).fetchall()[0][0] > 0
         previous_presses = (
             "UNION ALL SELECT TimeStamp, DeviceId, Parameter FROM unmatched_previous WHERE EventId = 937"
-            if table_exists('unmatched_previous') else ""
+            if self._table_exists('unmatched_previous') else ""
         )
         last_presses = f"""
             SELECT MAX(TimeStamp) AS TimeStamp, DeviceId, 937::INT16 AS EventId, Parameter, TRUE AS IsValid
             FROM (SELECT TimeStamp, DeviceId, Parameter FROM raw_data WHERE EventId = 90 {previous_presses})
             GROUP BY DeviceId, Parameter
         """
-        if table_exists('unmatched_events'):
+        if self._table_exists('unmatched_events'):
             self.conn.execute(f"INSERT INTO unmatched_events {last_presses}")
         elif 'df_or_path' in (self.unmatched_event_settings or {}):
             self.conn.execute(f"CREATE TABLE unmatched_events AS {last_presses}")
@@ -680,12 +707,13 @@ class SignalDataProcessor:
                 # These are views that have the relateded unmatched events unioned to them
                 # coordination_agg and phase_wait also use unmatched events to store previous coordination state
                 # unique_ped and full_ped use them to store each input's last press
-                if self.incremental_run and aggregation['name'] in ['timeline', 'arrival_on_green', 'yellow_red', 'split_failures', 'coordination_agg', 'phase_wait', *PED_CARRY_AGGREGATIONS]:
+                # arrival_on_green and platoon_ratio use them to store what they have not written yet
+                if self.incremental_run and aggregation['name'] in ['timeline', 'yellow_red', 'split_failures', 'coordination_agg', 'phase_wait', *ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS]:
                     params['incremental_run'] = True #lets the aggregation know to save unmatched events for next run
                     # split_failures uses its own unmatched file (sf_unmatched), others use the main unmatched file
                     if aggregation['name'] == 'split_failures':
                         unmatched_available = self.sf_unmatched_found
-                    elif aggregation['name'] in PED_CARRY_AGGREGATIONS:
+                    elif aggregation['name'] in (*ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS):
                         # These ran without the main unmatched file before, so must not assume it was given
                         unmatched_available = self.unmatched_found and 'df_or_path' in (self.unmatched_event_settings or {})
                     else:
@@ -694,13 +722,17 @@ class SignalDataProcessor:
                     if unmatched_available:
                         v_print(f"Incremental run using previous events for {aggregation['name']}", self.verbose, 2)
                         params['unmatched'] = True #lets the aggregation know to use the unmatched events from previous run
-                        # split_failures, coordination_agg, phase_wait, unique_ped and full_ped use their own logic
-                        if aggregation['name'] not in ['split_failures', 'coordination_agg', 'phase_wait', *PED_CARRY_AGGREGATIONS]:
+                        # split_failures, coordination_agg, phase_wait, arrival_on_green, platoon_ratio, unique_ped and full_ped use their own logic
+                        if aggregation['name'] not in ['split_failures', 'coordination_agg', 'phase_wait', *ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS]:
                             params['from_table'] = 'raw_data_all'
                     else:
                         v_print(f"First Run For {aggregation['name']}", self.verbose, 2)
                         params['unmatched'] = False
                 
+                # Without a main unmatched file nothing can wait for a later run
+                if aggregation['name'] in ARRIVAL_CARRY_AGGREGATIONS:
+                    params['carry_arrivals'] = 'df_or_path' in (self.unmatched_event_settings or {})
+
                 # Add known_detectors_found flag for actuations aggregation
                 if aggregation['name'] == 'actuations':
                     params['known_detectors_found'] = self.known_detectors_found
@@ -772,6 +804,8 @@ class SignalDataProcessor:
             self.runtimes[aggregation['name']] = end_time - start_time
 
         # After the loop, because timeline creates unmatched_events wherever it falls in the list
+        if 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql and any(agg['name'] == 'arrival_on_green' for agg in self.aggregations):
+            self._save_arrival_carry()
         if self.incremental_run and not self.to_sql and any(agg['name'] in PED_CARRY_AGGREGATIONS for agg in self.aggregations):
             self._save_last_ped_presses()
 

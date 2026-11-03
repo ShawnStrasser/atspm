@@ -107,6 +107,22 @@ def _build_column_expression(mapping, key, use_alias=True):
     return expr
 
 
+# Optional detector_config columns, in UDOT's names. Each is matched ignoring case, spaces and underscores, and
+# is NULL if the config does not have it.
+_OPTIONAL_CONFIG_COLUMNS = ['DistanceFromStopBar', 'MPH']
+
+
+def _optional_config_select(columns):
+    """The optional detector_config columns as DOUBLE. A value that is not a number becomes NULL."""
+    names = {_normalize_column_name(name): name for name in reversed(list(columns))}
+    selects = []
+    for column in _OPTIONAL_CONFIG_COLUMNS:
+        source = names.get(column.lower())
+        value = f"TRY_CAST({_quote_identifier(source)} AS DOUBLE)" if source is not None else "NULL::DOUBLE"
+        selects.append(f"{value} AS {column}")
+    return ", ".join(selects)
+
+
 def _build_select_columns(column_map, include=None, extras=None):
     columns = include if include is not None else _CANONICAL_COLUMNS
     parts = [_build_column_expression(column_map, col) for col in columns if col in column_map]
@@ -159,15 +175,19 @@ def load_data(conn,
             min_timestamp = raw_min_timestamp
 
     # Load Configurations (if provided)
-    load_sql = """
-        CREATE TABLE detector_config AS
-        SELECT DeviceId as DeviceId, Phase::INT16 as Phase, Parameter::INT16 as Parameter, Function::STRING as Function
-        """
     if detector_config is not None:
         if isinstance(detector_config, str):
-            conn.query(f"{load_sql} FROM '{detector_config}'")
+            config_columns = _get_columns_from_path(conn, detector_config)
+            config_reference = f"'{detector_config}'"
         else:
-            conn.query(f"{load_sql} FROM detector_config")
+            config_columns = _get_columns_from_dataframe_like(detector_config)
+            config_reference = "detector_config"
+        conn.query(f"""
+        CREATE TABLE detector_config AS
+        SELECT DeviceId as DeviceId, Phase::INT16 as Phase, Parameter::INT16 as Parameter, Function::STRING as Function,
+            {_optional_config_select(config_columns)}
+        FROM {config_reference}
+        """)
 
 
     # Load unmatched_events (if provided)
@@ -219,7 +239,8 @@ def load_data(conn,
                     CREATE VIEW raw_data_all AS
                     SELECT TimeStamp, DeviceId, EventId, Parameter FROM raw_data
                     UNION ALL
-                    SELECT TimeStamp, DeviceId, EventId, Parameter FROM unmatched_previous;
+                    SELECT TimeStamp, DeviceId, EventId, Parameter FROM unmatched_previous
+                    WHERE EventId NOT BETWEEN 938 AND 942; -- only arrival_on_green and platoon_ratio read these
                     """
                 elif key == 'split_fail_df_or_path':
                     load_sql = f"""

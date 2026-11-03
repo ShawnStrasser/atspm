@@ -46,7 +46,7 @@ params = {
             'known_detectors_df_or_path': known_detectors_data,
             'known_detectors_max_days_old': 2
         }},
-        {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
+        {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},  # DistanceFromStopBar and MPH from detector_config if it has them, see the README
         {'name': 'coordination', 'params': {}},
         {'name': 'split_failures', 'params': {'red_time': 5, 'red_occupancy_threshold': 0.80, 'green_occupancy_threshold': 0.70, 'by_approach': True, 'by_cycle': False}},
         {'name': 'splits', 'params': {}},
