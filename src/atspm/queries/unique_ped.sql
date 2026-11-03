@@ -5,23 +5,37 @@
 --The default time lapse before a new unique actuation for a given ped phase may be counted is 15 seconds
 --see this study: https://doi.org/10.1177/0361198121994126
 
+--A press counts if it is more than seconds_between_actuations after the previous press on that input, or
+--if no earlier press is known. Incremental runs read the previous run's last press on each input (synthetic
+--EventId 937), so a run of presses crossing runs is treated the same as in one big run. That carried press
+--only sets the gap for the next press, and it is not counted again. It is ignored by a press older than it.
+
 SELECT
     TimeStamp,
-    DeviceId, 
+    DeviceId,
     Phase,
     COUNT(*)::int16 as Unique_Actuations
 FROM
-    (SELECT 
-        TIME_BUCKET(interval '{{bin_size}} minutes', TimeStamp) as TimeStamp,
-        DeviceId,
-        Parameter::int16 as Phase,
-        DATEDIFF('MILLISECOND', LAG(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp), TimeStamp)::float as Diff_Milliseconds    
-    FROM 
-        {{from_table}}
+    (SELECT
+        TIME_BUCKET(interval '{{bin_size}} minutes', r.TimeStamp) as TimeStamp,
+        r.DeviceId,
+        r.Parameter::int16 as Phase,
+        r.TimeStamp AS Press,
+        GREATEST(
+            LAG(r.TimeStamp) OVER (PARTITION BY r.DeviceId, r.Parameter ORDER BY r.TimeStamp)
+            {% if unmatched %}, CASE WHEN c.TimeStamp <= r.TimeStamp THEN c.TimeStamp END{% endif %}
+        ) AS Previous_Press
+    FROM
+        {{from_table}} r
+    {% if unmatched %}
+    LEFT JOIN unmatched_previous c
+        ON c.EventId = 937 AND c.DeviceId::VARCHAR = r.DeviceId::VARCHAR AND c.Parameter = r.Parameter
+    {% endif %}
     WHERE
-        EventId = 90
+        r.EventId = 90
     ) q
 WHERE
-    q.Diff_Milliseconds > {{seconds_between_actuations}}000 --convert seconds to milliseconds
+    q.Previous_Press IS NULL
+    OR DATEDIFF('MILLISECOND', q.Previous_Press, q.Press) > {{ (seconds_between_actuations | float * 1000) | int }}
 GROUP BY
-    TimeStamp, DeviceID, Phase
+    TimeStamp, DeviceId, Phase

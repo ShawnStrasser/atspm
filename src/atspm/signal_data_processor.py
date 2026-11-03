@@ -24,6 +24,10 @@ AGGREGATION_DEPENDENCIES = {
 # minutes at a time, so the threshold steps up through the evening and back down in the early morning.
 DEFAULT_MAX_EVENT_GAP_SECONDS = {'05:00': 300, '06:00': 120, '21:00': 300, '23:00': 900}
 
+# Aggregations that count unique ped actuations, and the default time lapse before a new one is counted.
+PED_CARRY_AGGREGATIONS = ('unique_ped', 'full_ped')
+DEFAULT_SECONDS_BETWEEN_ACTUATIONS = 15
+
 
 def _event_gap_schedule(value):
     """timeline max_event_gap_seconds as [[minute of day, seconds], ...] sorted by minute, or None if disabled.
@@ -491,7 +495,7 @@ class SignalDataProcessor:
                   AND EXISTS (
                     SELECT 1 FROM unmatched_previous u
                     WHERE u.DeviceId = t.DeviceId AND u.TimeStamp = t.StartTime AND u.IsValid = FALSE
-                      AND u.EventId NOT BETWEEN 931 AND 936 -- state markers, not interval starts
+                      AND u.EventId NOT BETWEEN 931 AND 937 -- state markers, not interval starts
                   );
                 UPDATE unmatched_events e SET IsValid = FALSE
                 WHERE e.IsValid = TRUE
@@ -534,7 +538,7 @@ class SignalDataProcessor:
             CREATE OR REPLACE TEMP TABLE event_gaps AS {event_gaps};
             UPDATE unmatched_events u SET IsValid = FALSE
             WHERE u.IsValid = TRUE
-              AND u.EventId NOT BETWEEN 931 AND 936 -- state markers, not interval starts
+              AND u.EventId NOT BETWEEN 931 AND 937 -- state markers, not interval starts
               AND EXISTS (
                 SELECT 1 FROM event_gaps g
                 WHERE g.DeviceID = u.DeviceId AND g.StartTime >= u.TimeStamp
@@ -552,6 +556,30 @@ class SignalDataProcessor:
                 FROM (SELECT DeviceId, TimeStamp FROM raw_data {previous_markers})
                 GROUP BY DeviceId;
             """)
+
+    def _save_last_ped_presses(self):
+        """Saves each input's last press to unmatched_events (synthetic EventId 937), one row per input.
+
+        The next run's unique_ped and full_ped count their first press against it. An input with no press in
+        this run keeps its previous row until max_days_old drops it. A run without timeline has no
+        unmatched_events yet, so the table is created here if a main unmatched file was asked for.
+        """
+        table_exists = lambda name: self.conn.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [name]
+        ).fetchall()[0][0] > 0
+        previous_presses = (
+            "UNION ALL SELECT TimeStamp, DeviceId, Parameter FROM unmatched_previous WHERE EventId = 937"
+            if table_exists('unmatched_previous') else ""
+        )
+        last_presses = f"""
+            SELECT MAX(TimeStamp) AS TimeStamp, DeviceId, 937::INT16 AS EventId, Parameter, TRUE AS IsValid
+            FROM (SELECT TimeStamp, DeviceId, Parameter FROM raw_data WHERE EventId = 90 {previous_presses})
+            GROUP BY DeviceId, Parameter
+        """
+        if table_exists('unmatched_events'):
+            self.conn.execute(f"INSERT INTO unmatched_events {last_presses}")
+        elif 'df_or_path' in (self.unmatched_event_settings or {}):
+            self.conn.execute(f"CREATE TABLE unmatched_events AS {last_presses}")
 
     def aggregate(self):
         """Runs all aggregations."""
@@ -634,6 +662,11 @@ class SignalDataProcessor:
                     params['event_gap_schedule'] = self.event_gap_schedule
 
                 #######################
+                ### Unique Pedestrian ###
+                if aggregation['name'] in PED_CARRY_AGGREGATIONS and 'seconds_between_actuations' not in params:
+                    params['seconds_between_actuations'] = DEFAULT_SECONDS_BETWEEN_ACTUATIONS
+
+                #######################
                 ### Full Pedestrian ###
                 # Add min_timestamp and max_timestamp to params if detector_faults or full_ped
                 if aggregation['name'] == 'full_ped':
@@ -646,19 +679,23 @@ class SignalDataProcessor:
                 # If unmatched_event_settings is supplied, then change the from_table for timeline, split_failures, arrival_on_green, and yellow_red
                 # These are views that have the relateded unmatched events unioned to them
                 # coordination_agg and phase_wait also use unmatched events to store previous coordination state
-                if self.incremental_run and aggregation['name'] in ['timeline', 'arrival_on_green', 'yellow_red', 'split_failures', 'coordination_agg', 'phase_wait']:
+                # unique_ped and full_ped use them to store each input's last press
+                if self.incremental_run and aggregation['name'] in ['timeline', 'arrival_on_green', 'yellow_red', 'split_failures', 'coordination_agg', 'phase_wait', *PED_CARRY_AGGREGATIONS]:
                     params['incremental_run'] = True #lets the aggregation know to save unmatched events for next run
                     # split_failures uses its own unmatched file (sf_unmatched), others use the main unmatched file
                     if aggregation['name'] == 'split_failures':
                         unmatched_available = self.sf_unmatched_found
+                    elif aggregation['name'] in PED_CARRY_AGGREGATIONS:
+                        # These ran without the main unmatched file before, so must not assume it was given
+                        unmatched_available = self.unmatched_found and 'df_or_path' in (self.unmatched_event_settings or {})
                     else:
                         unmatched_available = self.unmatched_found
-                    
+
                     if unmatched_available:
                         v_print(f"Incremental run using previous events for {aggregation['name']}", self.verbose, 2)
                         params['unmatched'] = True #lets the aggregation know to use the unmatched events from previous run
-                        # split_failures, coordination_agg, and phase_wait use their own logic
-                        if aggregation['name'] not in ['split_failures', 'coordination_agg', 'phase_wait']:
+                        # split_failures, coordination_agg, phase_wait, unique_ped and full_ped use their own logic
+                        if aggregation['name'] not in ['split_failures', 'coordination_agg', 'phase_wait', *PED_CARRY_AGGREGATIONS]:
                             params['from_table'] = 'raw_data_all'
                     else:
                         v_print(f"First Run For {aggregation['name']}", self.verbose, 2)
@@ -702,7 +739,7 @@ class SignalDataProcessor:
                         UPDATE unmatched_events u
                         SET IsValid = FALSE
                         WHERE u.IsValid = TRUE
-                          AND u.EventId NOT BETWEEN 931 AND 936 -- state markers, not interval starts
+                          AND u.EventId NOT BETWEEN 931 AND 937 -- state markers, not interval starts
                           AND EXISTS (
                             SELECT 1 FROM raw_data r
                             WHERE r.EventId = 181
@@ -718,7 +755,7 @@ class SignalDataProcessor:
                             UPDATE unmatched_events u
                             SET IsValid = FALSE
                             WHERE u.IsValid = TRUE
-                              AND u.EventId NOT BETWEEN 931 AND 936
+                              AND u.EventId NOT BETWEEN 931 AND 937
                               AND EXISTS (
                                 SELECT 1 FROM raw_data r
                                 WHERE r.EventId = 1000
@@ -733,7 +770,11 @@ class SignalDataProcessor:
             end_time = time.time()
             # Store the runtime
             self.runtimes[aggregation['name']] = end_time - start_time
-            
+
+        # After the loop, because timeline creates unmatched_events wherever it falls in the list
+        if self.incremental_run and not self.to_sql and any(agg['name'] in PED_CARRY_AGGREGATIONS for agg in self.aggregations):
+            self._save_last_ped_presses()
+
         # Print out runtimes
         v_print(f"\n\nTotal aggregation runtime: {sum(self.runtimes.values()):.2f} seconds.", self.verbose)
         v_print("\nIndividual Query Runtimes:", self.verbose)
