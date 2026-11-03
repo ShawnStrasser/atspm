@@ -95,6 +95,21 @@ The following tables will be produced (see the [README Output Schemas section](.
 | phase_wait         | Phase wait time analysis           |
 | coordination_agg   | Coordination metrics (aggregated)  |
 
+## Detector Health
+
+`detector_health` needs `pip install atspm[detector-health]`. It is not in the list above; to run it in the same processor, add it to `aggregations`:
+
+```python
+{'name': 'detector_health', 'params': {
+    'store': health_store_path,    # a DuckDB file kept between runs, on local disk
+    'detectors': detectors_data,   # atspm-detector predict() answers; leave out to use detector_config
+    'horizon_days': 3,             # how far back a verdict looks, and how much the store keeps
+    'judge': 'daily',
+}},
+```
+
+The output tables `detector_health` and, with `'summary': True`, `detector_health_status` are written only by the run that judges. Its checks read none of the events filtered out above. See the [README](../README.md#detector-health).
+
 ## Key Configuration Notes
 
 1. **Controller Type**: Set to `'maxtime'` for ODOT's traffic controller systems

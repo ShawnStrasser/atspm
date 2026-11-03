@@ -62,7 +62,8 @@ jobs:
     - name: Install dependencies
       run: |
         pip install pytest pytest-cov build pandas pyarrow
-        pip install .
+        # atspm-detector does not list Python 3.15 yet; its tests skip there
+        pip install "${{ matrix.python-version == '3.15' && '.' || '.[detector-health]' }}"
 
     - name: Build package
       run: python -m build

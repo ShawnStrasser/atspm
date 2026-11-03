@@ -1,9 +1,9 @@
 import duckdb
 import time
-import traffic_anomaly
-from .data_loader import load_data, _quote_path, _strip_wrapping_quotes
+from .data_loader import load_data
 from .data_aggregator import aggregate_data, render_query
 from .data_saver import save_data
+from .detector_health import detector_health_params, run_detector_health
 from .utils import round_down_15
 from .utils import v_print
 import os
@@ -221,8 +221,6 @@ class SignalDataProcessor:
         self.known_detectors_found = False
         self.incremental_run = False
         self.event_gap_schedule = None  # Set from the timeline params when timeline runs
-        self.binned_actuations = None # For detector_health aggregation
-        self.device_groups = None # For detector_health aggregation if groups are provided
         self.remove_incomplete = False
         self.to_sql = False
         self.verbose = 1 # 0: only print errors, 1: print performance, 2: print debug statements
@@ -343,22 +341,12 @@ class SignalDataProcessor:
                     v_print(f"Warning, {key} file is None. This is expected only for the first run.", self.verbose)
                     self.known_detectors_found = False
 
-        # Check if detector_health is in aggregations
-        if any(d['name'] == 'detector_health' for d in self.aggregations):
-            try:
-                idx = [d['name'] for d in self.aggregations].index('detector_health')
-                self.binned_actuations = self.aggregations[idx]['params']['data']
-                self.device_groups = self.aggregations[idx]['params']['device_groups']
-            except KeyError:
-                raise ValueError("detector_health aggregation requires 'data' and 'device_groups' parameters. 'device_groups' can be set to None.")
-            # Keep the inputs only on self, which aggregate() clears, so a large frame is not held
-            # through the aggregation list for the life of the processor. Copies leave the caller's
-            # list and dicts untouched.
-            detector_health = self.aggregations[idx]
-            self.aggregations = list(self.aggregations)
-            self.aggregations[idx] = {**detector_health, 'params': {
-                k: v for k, v in detector_health['params'].items() if k not in ('data', 'device_groups')
-            }}
+        # Check the detector_health parameters now rather than after the other aggregations have run. A copy leaves
+        # the caller's list and dicts untouched.
+        self.aggregations = [
+            {**agg, 'params': detector_health_params(agg.get('params', {}))} if agg['name'] == 'detector_health' else agg
+            for agg in self.aggregations
+        ]
      
         # Establish a connection to the database
         self.conn = duckdb.connect()
@@ -584,65 +572,11 @@ class SignalDataProcessor:
             #######################
             ### Detector Health ###
             ### Does Not Use aggregate_data function
-            ### Relies on traffic-anomaly package instead
-            # Decompose data
+            ### Relies on the atspm-detector package instead
             if aggregation['name'] == 'detector_health':
                 if self.to_sql:
                     raise ValueError("to_sql option is not supported for detector_health")
-                # traffic-anomaly returns SQL that reads the input views by name, so weeks of binned
-                # actuations stay inside DuckDB, which can spill to disk. Results passed back through
-                # pandas instead make full copies, and at tens of millions of rows the string columns
-                # alone run to gigabytes per copy.
-                self._register_detector_health_table('detector_health_input', self.binned_actuations)
-                self.binned_actuations = None  # Clear reference
-                decomp_sql = traffic_anomaly.decompose(
-                    'detector_health_input',
-                    conn=self.conn,
-                    return_sql=True,
-                    **aggregation['params']['decompose_params']
-                )
-                # Join groups to decomp
-                if self.device_groups is not None:
-                    self._register_detector_health_table('detector_health_groups', self.device_groups)
-                    groups = self.conn.sql("SELECT * FROM detector_health_groups").columns
-                    shared = ', '.join(f'"{c}"' for c in self.conn.sql(decomp_sql).columns if c in groups)
-                    decomp_sql = f"SELECT * FROM ({decomp_sql}) JOIN detector_health_groups USING ({shared})"
-                    # Exclude group_grouping_columns in anomaly_params
-                    exclude_col = ', '.join(["'{}'".format(x) for x in aggregation['params']['anomaly_params']['group_grouping_columns']])
-                    exclude_col = f"EXCLUDE ({exclude_col})"
-
-                else:
-                    exclude_col = ""
-                self.conn.execute(f"CREATE OR REPLACE VIEW detector_health_decomposed AS {decomp_sql}")
-                # Find Anomalies
-                anomaly_sql = traffic_anomaly.anomaly(
-                    'detector_health_decomposed',
-                    conn=self.conn,
-                    return_sql=True,
-                    **aggregation['params']['anomaly_params']
-                )
-                # Keep the last return_last_n_days calendar days. The cutoff comes from the input so the
-                # anomaly results can be filtered as they are written, rather than held in full just
-                # to find their latest date.
-                cutoff = self.conn.execute(f"""
-                    SELECT MAX(TimeStamp)::DATE - INTERVAL '{aggregation['params']['return_last_n_days']-1}' DAY
-                    FROM detector_health_input
-                    """).fetchall()[0][0]
-                # A nanosecond pandas TimeStamp arrives as TIMESTAMP_NS; store plain TIMESTAMP, as the
-                # results always were when they came back through pandas
-                timestamp_type = self.conn.execute(
-                    "SELECT data_type FROM information_schema.columns "
-                    "WHERE table_name = 'detector_health_input' AND column_name = 'TimeStamp'"
-                ).fetchall()[0][0]
-                replace_col = ("REPLACE (TimeStamp::TIMESTAMP AS TimeStamp)"
-                               if timestamp_type in ('TIMESTAMP_NS', 'TIMESTAMP_MS', 'TIMESTAMP_S') else "")
-                query = f"""CREATE OR REPLACE TABLE detector_health AS
-                        SELECT * {exclude_col} {replace_col}
-                        FROM ({anomaly_sql})
-                        WHERE TimeStamp >= ?
-                        """
-                self.conn.execute(query, [cutoff])
-                self._drop_detector_health_tables()
+                run_detector_health(self.conn, aggregation['params'], self.verbose)
                 # no external sql file like other aggregations, so just continue
                 end_time = time.time()
                 self.runtimes[aggregation['name']] = end_time - start_time
@@ -874,24 +808,6 @@ class SignalDataProcessor:
         self.close()
         return False
     
-    def _register_detector_health_table(self, name, source):
-        """Expose a DataFrame, or a file path DuckDB can read, as a view for detector_health."""
-        if isinstance(source, str):
-            path = _quote_path(_strip_wrapping_quotes(source))
-            self.conn.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM {path}")
-        else:
-            self.conn.register(name, source)
-
-    def _drop_detector_health_tables(self):
-        """Remove the detector_health views, releasing any DataFrame registered behind them."""
-        self.conn.execute("DROP VIEW IF EXISTS detector_health_decomposed")
-        for name in ('detector_health_input', 'detector_health_groups'):
-            try:
-                self.conn.unregister(name)
-            except Exception:
-                pass  # not a registered DataFrame
-            self.conn.execute(f"DROP VIEW IF EXISTS {name}")
-
     def close(self):
         """Closes the database connection. Safe to call multiple times."""
         if self._closed:

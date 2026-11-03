@@ -60,6 +60,11 @@ pip install atspm==3.x.x
 ```
 `atspm` works on Python 3.11-3.15 with DuckDB 2 and is tested on Ubuntu, Windows, and MacOS.
 
+The `detector_health` aggregation needs one more package, on Python 3.11-3.14:
+```bash
+pip install atspm[detector-health]
+```
+
 ## Quick Start
 
 The best place to start is with these self-contained example uses in Colab!<br>
@@ -222,7 +227,34 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations.
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
 - **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
-- **Detector Health** (`detector_health`): Time-series anomaly scores for detector actuations (using the `traffic-anomaly` package, which runs inside the processor's DuckDB connection), typically run on binned `actuations` data.
+- **Detector Health** (`detector_health`): Which vehicle detectors and ped buttons are failing, when, and on what evidence, from `atspm-detector`. Needs `pip install atspm[detector-health]`. See [Detector health](#detector-health).
+
+### Detector health
+
+`detector_health` runs `atspm-detector`'s checks for vehicle detectors (stuck on, silent, counts falling, too-fast actuations and so on) and ped buttons (stuck on, machine-regular presses, a sudden stop and so on) in one pass over `raw_data`. It needs no other aggregation. Install it with `pip install atspm[detector-health]`.
+
+```python
+{'name': 'detector_health', 'params': {
+    'store': 'C:/atspm/health_store.duckdb',  # None: one run over this run's raw_data, always judged
+    'detectors': 'detectors.parquet',         # DataFrame or path; None: detector_config
+    'horizon_days': 3,                        # how far back a verdict looks, and how much the store keeps
+    'judge': 'daily',                         # 'daily' | 'hourly' | 'every_run' | False (only add to the store)
+    'summary': False,                         # also write detector_health_status
+    'ped': True,                              # a store's ped setting cannot change later
+    'ped_assign': False,                      # ped movement model (onnxruntime)
+    'options': None, 'ped_options': None,     # atspm-detector vehicle and ped overrides
+    'workers': 1,
+    'clock_ahead_minutes': 60,                # see below
+    'restart_old_store': True,                # see below
+}}
+```
+
+- **Store**: each run adds its events to a DuckDB file holding small summary rows and whatever is still open (a detector that is ON, a green still running). The store keeps `horizon_days` and no more, a run that fails leaves it unchanged, and the answers equal one run over the same events however they were cut into runs. This state lives in the store, not in `unmatched_events`. Only one run can write to a store at a time. A store from an older `atspm-detector` that changed what the rows mean is renamed `<file>.v<N>` and a new one started, with a warning; it fills up again as data arrives. With `restart_old_store=False` that raises an error instead.
+- **Verdicts**: `daily` judges on the first run to reach a new day and `hourly` on the first to reach a new hour. A run that does not judge writes no `detector_health` file. A verdict covers the `horizon_days` up to `TimeStamp`, so successive files overlap.
+- **Detectors**: pass `predict()`'s answers from `atspm-detector` where you can. Without them `detector_config` is used, which holds the agency's settings rather than what the detectors are found to do: `Function` is taken as named, with `Stopbar Count` read as `Count`, every detector counts as one lane, and a detector with several rows takes its lowest phase.
+- **Clocks**: only rows stamped before the end of the run's last 15-minute bin are processed. A signal whose last event is more than `clock_ahead_minutes` past the typical signal's last event is treated as having a wrong clock and does not move that time, so its later rows are left out and counted. Rows left out this way, rows with an impossible time, and rows the store already covers (the repeated hour of the fall clock change, for example) are printed per signal at `verbose=1`. That log is the only sign of them: such a signal otherwise just looks quiet in the results.
+
+`to_sql=True` is not supported, and `remove_incomplete` does not apply. The `traffic-anomaly` parameters (`data`, `device_groups`, `decompose_params`, `anomaly_params`, `return_last_n_days`) were removed in 3.0.0 and raise an error.
 
 ### Timeline events (non-binned)
 
@@ -394,6 +426,27 @@ GROUP BY DeviceId, Phase
 *   `CycleLength` (INT16): Cycle length in effect.
 *   `ActualCycleLength` (INT16): Measured cycle length.
 *   `ActualOffset` (INT16): Measured offset.
+
+#### detector_health
+One row per finding; no row means no finding. Written only by runs that judge.
+*   `TimeStamp` (DATETIME): End of the judged window.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `DetectorType` (TEXT): `Vehicle` or `Ped`. The two kinds of number can overlap.
+*   `Detector` (INTEGER): Detector, or ped input for a button. Empty on a note about the whole signal.
+*   `Start` (DATETIME): Start of the finding.
+*   `End` (DATETIME): End of the finding.
+*   `Label` (TEXT): What was found.
+*   `Confidence` (DOUBLE): 0 to 1.
+*   `Detail` (TEXT): The evidence.
+
+#### detector_health_status
+Only with `summary=True`. One row per detector or ped button and date of the judged window.
+*   `TimeStamp` (DATETIME): End of the judged window.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `DetectorType` (TEXT): `Vehicle` or `Ped`.
+*   `Detector` (INTEGER): Detector, or ped input for a button.
+*   `Date` (DATE): Calendar date.
+*   `Status` (TEXT): Status of the detector or button on that date.
 
 #### full_ped
 *   `TimeStamp` (DATETIME): Bin start time.
