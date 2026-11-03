@@ -240,6 +240,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
     'horizon_days': 3,                        # how far back a verdict looks, and how much the store keeps
     'judge': 'daily',                         # 'daily' | 'hourly' | 'every_run' | False (only add to the store)
     'summary': False,                         # also write detector_health_status
+    'outputs': ['tables'],                    # add '15min' and/or 'active' for the two optional tables below
     'ped': True,                              # a store's ped setting cannot change later
     'ped_assign': False,                      # ped movement model (onnxruntime)
     'options': None, 'ped_options': None,     # atspm-detector vehicle and ped overrides
@@ -447,6 +448,31 @@ Only with `summary=True`. One row per detector or ped button and date of the jud
 *   `Detector` (INTEGER): Detector, or ped input for a button.
 *   `Date` (DATE): Calendar date.
 *   `Status` (TEXT): Status of the detector or button on that date.
+
+#### detector_health_15min
+Only with `'15min'` in `outputs`. Each finding of a suspect or bad detector or button, one row per 15 minutes since the previous verdict, so successive files do not overlap.
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `DetectorType` (TEXT): `Vehicle` or `Ped`.
+*   `Detector` (INTEGER): Detector, or ped input for a button.
+*   `Label` (TEXT): What was found.
+*   `Confidence` (DOUBLE): 0 to 1, the highest of that label in the bin.
+*   `Status` (TEXT): `suspect` or `bad`.
+
+#### detector_health_active
+Only with `'active'` in `outputs`, and off by default until reviewed. The faults open now, followed from verdict to verdict in the store: a new one is `provisional` until a second verdict confirms it (`confirmed`), and one missing from two verdicts in a row, or whose detector is back to ok, shows once as `cleared` and then goes. It adds no health rule.
+*   `TimeStamp` (DATETIME): End of the judged window.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `DetectorType` (TEXT): `Vehicle` or `Ped`.
+*   `Detector` (INTEGER): Detector, or ped input for a button.
+*   `Label` (TEXT): What was found.
+*   `Start` (DATETIME): Start of the fault.
+*   `End` (DATETIME): End of the fault as last seen.
+*   `Confidence` (DOUBLE): 0 to 1.
+*   `State` (TEXT): `provisional`, `confirmed` or `cleared`.
+*   `FirstSeen` (DATETIME): End of the verdict that first saw it.
+*   `LastSeen` (DATETIME): End of the verdict that last saw it.
+*   `Missed` (INTEGER): Verdicts in a row without it.
 
 #### full_ped
 *   `TimeStamp` (DATETIME): Bin start time.

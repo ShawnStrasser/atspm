@@ -108,7 +108,7 @@ The following tables will be produced (see the [README Output Schemas section](.
 }},
 ```
 
-The output tables `detector_health` and, with `'summary': True`, `detector_health_status` are written only by the run that judges. Its checks read none of the events filtered out above. See the [README](../README.md#detector-health).
+The output tables `detector_health` and, with `'summary': True`, `detector_health_status` are written only by the run that judges, as are `detector_health_15min` and `detector_health_active` if asked for with `outputs`. Its checks read none of the events filtered out above. See the [README](../README.md#detector-health).
 
 ## Key Configuration Notes
 

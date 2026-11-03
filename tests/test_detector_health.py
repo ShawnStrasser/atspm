@@ -109,6 +109,44 @@ def test_status_only_with_summary():
   assert not status.duplicated(['DeviceId', 'DetectorType', 'Detector', 'Date']).any()
 
 
+# ---- the optional tables
+
+def test_the_15_minute_table_is_the_same_from_chunked_runs_and_from_one_run(tmp_path):
+  store = str(tmp_path / 'health.duckdb')
+  chunks = _chunks(15)
+  for chunk in chunks[:-1]:
+    _run(chunk, _params(store=store, judge=False))
+  chunked = _run(chunks[-1], _params(store=store, judge='every_run', outputs=['tables', '15min']))
+  one = _run(RAW, _params(outputs=['15min']))
+  assert set(one) == {'detector_health', 'detector_health_15min'}
+  assert len(one['detector_health_15min']) > 0
+  assert list(one['detector_health_15min'].columns) == ['TimeStamp', 'DeviceId', 'DetectorType', 'Detector', 'Label', 'Confidence', 'Status']
+  _same(chunked['detector_health_15min'], one['detector_health_15min'])
+  q15 = one['detector_health_15min']
+  assert q15['TimeStamp'].between(START, END, inclusive='left').all()
+  assert set(q15['Status']) <= {'suspect', 'bad'}
+
+
+def test_the_active_table_keeps_its_state_in_the_store(tmp_path):
+  store = str(tmp_path / 'health.duckdb')
+  chunks = _chunks(60)
+  _run(chunks[0], _params(store=store, judge=False))
+  first = _run(chunks[1], _params(store=store, judge='every_run', outputs=['active']))['detector_health_active']
+  second = _run(chunks[2], _params(store=store, judge='every_run', outputs=['active']))['detector_health_active']
+  assert list(first.columns) == ['TimeStamp', 'DeviceId', 'DetectorType', 'Detector', 'Label', 'Start', 'End', 'Confidence',
+                                 'State', 'FirstSeen', 'LastSeen', 'Missed']
+  assert len(first) > 0 and (first['TimeStamp'] == START + pd.Timedelta(hours=2)).all() and (second['TimeStamp'] == END).all()
+  assert 'confirmed' in set(second['State'])
+  stored = _store_rows(store)['health_active']
+  _same(stored, second.drop(columns='TimeStamp'))
+
+
+def test_an_empty_one_shot_has_the_optional_tables_too():
+  out = _run(RAW.head(0), _params(outputs=['15min', 'active']))
+  assert set(out) == {'detector_health', 'detector_health_15min', 'detector_health_active'}
+  assert all(len(frame) == 0 and frame.columns[0] == 'TimeStamp' for frame in out.values())
+
+
 # ---- A3: judge cadence
 
 def _shifted(hours):
@@ -232,6 +270,8 @@ def test_a6_old_parameters_explain_themselves(old):
   ({'judge': 'weekly'}, 'judge must be'),
   ({'judge': False}, 'keeps nothing'),
   ({'clock_ahead_minutes': -1}, 'clock_ahead_minutes'),
+  ({'outputs': ['weekly']}, 'outputs must be'),
+  ({'outputs': '15min'}, 'outputs must be'),
 ])
 def test_a6_bad_parameters(params, message):
   with pytest.raises(ValueError, match=message):

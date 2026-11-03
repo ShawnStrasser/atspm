@@ -14,6 +14,7 @@ from .utils import v_print
 STORE = 'health_store'
 DETECTORS = 'health_detectors'
 CADENCES = ('daily', 'hourly', 'every_run', False)
+OUTPUTS = ('tables', '15min', 'active')
 DEFAULTS = {
     'store': None,                  # path of the store file; None: one run over this run's raw_data, always judged
     'detectors': None,              # DataFrame or path: DeviceId, Detector, phase, function, lanes [, p_*]
@@ -21,6 +22,7 @@ DEFAULTS = {
     'horizon_days': 3,              # how far back a verdict looks, and how much the store keeps
     'judge': 'daily',               # 'daily' | 'hourly' | 'every_run' | False (only add to the store)
     'summary': False,               # also write detector_health_status: one status per detector and date
+    'outputs': ('tables',),         # + '15min': detector_health_15min; + 'active': detector_health_active
     'ped': True,
     'ped_assign': False,            # ped movement model (onnxruntime)
     'options': None,                # atspm-detector vehicle health overrides
@@ -33,6 +35,9 @@ REMOVED = ('data', 'device_groups', 'decompose_params', 'anomaly_params', 'retur
 FINDINGS = ('TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector INTEGER, Start TIMESTAMP, '
             '"End" TIMESTAMP, Label VARCHAR, Confidence DOUBLE, Detail VARCHAR')
 STATUS = 'TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector INTEGER, Date DATE, Status VARCHAR'
+Q15 = 'TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector INTEGER, Label VARCHAR, Confidence DOUBLE, Status VARCHAR'
+ACTIVE = ('TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector INTEGER, Label VARCHAR, Start TIMESTAMP, '
+          '"End" TIMESTAMP, Confidence DOUBLE, State VARCHAR, FirstSeen TIMESTAMP, LastSeen TIMESTAMP, Missed INTEGER')
 
 
 def detector_health_params(params):
@@ -49,6 +54,8 @@ def detector_health_params(params):
         raise ValueError(f"detector_health judge must be one of {CADENCES}, not {full['judge']!r}")
     if full['store'] is None and not full['judge']:
         raise ValueError("detector_health: judge=False with no store keeps nothing; give a store path")
+    if isinstance(full['outputs'], str) or not set(full['outputs']) <= set(OUTPUTS):
+        raise ValueError(f"detector_health outputs must be a list from {OUTPUTS}, not {full['outputs']!r}")
     if not isinstance(full['clock_ahead_minutes'], int) or full['clock_ahead_minutes'] < 0:
         raise ValueError("detector_health clock_ahead_minutes must be a whole number of minutes, 0 or more")
     return full
@@ -160,26 +167,40 @@ def _log_held_back(stats, upto, verbose):
 
 
 def _write_table(conn, name, columns, frame, end, device_type):
-    """The output table in fixed types, so a judge with no rows looks like any other, with TimeStamp for save()."""
+    """The output table in fixed types, so a judge with no rows looks like any other, with TimeStamp for save(): the
+    frame's own, else the end of the judged window."""
     conn.execute(f"CREATE OR REPLACE TABLE {name} ({columns.format(device=device_type)})")
     if frame is None:
         return
     conn.register(f'{name}_input', frame)
-    conn.execute(f"INSERT INTO {name} BY NAME SELECT ?::TIMESTAMP AS TimeStamp, * FROM {name}_input", [end])
+    if 'TimeStamp' in frame.columns:
+        conn.execute(f"INSERT INTO {name} BY NAME SELECT * FROM {name}_input")
+    else:
+        conn.execute(f"INSERT INTO {name} BY NAME SELECT ?::TIMESTAMP AS TimeStamp, * FROM {name}_input", [end])
     conn.unregister(f'{name}_input')
 
 
 def _judge_tables(H, conn, params, end, device_type):
     result = H.judge(conn, DETECTORS, store=STORE, end=end, options=params['options'], ped=params['ped'],
                      ped_options=params['ped_options'], ped_assign=params['ped_assign'], workers=params['workers'],
-                     summary=params['summary'])
-    _write_table(conn, 'detector_health', FINDINGS, result.findings, end, device_type)
+                     summary=params['summary'], outputs=tuple(params['outputs']))
+    for name, columns, frame in _output_tables(params, result.findings, result.status, result.q15, result.active):
+        _write_table(conn, name, columns, frame, end, device_type)
+
+
+def _output_tables(params, findings=None, status=None, q15=None, active=None):
+    """The tables a judge writes: name, columns, rows."""
+    yield 'detector_health', FINDINGS, findings
     if params['summary']:
-        _write_table(conn, 'detector_health_status', STATUS, result.status, end, device_type)
+        yield 'detector_health_status', STATUS, status
+    if '15min' in params['outputs']:
+        yield 'detector_health_15min', Q15, q15
+    if 'active' in params['outputs']:
+        yield 'detector_health_active', ACTIVE, active
 
 
 def run_detector_health(conn, params, verbose=1):
-    """Add this run's raw_data to the store and, when due, write detector_health (and detector_health_status)."""
+    """Add this run's raw_data to the store and, when due, write detector_health and the other tables asked for."""
     H = _load_package()
     if not _has_table(conn, 'raw_data'):
         raise ValueError("detector_health reads raw_data: give raw_data and call load() first")
@@ -188,9 +209,8 @@ def run_detector_health(conn, params, verbose=1):
     one_shot = params['store'] is None
     if end is None:                 # nothing to add, and a new store would take its DeviceId type from no data
         if one_shot:
-            _write_table(conn, 'detector_health', FINDINGS, None, None, device_type)
-            if params['summary']:
-                _write_table(conn, 'detector_health_status', STATUS, None, None, device_type)
+            for name, columns, frame in _output_tables(params):
+                _write_table(conn, name, columns, frame, None, device_type)
         v_print("detector_health: no raw data in this run", verbose)
         return
     try:
