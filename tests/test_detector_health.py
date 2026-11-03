@@ -11,17 +11,11 @@ from src.atspm import SignalDataProcessor
 from src.atspm.detector_health import _judge_due
 
 H = pytest.importorskip('atspm_detector.incremental', exc_type=ImportError)
-from atspm_detector import findings
-from . import detector_health_standin as standin
+from atspm_detector import health
 
 RAW = duckdb.query("select * from 'tests/hires_test_data.parquet'").df()
 CONFIG = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
 START, END = pd.Timestamp('2024-05-13 15:00:00'), pd.Timestamp('2024-05-13 18:00:00')
-
-
-@pytest.fixture(autouse=True)
-def _standin(monkeypatch):
-  standin.install(monkeypatch)
 
 
 def _detectors():
@@ -73,7 +67,7 @@ def _reference(raw, start, end):
   con = duckdb.connect()
   con.register('events', raw.rename(columns={'TimeStamp': 'Timestamp'}))
   con.register('detectors', DETECTORS)
-  return findings.health_tables(con, 'events', 'detectors', start, end, bin_origin='clock', summary=True)
+  return health(con, 'events', 'detectors', start, end, bin_origin='clock', summary=True)
 
 
 def _store_rows(path):
