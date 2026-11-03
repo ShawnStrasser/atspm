@@ -54,7 +54,8 @@ TEST_PARAMS = {
 
 # Define aggregations that can be run incrementally
 # coordination_agg requires fill-forward of state across time buckets, which doesn't work well incrementally
-INCREMENTAL_AGGREGATIONS = [agg for agg in TEST_PARAMS['aggregations'] if agg['name'] not in ['unique_ped', 'full_ped', 'yellow_red']]
+# full_ped's Estimated_Volumes looks ahead up to 3 bins, which a chunk does not have. Its counts are tested in test_unique_ped_carry.py
+INCREMENTAL_AGGREGATIONS = [agg for agg in TEST_PARAMS['aggregations'] if agg['name'] not in ['full_ped', 'yellow_red']]
 
 @pytest.fixture(scope="module")
 def processor_output():

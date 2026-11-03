@@ -154,7 +154,7 @@ params = {
         {
             'name': 'full_ped', 
             'params': {
-                'seconds_between_actuations': 15, # Min time between unique peds
+                'seconds_between_actuations': 15, # Min time between unique peds (default shown)
                 'return_volumes': True            # Estimate pedestrian volumes
             }
         },
@@ -224,7 +224,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Splits** (`splits`): MAXTIME-specific split events (cycle length/split services) aggregated by interval.
 - **Coordination** (`coordination`): Raw events for Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME). Includes both `Raw_TimeStamp` and binned `TimeStamp`.
 - **Coordination Aggregate** (`coordination_agg`): Binned coordination state per interval. Provides the active Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME) for every bin using fill-forward logic.
-- **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations.
+- **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations. A press is a unique actuation if it comes more than `seconds_between_actuations` (default 15) after the previous press on that input, or if no earlier press is known. Incremental runs carry each input's last press (synthetic `EventId` 937 in the unmatched events), so `full_ped` and `unique_ped` count the same as one big run. `Estimated_Volumes` looks ahead up to 3 bins, which the end of a run does not have, so the last 3 bins of a run read low.
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
 - **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
 - **Detector Health** (`detector_health`): Which vehicle detectors and ped buttons are failing, when, and on what evidence, from `atspm-detector`. Needs `pip install atspm[detector-health]`. See [Detector health](#detector-health).
@@ -454,7 +454,7 @@ Only with `summary=True`. One row per detector or ped button and date of the jud
 *   `Phase` (INT16): Phase number.
 *   `PedServices` (INT16): Count of ped services.
 *   `PedActuation` (INT16): Count of ped actuations.
-*   `Unique_Actuations` (INT16): Count of unique ped actuations (filtered for duplicates).
+*   `Unique_Actuations` (INT16): Count of unique ped actuations: presses more than `seconds_between_actuations` (default 15) after the previous press on that input.
 *   `Estimated_Volumes` (FLOAT): Estimated pedestrian volume (only present if `return_volumes=True`).
 
 #### has_data
@@ -519,7 +519,7 @@ Only with `summary=True`. One row per detector or ped button and date of the jud
 *   `TimeStamp` (DATETIME): Bin start time.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `Phase` (INT16): Phase number.
-*   `Unique_Actuations` (INT16): Count of unique actuations.
+*   `Unique_Actuations` (INT16): Count of unique actuations: presses more than `seconds_between_actuations` (default 15) after the previous press on that input.
 
 #### yellow_red
 *   `TimeStamp` (DATETIME): Bin start time.
@@ -550,6 +550,9 @@ Only with `summary=True`. One row per detector or ped button and date of the jud
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `EventId` (INT16): Event ID.
 *   `Parameter` (INT16): Parameter value.
+
+Rows with `EventId` 931 to 937 are state carried between runs, not controller events. `EventId` 937 holds each ped input's last press, one row per input, with the input number in `Parameter`.
+
 ## Release Notes
 
 See [CHANGELOG.md](docs/CHANGELOG.md) for a full history of changes.

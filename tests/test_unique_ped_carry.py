@@ -1,0 +1,387 @@
+"""unique_ped and full_ped: the default time lapse, the first press, and each input's last press carried
+between incremental runs (synthetic EventId 937 in unmatched_events)."""
+import numpy as np
+import pandas as pd
+import pytest
+import duckdb
+from src.atspm import SignalDataProcessor
+
+REAL_EVENTS = 'tests/ped_events_test_data.parquet'  # real ped events (21, 67, 90) of 20 signals, Sep 18-21 2026
+PED = ['unique_ped', 'full_ped']
+T0 = pd.Timestamp('2026-09-01 08:00:00')
+KEYS = ['TimeStamp', 'DeviceId', 'Phase']
+COUNTS = {'unique_ped': ['Unique_Actuations'], 'full_ped': ['PedServices', 'PedActuation', 'Unique_Actuations']}
+
+
+def presses(*seconds, device='A', parameter=2, event=90):
+    """Events at the given number of seconds after T0."""
+    return pd.DataFrame({
+        'TimeStamp': [T0 + pd.Timedelta(seconds=s) for s in seconds],
+        'DeviceId': device,
+        'EventId': event,
+        'Parameter': parameter,
+    })
+
+
+def aggregation(name, **params):
+    if name == 'full_ped':
+        params.setdefault('return_volumes', False)
+    return {'name': name, 'params': params}
+
+
+def process(events, aggregations, carry=None, settings=None, **kwargs):
+    """One run. Returns {table: DataFrame} for the output tables and unmatched_events.
+
+    carry: None for no unmatched settings at all, 'first' for a first incremental run, or the previous carry.
+    """
+    if carry is not None:
+        settings = {'df_or_path': '' if isinstance(carry, str) else carry, 'max_days_old': kwargs.pop('max_days_old', 14)}
+    with SignalDataProcessor(raw_data=events, bin_size=15, verbose=0, unmatched_event_settings=settings, aggregations=aggregations, **kwargs) as p:
+        p.load()
+        p.aggregate()
+        tables = [row[0] for row in p.conn.execute("SELECT table_name FROM information_schema.tables").fetchall()]
+        return {t: p.conn.execute(f"SELECT * FROM {t}").df() for t in tables if t not in ('raw_data', 'raw_data_all', 'unmatched_previous')}
+
+
+def incremental(events, cuts, aggregations, **kwargs):
+    """Runs the events in pieces, carrying unmatched_events. Returns the outputs of every run and the last carry."""
+    edges = [events.TimeStamp.min()] + sorted(cuts) + [events.TimeStamp.max() + pd.Timedelta(seconds=1)]
+    carry, outputs = 'first', []
+    for start, end in zip(edges[:-1], edges[1:]):
+        out = process(events[(events.TimeStamp >= start) & (events.TimeStamp < end)], aggregations, carry=carry, **kwargs)
+        carry = out['unmatched_events']
+        outputs.append(out)
+    return outputs, carry
+
+
+def totals(frames, columns):
+    """Counts per bin, adding up a bin that two runs share, without rows that count nothing."""
+    frame = pd.concat(frames)
+    frame = frame.groupby(KEYS, as_index=False)[columns].sum()
+    frame[columns] = frame[columns].astype('int64')
+    frame = frame[frame[columns].sum(axis=1) > 0]
+    return frame.sort_values(KEYS).reset_index(drop=True)
+
+
+def unique_total(frames):
+    return sum(int(f['Unique_Actuations'].sum()) for f in frames)
+
+
+@pytest.fixture(scope='module')
+def real_events():
+    return duckdb.sql(f"SELECT * FROM '{REAL_EVENTS}'").df()
+
+
+#########################################
+### Batch and incremental agree
+#########################################
+
+@pytest.mark.parametrize('name', PED)
+@pytest.mark.parametrize('seed', [1, 2, 3])
+def test_real_data_batch_equals_incremental_at_random_cuts(real_events, name, seed):
+    rng = np.random.default_rng(seed)
+    start, end = real_events.TimeStamp.min(), real_events.TimeStamp.max()
+    seconds = rng.integers(1, int((end - start).total_seconds()), 40)
+    cuts = sorted({start + pd.Timedelta(seconds=int(s), milliseconds=int(rng.integers(0, 10)) * 100) for s in seconds})
+
+    batch = process(real_events, [aggregation(name)])[name]
+    outputs, _ = incremental(real_events, cuts, [aggregation(name)])
+
+    expected = totals([batch], COUNTS[name])
+    assert expected['Unique_Actuations'].sum() > 1000
+    pd.testing.assert_frame_equal(totals([o[name] for o in outputs], COUNTS[name]), expected, check_dtype=False)
+
+
+@pytest.mark.parametrize('name', PED)
+def test_real_data_batch_equals_incremental_at_three_hour_windows(real_events, name):
+    start = real_events.TimeStamp.min().floor('3h')
+    cuts = list(pd.date_range(start + pd.Timedelta(hours=3), real_events.TimeStamp.max(), freq='3h'))
+    batch = process(real_events, [aggregation(name)])[name]
+    outputs, _ = incremental(real_events, cuts, [aggregation(name)])
+    pd.testing.assert_frame_equal(totals([o[name] for o in outputs], COUNTS[name]), totals([batch], COUNTS[name]), check_dtype=False)
+
+
+def test_real_data_is_not_all_kept(real_events):
+    """Guards the tests above: the count must actually drop repeat presses."""
+    batch = process(real_events, [aggregation('full_ped')])['full_ped']
+    assert 0.2 < batch['Unique_Actuations'].sum() / batch['PedActuation'].sum() < 0.8
+
+
+#########################################
+### Edge cases, batch and across a cut
+#########################################
+
+@pytest.mark.parametrize('name', PED)
+class TestCounting:
+    def test_first_press_ever_is_counted(self, name):
+        assert unique_total([process(presses(100), [aggregation(name)])[name]]) == 1
+
+    def test_first_press_of_first_incremental_run_is_counted(self, name):
+        assert unique_total([process(presses(100), [aggregation(name)], carry='first')[name]]) == 1
+
+    def test_default_is_fifteen_seconds(self, name):
+        events = presses(0, 10, 40)  # 10 s repeat dropped, 40 s counted
+        assert unique_total([process(events, [aggregation(name)])[name]]) == 2
+
+    @pytest.mark.parametrize('seconds, expected', [(5, 3), (15, 2), (30, 1), (2.5, 3), (0, 3)])
+    def test_setting_is_used(self, name, seconds, expected):
+        events = presses(0, 10, 30)
+        out = process(events, [aggregation(name, seconds_between_actuations=seconds)])[name]
+        assert unique_total([out]) == expected
+
+    def test_press_at_the_limit_is_not_counted(self, name):
+        assert unique_total([process(presses(0, 15), [aggregation(name)])[name]]) == 1
+
+    def test_press_just_after_the_limit_is_counted(self, name):
+        assert unique_total([process(presses(0, 15.1), [aggregation(name)])[name]]) == 2
+
+    def test_press_at_the_limit_across_a_cut_is_not_counted(self, name):
+        outputs, _ = incremental(presses(0, 15), [T0 + pd.Timedelta(seconds=5)], [aggregation(name)])
+        assert unique_total([o[name] for o in outputs]) == 1
+
+    def test_press_just_after_the_limit_across_a_cut_is_counted(self, name):
+        outputs, _ = incremental(presses(0, 15.1), [T0 + pd.Timedelta(seconds=5)], [aggregation(name)])
+        assert unique_total([o[name] for o in outputs]) == 2
+
+    def test_run_of_presses_crossing_a_cut_counts_once(self, name):
+        """Each press is within the limit of the one before, so only the first counts, wherever the cut falls."""
+        events = presses(*range(0, 120, 10))
+        for cut in (5, 35, 95):
+            outputs, _ = incremental(events, [T0 + pd.Timedelta(seconds=cut)], [aggregation(name)])
+            assert unique_total([o[name] for o in outputs]) == 1
+
+    def test_run_crossing_several_runs_with_empty_run_between(self, name):
+        out1 = process(presses(0, 10), [aggregation(name)], carry='first')
+        out2 = process(presses(0, 10).iloc[:0], [aggregation(name)], carry=out1['unmatched_events'])
+        out3 = process(presses(20), [aggregation(name)], carry=out2['unmatched_events'])
+        assert unique_total([out1[name], out2[name], out3[name]]) == 1
+
+    def test_carry_is_per_input_and_device(self, name):
+        first = pd.concat([presses(0), presses(0, parameter=4), presses(0, device='B')])
+        second = pd.concat([presses(5), presses(30, parameter=4), presses(5, device='C')])
+        out1 = process(first, [aggregation(name)], carry='first')
+        out2 = process(second, [aggregation(name)], carry=out1['unmatched_events'])
+        # A input 2 is a repeat, A input 4 is past the limit, C has no earlier press
+        counted = out2[name].query('Unique_Actuations > 0')
+        assert sorted(zip(counted.DeviceId, counted.Phase)) == [('A', 4), ('C', 2)]
+
+    def test_carried_press_is_not_counted_again(self, name):
+        out1 = process(presses(0), [aggregation(name)], carry='first')
+        out2 = process(presses(500), [aggregation(name)], carry=out1['unmatched_events'])
+        assert unique_total([out2[name]]) == 1
+        bins = out2[name].query('Unique_Actuations > 0').TimeStamp.tolist()
+        assert bins == [(T0 + pd.Timedelta(seconds=500)).floor('15min')]
+
+    def test_same_press_seen_again_is_not_counted_twice(self, name):
+        """A press carried and also in the next run, from a window that overlaps the one before."""
+        out1 = process(presses(0, 100), [aggregation(name)], carry='first')
+        out2 = process(presses(100, 300), [aggregation(name)], carry=out1['unmatched_events'])
+        assert unique_total([out2[name]]) == 1
+
+    def test_press_older_than_the_carried_one_is_judged_on_its_own(self, name):
+        """A late press has nothing known before it. The next one is still within the limit of the carried press."""
+        out1 = process(presses(1000), [aggregation(name)], carry='first')
+        out2 = process(presses(500, 1005), [aggregation(name)], carry=out1['unmatched_events'])
+        assert unique_total([out2[name]]) == 1
+
+
+#########################################
+### The carry itself
+#########################################
+
+def carried(carry):
+    return carry[carry.EventId == 937].sort_values(['DeviceId', 'Parameter']).reset_index(drop=True)
+
+
+def test_carry_is_one_row_per_input_with_its_last_press():
+    events = pd.concat([presses(0, 5, 50), presses(7, parameter=4), presses(9, device='B')])
+    row = carried(process(events, [aggregation('unique_ped')], carry='first')['unmatched_events'])
+    assert list(zip(row.DeviceId, row.Parameter)) == [('A', 2), ('A', 4), ('B', 2)]
+    assert row.TimeStamp.tolist() == [T0 + pd.Timedelta(seconds=s) for s in (50, 7, 9)]
+    assert row.IsValid.all()
+
+
+def test_both_ped_aggregations_share_one_carry():
+    aggs = [aggregation('unique_ped'), aggregation('full_ped')]
+    out1 = process(presses(0), aggs, carry='first')
+    assert len(carried(out1['unmatched_events'])) == 1
+    out2 = process(presses(5), aggs, carry=out1['unmatched_events'])
+    assert len(carried(out2['unmatched_events'])) == 1
+    assert unique_total([out2['unique_ped']]) == 0
+    assert unique_total([out2['full_ped']]) == 0
+
+
+def test_input_with_no_press_keeps_its_row():
+    out1 = process(presses(0), [aggregation('unique_ped')], carry='first')
+    out2 = process(presses(10, device='B'), [aggregation('unique_ped')], carry=out1['unmatched_events'])
+    assert list(carried(out2['unmatched_events']).DeviceId) == ['A', 'B']
+    assert carried(out2['unmatched_events']).TimeStamp[0] == T0
+
+
+def test_row_older_than_max_days_old_is_dropped():
+    out1 = process(presses(0), [aggregation('unique_ped')], carry='first')
+    later = presses(0, device='B')
+    later['TimeStamp'] += pd.Timedelta(days=20)
+    out2 = process(later, [aggregation('unique_ped')], carry=out1['unmatched_events'])
+    assert list(carried(out2['unmatched_events']).DeviceId) == ['B']
+
+
+def test_empty_run_keeps_the_carry():
+    out1 = process(presses(0), [aggregation('full_ped')], carry='first')
+    out2 = process(presses(0).iloc[:0], [aggregation('full_ped')], carry=out1['unmatched_events'])
+    pd.testing.assert_frame_equal(carried(out2['unmatched_events']), carried(out1['unmatched_events']), check_dtype=False)
+
+
+def test_carry_saved_to_a_file_without_timeline(tmp_path):
+    path = str(tmp_path / 'unmatched.parquet')
+    counts = []
+    for i, events in enumerate((presses(0), presses(5), presses(100))):
+        SignalDataProcessor(
+            raw_data=events, bin_size=15, verbose=0, output_dir=str(tmp_path), output_to_separate_folders=False,
+            output_format='parquet', output_file_prefix=f'{i}_',
+            unmatched_event_settings={'df_or_path': path, 'max_days_old': 14},
+            aggregations=[aggregation('unique_ped')],
+        ).run()
+        counts.append(int(pd.read_parquet(tmp_path / f'{i}_unique_ped.parquet')['Unique_Actuations'].sum()))
+        assert len(pd.read_parquet(path)) == 1
+    assert counts == [1, 0, 1]
+
+
+def test_carry_with_timeline_keeps_timeline_rows():
+    events = pd.concat([presses(0), presses(1, event=1), presses(5)])
+    aggs = [
+        aggregation('full_ped'),  # listed before timeline, which creates unmatched_events
+        {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+        {'name': 'timeline', 'params': {'min_duration': 0, 'cushion_time': 0}},
+    ]
+    carry = process(events, aggs, carry='first')['unmatched_events']
+    assert (carry.EventId == 937).sum() == 1
+    assert ((carry.EventId == 1) & (carry.Parameter == 2)).sum() == 1
+    assert (carry.EventId == 936).sum() == 1
+
+
+#########################################
+### Older carry files
+#########################################
+
+@pytest.mark.parametrize('name', PED)
+@pytest.mark.parametrize('has_isvalid', [True, False])
+def test_old_carry_file_loads_and_counts_first_press(tmp_path, name, has_isvalid):
+    """A file written before EventId 937 existed: other carried rows, no last press."""
+    old = pd.DataFrame({
+        'TimeStamp': [T0 - pd.Timedelta(seconds=5), T0 - pd.Timedelta(seconds=5)],
+        'DeviceId': ['A', 'A'],
+        'EventId': [1, 936],
+        'Parameter': [2, 0],
+        'IsValid': [True, True],
+    })
+    if not has_isvalid:
+        old = old.drop(columns='IsValid')
+    path = tmp_path / 'old.parquet'
+    old.to_parquet(path)
+    out = process(presses(0, 5, 40), [aggregation(name)], settings={'df_or_path': str(path), 'max_days_old': 14})
+    assert unique_total([out[name]]) == 2
+    assert len(carried(out['unmatched_events'])) == 1
+
+
+#########################################
+### Settings that must keep working
+#########################################
+
+def test_no_unmatched_settings_saves_nothing():
+    assert 'unmatched_events' not in process(presses(0), [aggregation('unique_ped')])
+
+
+def test_known_detectors_alone_adds_no_unmatched_events():
+    """known_detectors also makes a run incremental. Without timeline there was never an unmatched_events output."""
+    aggs = [aggregation('unique_ped'), {'name': 'actuations', 'params': {'known_detectors_df_or_path': None}}]
+    out = process(presses(0, 100), aggs)
+    assert 'unmatched_events' not in out
+    assert unique_total([out['unique_ped']]) == 2
+
+
+def test_known_detectors_with_timeline_still_carries():
+    """How ODOT's first window runs: no unmatched settings yet, but the next run reads unmatched_events."""
+    aggs = [
+        aggregation('full_ped'),
+        {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+        {'name': 'timeline', 'params': {'min_duration': 0, 'cushion_time': 0}},
+        {'name': 'actuations', 'params': {'known_detectors_df_or_path': None}},
+    ]
+    out1 = process(presses(0), aggs)
+    assert len(carried(out1['unmatched_events'])) == 1
+    aggs[3] = {'name': 'actuations', 'params': {'known_detectors_df_or_path': out1['known_detectors']}}
+    out2 = process(presses(5), aggs, carry=out1['unmatched_events'])
+    assert unique_total([out2['full_ped']]) == 0
+
+
+def test_split_failure_file_alone_works(tmp_path):
+    """A main unmatched file was not asked for, so there is nothing to read the last press from."""
+    settings = {'split_fail_df_or_path': str(tmp_path / 'sf.parquet'), 'max_days_old': 14}
+    out = process(presses(0, 100), [aggregation('unique_ped')], settings=settings)
+    assert unique_total([out['unique_ped']]) == 2
+    assert 'unmatched_events' not in out
+
+
+@pytest.mark.parametrize('name', PED)
+def test_to_sql_renders_with_default(name):
+    sql = SignalDataProcessor(raw_data=presses(0), bin_size=15, verbose=0, to_sql=True, aggregations=[aggregation(name)]).run()[name]
+    assert "q.Press) > 15000" in sql
+    assert 'unmatched_previous' not in sql
+
+
+#########################################
+### Estimated_Volumes
+#########################################
+
+def test_estimated_volumes_runs_on_the_corrected_count(real_events):
+    """The published formula, recalculated from Unique_Actuations, gives the column."""
+    out = process(real_events, [aggregation('full_ped', return_volumes=True)])['full_ped']
+    frame = out.sort_values(KEYS).reset_index(drop=True)
+    rolling = (
+        frame.iloc[::-1].groupby(['DeviceId', 'Phase'])['Unique_Actuations']
+        .rolling(4, min_periods=1).sum().reset_index(level=[0, 1], drop=True).sort_index()
+    )
+    hourly = 0.7167 * rolling + 0.0599 * rolling ** 2
+    ratio = (frame['Unique_Actuations'] / rolling).fillna(0)
+    expected = hourly * ratio + 1.1063 / 4
+    np.testing.assert_allclose(frame['Estimated_Volumes'].astype(float), expected, rtol=1e-5)
+    assert frame['Unique_Actuations'].sum() < frame['PedActuation'].sum()
+
+
+def test_volumes_default_stays_on():
+    assert 'Estimated_Volumes' in process(presses(0, 100), [{'name': 'full_ped', 'params': {}}])['full_ped'].columns
+
+
+#########################################
+### Other aggregations do not see the new rows
+#########################################
+
+def test_other_aggregations_are_unchanged_by_the_carry():
+    """Runs the same pieces with and without the ped aggregations."""
+    data = duckdb.sql("SELECT * FROM 'tests/hires_test_data.parquet'").df()
+    config = duckdb.sql("SELECT * FROM 'tests/configs_test_data.parquet'").df()
+    others = [
+        {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+        {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
+        {'name': 'yellow_red', 'params': {'latency_offset_seconds': 1.5, 'min_red_offset': -8}},
+        {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time': 60, 'maxtime': True}},
+        {'name': 'phase_wait', 'params': {'preempt_recovery_seconds': 120, 'assumed_cycle_length': 140, 'skip_multiplier': 1.5}},
+        {'name': 'coordination_agg', 'params': {}},
+    ]
+    cuts = list(pd.date_range(data.TimeStamp.min().ceil('30min'), data.TimeStamp.max(), freq='30min'))
+    kwargs = {'detector_config': config, 'controller_type': 'maxtime'}
+    plain, _ = incremental(data, cuts, others, **kwargs)
+    with_ped, carry = incremental(data, cuts, others + [aggregation('unique_ped'), aggregation('full_ped')], **kwargs)
+    assert (carry.EventId == 937).sum() > 0
+    for run_plain, run_ped in zip(plain, with_ped):
+        for table, frame in run_plain.items():
+            other = run_ped[table]
+            if table == 'unmatched_events':
+                other = other[other.EventId != 937]
+            sort = list(frame.columns)
+            pd.testing.assert_frame_equal(
+                frame.sort_values(sort).reset_index(drop=True),
+                other.sort_values(sort).reset_index(drop=True),
+                check_dtype=False,
+            )
