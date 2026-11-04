@@ -20,6 +20,7 @@
 - **pandas 3**: `pytz` is now a dependency. pandas 3 no longer installs it, and DuckDB needs it to return time zone aware timestamps, so `SignalDataProcessor()` failed on creation without it.
 - The error for `to_sql=True` with `detector_health` now says it is not supported (it read "is  supported").
 - Removed the misspelled `[tools.setuptools]` section from `pyproject.toml`, which setuptools always ignored; the package contents are unchanged.
+- **Faster and lighter, with the same results**: on 60 real signals over 3 hours, a run with all aggregations went from 2.2 to 1.5 seconds and from 670 to 390 MB at its peak. On all 664 signals it went from 30 to 16 seconds and spills much less to disk. `raw_data` is now a view of a table in a compressed in-memory database, so it can be read as before but not written to or dropped as a table.
 
 ### Version 2.6.1 (October 12, 2026)
 
