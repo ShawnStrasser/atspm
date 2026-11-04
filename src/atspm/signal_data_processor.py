@@ -671,7 +671,7 @@ class SignalDataProcessor:
             if aggregation['name'] == 'detector_health':
                 if self.to_sql:
                     raise ValueError("to_sql option is not supported for detector_health")
-                run_detector_health(self.conn, aggregation['params'], self.verbose)
+                run_detector_health(self.conn, aggregation['params'], self.verbose, self.bin_size)
                 # no external sql file like other aggregations, so just continue
                 end_time = time.time()
                 self.runtimes[aggregation['name']] = end_time - start_time

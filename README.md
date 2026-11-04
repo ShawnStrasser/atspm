@@ -229,7 +229,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations. A press is a unique actuation if it comes more than `seconds_between_actuations` (default 15) after the previous press on that input, or if no earlier press is known. See [Pedestrian counts and volumes](#pedestrian-counts-and-volumes).
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
 - **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
-- **Detector Health** (`detector_health`): Which vehicle detectors and ped buttons are failing, when, and on what evidence, from `atspm-detector`. Needs `pip install atspm[detector-health]`. See [Detector health](#detector-health).
+- **Detector Health** (`detector_health`): How much of each `bin_size` interval each vehicle detector and ped button was failing, and with what problem, from `atspm-detector`. Needs `pip install atspm[detector-health]`. See [Detector health](#detector-health).
 
 ### Arrival on Green
 
@@ -306,8 +306,7 @@ The spring change skips an hour and repeats none, so nothing is needed then. `to
     'detectors': 'detectors.parquet',         # DataFrame or path; None: detector_config
     'horizon_days': 3,                        # how far back a verdict looks, and how much the store keeps
     'judge': 'daily',                         # 'daily' | 'hourly' | 'every_run' | False (only add to the store)
-    'summary': False,                         # also write detector_health_status
-    'outputs': ['tables'],                    # add '15min' and/or 'active' for the two optional tables below
+    'findings': False,                        # also write detector_health_findings
     'ped': True,                              # a store's ped setting cannot change later
     'ped_assign': False,                      # ped movement model (onnxruntime)
     'options': None, 'ped_options': None,     # atspm-detector vehicle and ped overrides
@@ -318,7 +317,9 @@ The spring change skips an hour and repeats none, so nothing is needed then. `to
 ```
 
 - **Store**: each run adds its events to a DuckDB file holding small summary rows and whatever is still open (a detector that is ON, a green still running). The store keeps `horizon_days` and no more, a run that fails leaves it unchanged, and the answers equal one run over the same events however they were cut into runs. This state lives in the store, not in `unmatched_events`. Only one run can write to a store at a time. A store from an older `atspm-detector` that changed what the rows mean is renamed `<file>.v<N>` and a new one started, with a warning; it fills up again as data arrives. With `restart_old_store=False` that raises an error instead.
-- **Verdicts**: `daily` judges on the first run to reach a new day and `hourly` on the first to reach a new hour. A run that does not judge writes no `detector_health` file. A verdict covers the `horizon_days` up to `TimeStamp`, so successive files overlap.
+- **Verdicts**: `daily` judges at each midnight and `hourly` at each hour, on the clock, wherever runs are cut: a run whose last event is within a second of such a time has reached it, and a run that reaches several judges at each of them. `every_run` judges at the end of each run, so there the cuts matter. A verdict looks back over `horizon_days`, and writes the bins since the verdict before, so files never overlap. A run that reaches no verdict writes no `detector_health` file. With no store the run also judges at its end. A verdict that comes later can see a problem in bins already written; those rows stay as they are, and the problem shows only in `detector_health_findings`. The more often the verdicts, the more of this: `daily` is what the numbers below were measured on.
+- **Stuck past the window**: a button or detector a verdict rated stuck ON keeps its bins for as long as it stays ON, however long, as the open ON stays in the store. While its signal logs nothing (a button: while its phase walks nothing) it has no rows, as nothing is known of it then, and they start again if it is still ON. A run with no store knows nothing before its `raw_data`.
+- **Reading the bins**: sum `Score` per detector over the period and divide by 4 for 15-minute bins: that is the hours of complete failure in the period, whatever its length. Do not average: 3 hours of total failure averages 0.125 over a day, 0.042 over 3 days and 0.018 over 7. Good is no hours, Suspect under 1 hour, Bad 1 hour or more, the same for any period. Borderline findings have no rows, so they read Good. A `Score` left empty means not enough data, not a problem.
 - **Detectors**: pass `predict()`'s answers from `atspm-detector` where you can. Without them `detector_config` is used, which holds the agency's settings rather than what the detectors are found to do: `Function` is taken as named, with `Stopbar Count` read as `Count`, every detector counts as one lane, and a detector with several rows takes its lowest phase.
 - **Clocks**: only rows stamped before the end of the run's last 15-minute bin are processed. A signal whose last event is more than `clock_ahead_minutes` past the typical signal's last event is treated as having a wrong clock and does not move that time, so its later rows are left out and counted. Rows left out this way, rows with an impossible time, and rows the store already covers (the repeated hour of the fall clock change, for example) are printed per signal at `verbose=1`. That log is the only sign of them: such a signal otherwise just looks quiet in the results.
 
@@ -496,50 +497,25 @@ GROUP BY DeviceId, Phase
 *   `ActualOffset` (INT16): Measured offset.
 
 #### detector_health
-One row per finding; no row means no finding. Written only by runs that judge.
-*   `TimeStamp` (DATETIME): End of the judged window.
+One row per bin per problem; no row means no problem found. Each bin is written once, by the first verdict to reach it, and never changes; the latest bin is the live status. Written only by runs that reach a verdict.
+*   `TimeStamp` (DATETIME): Bin start time.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `DetectorType` (TEXT): `Vehicle` or `Ped`. The two kinds of number can overlap.
+*   `Detector` (INTEGER): Detector, or ped input for a button.
+*   `Label` (TEXT): The problem, or `not_enough_data` (one row a day).
+*   `Score` (DOUBLE): How much of the bin the detector was failing: about 1 for a complete failure over the whole bin, 0.5 for half a bin of it. Problems at the same moment share that moment's worst value, so the rows of a bin add up to at most 1. Empty on `not_enough_data`.
+
+#### detector_health_findings
+Only with `'findings': True`, for looking into a detector. The findings of the run's last verdict: one row per finding, with notes and borderline findings too.
+*   `TimeStamp` (DATETIME): Time of the verdict.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `DetectorType` (TEXT): `Vehicle` or `Ped`.
 *   `Detector` (INTEGER): Detector, or ped input for a button. Empty on a note about the whole signal.
 *   `Start` (DATETIME): Start of the finding.
 *   `End` (DATETIME): End of the finding.
 *   `Label` (TEXT): What was found.
-*   `Confidence` (DOUBLE): 0 to 1.
+*   `Confidence` (DOUBLE): 0 to 1, the check's own severity: 0.5 at its suspect limit, 0.8 at its bad limit.
 *   `Detail` (TEXT): The evidence.
-
-#### detector_health_status
-Only with `summary=True`. One row per detector or ped button and date of the judged window.
-*   `TimeStamp` (DATETIME): End of the judged window.
-*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
-*   `DetectorType` (TEXT): `Vehicle` or `Ped`.
-*   `Detector` (INTEGER): Detector, or ped input for a button.
-*   `Date` (DATE): Calendar date.
-*   `Status` (TEXT): Status of the detector or button on that date.
-
-#### detector_health_15min
-Only with `'15min'` in `outputs`. Each finding of a suspect or bad detector or button, one row per 15 minutes since the previous verdict, so successive files do not overlap.
-*   `TimeStamp` (DATETIME): Bin start time.
-*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
-*   `DetectorType` (TEXT): `Vehicle` or `Ped`.
-*   `Detector` (INTEGER): Detector, or ped input for a button.
-*   `Label` (TEXT): What was found.
-*   `Confidence` (DOUBLE): 0 to 1, the highest of that label in the bin.
-*   `Status` (TEXT): `suspect` or `bad`.
-
-#### detector_health_active
-Only with `'active'` in `outputs`, and off by default until reviewed. The faults open now, followed from verdict to verdict in the store: a new one is `provisional` until a second verdict confirms it (`confirmed`), and one missing from two verdicts in a row, or whose detector is back to ok, shows once as `cleared` and then goes. It adds no health rule.
-*   `TimeStamp` (DATETIME): End of the judged window.
-*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
-*   `DetectorType` (TEXT): `Vehicle` or `Ped`.
-*   `Detector` (INTEGER): Detector, or ped input for a button.
-*   `Label` (TEXT): What was found.
-*   `Start` (DATETIME): Start of the fault.
-*   `End` (DATETIME): End of the fault as last seen.
-*   `Confidence` (DOUBLE): 0 to 1.
-*   `State` (TEXT): `provisional`, `confirmed` or `cleared`.
-*   `FirstSeen` (DATETIME): End of the verdict that first saw it.
-*   `LastSeen` (DATETIME): End of the verdict that last saw it.
-*   `Missed` (INTEGER): Verdicts in a row without it.
 
 #### full_ped
 *   `TimeStamp` (DATETIME): Bin start time.

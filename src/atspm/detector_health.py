@@ -1,8 +1,9 @@
-"""The detector_health aggregation: atspm-detector's vehicle and ped health, kept up to date from each run's raw_data.
+"""The detector_health aggregation: atspm-detector's vehicle and ped health in time bins, kept up to date from each run's raw_data.
 
-Each run adds its events to a health store (a DuckDB file, or a store in memory for a one-shot run). When a verdict is
-due, the store is judged over the last horizon_days and the answers become the output tables. The store is detached and
-every temporary table dropped before save(), which writes every table it can see."""
+Each run adds its events to a health store (a DuckDB file, or a store in memory for a one-shot run). Verdicts fall on the
+clock (each midnight, or each hour), wherever the runs are cut: a run cuts its events at each verdict's time, judges the store
+over the last horizon_days there, and writes the bins released since the verdict before, each bin once. The store is
+detached and every temporary table dropped before save(), which writes every table it can see."""
 import os
 import warnings
 
@@ -14,15 +15,13 @@ from .utils import v_print
 STORE = 'health_store'
 DETECTORS = 'health_detectors'
 CADENCES = ('daily', 'hourly', 'every_run', False)
-OUTPUTS = ('tables', '15min', 'active')
 DEFAULTS = {
     'store': None,                  # path of the store file; None: one run over this run's raw_data, always judged
     'detectors': None,              # DataFrame or path: DeviceId, Detector, phase, function, lanes [, p_*]
                                     # [, configured_function]; None: detector_config, as the agency set it
     'horizon_days': 3,              # how far back a verdict looks, and how much the store keeps
     'judge': 'daily',               # 'daily' | 'hourly' | 'every_run' | False (only add to the store)
-    'summary': False,               # also write detector_health_status: one status per detector and date
-    'outputs': ('tables',),         # + '15min': detector_health_15min; + 'active': detector_health_active
+    'findings': False,              # also write detector_health_findings: the findings of the run's last verdict
     'ped': True,
     'ped_assign': False,            # ped movement model (onnxruntime)
     'options': None,                # atspm-detector vehicle health overrides
@@ -32,12 +31,9 @@ DEFAULTS = {
     'restart_old_store': True,      # a store from an older extractor is renamed <file>.v<N>; False raises instead
 }
 REMOVED = ('data', 'device_groups', 'decompose_params', 'anomaly_params', 'return_last_n_days')
+BINS = 'TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector INTEGER, Label VARCHAR, Score DOUBLE'
 FINDINGS = ('TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector INTEGER, Start TIMESTAMP, '
             '"End" TIMESTAMP, Label VARCHAR, Confidence DOUBLE, Detail VARCHAR')
-STATUS = 'TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector INTEGER, Date DATE, Status VARCHAR'
-Q15 = 'TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector INTEGER, Label VARCHAR, Confidence DOUBLE, Status VARCHAR'
-ACTIVE = ('TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector INTEGER, Label VARCHAR, Start TIMESTAMP, '
-          '"End" TIMESTAMP, Confidence DOUBLE, State VARCHAR, FirstSeen TIMESTAMP, LastSeen TIMESTAMP, Missed INTEGER')
 
 
 def detector_health_params(params):
@@ -54,8 +50,6 @@ def detector_health_params(params):
         raise ValueError(f"detector_health judge must be one of {CADENCES}, not {full['judge']!r}")
     if full['store'] is None and not full['judge']:
         raise ValueError("detector_health: judge=False with no store keeps nothing; give a store path")
-    if isinstance(full['outputs'], str) or not set(full['outputs']) <= set(OUTPUTS):
-        raise ValueError(f"detector_health outputs must be a list from {OUTPUTS}, not {full['outputs']!r}")
     if not isinstance(full['clock_ahead_minutes'], int) or full['clock_ahead_minutes'] < 0:
         raise ValueError("detector_health clock_ahead_minutes must be a whole number of minutes, 0 or more")
     return full
@@ -144,8 +138,17 @@ def _next_quarter(t):
     return t.floor('15min') + pd.Timedelta(minutes=15)
 
 
+def _typical_events(conn):
+    """The typical signal's first and last event of the run, as one wrong clock must not move them."""
+    first, last = conn.execute("""
+        SELECT quantile_disc(a, 0.5), quantile_disc(z, 0.5)
+        FROM (SELECT min(TimeStamp) AS a, max(TimeStamp) AS z FROM raw_data GROUP BY DeviceId)
+    """).fetchall()[0]
+    return pd.Timestamp(first), pd.Timestamp(last)
+
+
 def _judge_due(cadence, end, meta):
-    """Whether this run judges: the first run to reach a new day or hour, measured from the last judge."""
+    """Whether this run reaches a new day or hour, measured from the last judge."""
     if not cadence:
         return False
     if cadence == 'every_run':
@@ -157,9 +160,26 @@ def _judge_due(cadence, end, meta):
     return end.floor(unit) > pd.Timestamp(last).floor(unit)
 
 
+def _verdict_times(cadence, meta, first_event, last_event):
+    """The clock's verdict times this run reaches: as for the bins of the other aggregations, a run whose last event is within a
+    second of a time reached it; otherwise that verdict waits for the next run, so all events before it have come. The times
+    follow from the last verdict, not from where runs were cut, so one long run and many short ones judge at the same times
+    on the same events."""
+    if cadence not in ('daily', 'hourly'):
+        return []
+    meta = {'through': first_event, **meta}
+    last_event = last_event + pd.Timedelta(seconds=1)
+    if not _judge_due(cadence, last_event, meta):
+        return []
+    unit = pd.Timedelta(days=1) if cadence == 'daily' else pd.Timedelta(hours=1)
+    last = pd.Timestamp(meta.get('last_judge_end', meta['through']))
+    return list(pd.date_range(last.floor(unit) + unit, last_event, freq=unit))
+
+
 def _log_held_back(stats, upto, verbose):
-    """These counts are the only sign of a clock running ahead, a wrong clock or the repeated hour of a clock change."""
-    for what, rows in (('stamped at or after ' + str(upto), stats.events_after_upto),
+    """These counts are the only sign of a clock running ahead, a wrong clock or the repeated hour of a clock change.
+    upto None: a later part of the same run takes the rows held back."""
+    for what, rows in (('stamped at or after ' + str(upto), stats.events_after_upto if upto is not None else {}),
                        ('with an impossible or long-past time', stats.events_bad_stamp),
                        ('at or before what the store already holds', stats.events_late)):
         for device, n in rows.items():
@@ -168,7 +188,7 @@ def _log_held_back(stats, upto, verbose):
 
 def _write_table(conn, name, columns, frame, end, device_type):
     """The output table in fixed types, so a judge with no rows looks like any other, with TimeStamp for save(): the
-    frame's own, else the end of the judged window."""
+    frame's own, else the time of the verdict."""
     conn.execute(f"CREATE OR REPLACE TABLE {name} ({columns.format(device=device_type)})")
     if frame is None:
         return
@@ -180,27 +200,32 @@ def _write_table(conn, name, columns, frame, end, device_type):
     conn.unregister(f'{name}_input')
 
 
-def _judge_tables(H, conn, params, end, device_type):
-    result = H.judge(conn, DETECTORS, store=STORE, end=end, options=params['options'], ped=params['ped'],
-                     ped_options=params['ped_options'], ped_assign=params['ped_assign'], workers=params['workers'],
-                     summary=params['summary'], outputs=tuple(params['outputs']))
-    for name, columns, frame in _output_tables(params, result.findings, result.status, result.q15, result.active):
-        _write_table(conn, name, columns, frame, end, device_type)
+def _judge(H, conn, params, end, bin_size):
+    return H.judge(conn, DETECTORS, store=STORE, end=end, options=params['options'], ped=params['ped'],
+                   ped_options=params['ped_options'], ped_assign=params['ped_assign'], workers=params['workers'],
+                   outputs=('tables', 'bins'), bin_minutes=bin_size)
 
 
-def _output_tables(params, findings=None, status=None, q15=None, active=None):
-    """The tables a judge writes: name, columns, rows."""
-    yield 'detector_health', FINDINGS, findings
-    if params['summary']:
-        yield 'detector_health_status', STATUS, status
-    if '15min' in params['outputs']:
-        yield 'detector_health_15min', Q15, q15
-    if 'active' in params['outputs']:
-        yield 'detector_health_active', ACTIVE, active
+def _output_tables(params, bins=None, findings=None):
+    """The tables a run with a verdict writes: name, columns, rows."""
+    yield 'detector_health', BINS, bins
+    if params['findings']:
+        yield 'detector_health_findings', FINDINGS, findings
 
 
-def run_detector_health(conn, params, verbose=1):
-    """Add this run's raw_data to the store and, when due, write detector_health and the other tables asked for."""
+def _update_to(H, conn, params, upto, after):
+    """Add raw_data's rows before upto (from after on: the earlier ones went in before the verdict at after)."""
+    if after is None:
+        source = 'raw_data'
+    else:
+        source = f'{DETECTORS}_rows'
+        conn.execute(f"CREATE OR REPLACE TEMP VIEW {source} AS SELECT * FROM raw_data WHERE TimeStamp >= TIMESTAMP '{after}'")
+    return H.update(conn, source, DETECTORS, store=STORE, upto=upto, options=params['options'], ped=params['ped'])
+
+
+def run_detector_health(conn, params, verbose=1, bin_size=15):
+    """Add this run's raw_data to the store and write detector_health, the bins released by the verdicts this run reaches, and
+    detector_health_findings if asked for. A run that reaches no verdict writes neither."""
     H = _load_package()
     if not _has_table(conn, 'raw_data'):
         raise ValueError("detector_health reads raw_data: give raw_data and call load() first")
@@ -217,15 +242,29 @@ def run_detector_health(conn, params, verbose=1):
         _register_detectors(conn, params['detectors'])
         _attach_store(H, conn, params)
         meta = _store_meta(conn)
-        stats = H.update(conn, 'raw_data', DETECTORS, store=STORE, upto=end, options=params['options'], ped=params['ped'])
+        bins, findings, judged, after = [], None, None, None
+        for time in _verdict_times(params['judge'], meta, *_typical_events(conn)):
+            stats = _update_to(H, conn, params, time, after)
+            _log_held_back(stats, None, verbose)
+            after = time
+            if stats.through is not None and stats.through < time:
+                result = _judge(H, conn, params, time, bin_size)
+                bins, findings, judged = bins + [result.bins], result.findings, time
+        stats = _update_to(H, conn, params, end, after)
         _log_held_back(stats, end, verbose)
         if stats.through is None:
             return
         if stats.through >= end:    # the store is already past this run: its rows were late
             end = _next_quarter(stats.through)
-        if one_shot or _judge_due(params['judge'], end, meta):
-            _judge_tables(H, conn, params, end, device_type)
+        if (one_shot or params['judge'] == 'every_run') and judged != end:
+            result = _judge(H, conn, params, end, bin_size)
+            bins, findings, judged = bins + [result.bins], result.findings, end
+        if judged is not None:
+            rows = [b for b in bins if len(b)]
+            for name, columns, frame in _output_tables(params, pd.concat(rows, ignore_index=True) if rows else None, findings):
+                _write_table(conn, name, columns, frame, judged, device_type)
     finally:
         conn.execute(f"DROP TABLE IF EXISTS {DETECTORS}")
+        conn.execute(f"DROP VIEW IF EXISTS {DETECTORS}_rows")
         if _attached(conn):
             H.detach_store(conn, STORE)
