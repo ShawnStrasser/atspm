@@ -378,5 +378,5 @@ def test_other_measures_are_the_same_with_the_carry_in_the_file():
                 b[table].sort_values(list(b[table].columns)).reset_index(drop=True))
         columns = list(without_carry.columns)
         pd.testing.assert_frame_equal(
-            with_carry[~with_carry.EventId.between(938, 942)].sort_values(columns).reset_index(drop=True),
+            with_carry[~with_carry.EventId.between(938, 942) & ~with_carry.EventId.between(948, 950)].sort_values(columns).reset_index(drop=True),
             without_carry.sort_values(columns).reset_index(drop=True), check_dtype=False)

@@ -19,7 +19,8 @@ PED = [{'name': 'unique_ped', 'params': {}}, {'name': 'full_ped', 'params': {}}]
 ALL_TOGETHER = [HAS_DATA, TIMELINE, *ARRIVALS, *PED]
 KEYS = ['TimeStamp', 'DeviceId', 'Phase']
 TABLES = ('arrival_on_green', 'platoon_ratio', 'unique_ped', 'full_ped')
-ARRIVAL_CODES = {938, 939, 940, 941}
+ARRIVAL_CODES = {938, 939, 940, 941, 948}
+SPILLBACK_CODES = {949, 950}  # Parameter holds the detector
 PED_CODES = {937, 943, 944, 945, 946, 947}
 SRC = os.path.join(os.path.dirname(__file__), '..', 'src', 'atspm')
 
@@ -63,7 +64,7 @@ def cut_at_minutes(frame, aggregations, minutes, **kwargs):
 
 def test_each_family_writes_only_its_own_codes():
     frame = events(60)
-    assert set(run(frame, ARRIVALS)['unmatched_events'].EventId) <= ARRIVAL_CODES
+    assert set(run(frame, ARRIVALS)['unmatched_events'].EventId) <= ARRIVAL_CODES | SPILLBACK_CODES
     assert set(run(frame, PED)['unmatched_events'].EventId) <= PED_CODES
     # 942 only with remove_incomplete, where it is the same for both families and written once a bin
     both = run(frame.iloc[:-30], [HAS_DATA, *ARRIVALS, *PED], remove_incomplete=True)['unmatched_events']
