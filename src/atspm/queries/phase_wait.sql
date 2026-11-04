@@ -25,7 +25,7 @@
 -- Get cycle length changes from timeline
 -- For MAXTIME controllers, use ActualCycleLength events (316) from raw data
 -- For others, use Cycle Length Change events from timeline
-WITH cycle_lengths AS (
+WITH cycle_length_events AS (
 {% if controller_type|default('')|lower == 'maxtime' %}
     -- MAXTIME: Use ActualCycleLength events (316) directly from raw data
     -- These are more accurate than the programmed cycle length (132)
@@ -56,6 +56,13 @@ WITH cycle_lengths AS (
     FROM unmatched_previous
     WHERE EventId = {% if controller_type|default('')|lower == 'maxtime' %}933{% else %}932{% endif %}
 {% endif %}
+),
+-- One row per time, since the ASOF joins below could pick any of several. The longer cycle length wins, as in
+-- coordination_agg, and is the one less likely to report a skip.
+cycle_lengths AS (
+    SELECT DeviceId, ChangeTime, MAX(CycleLength) AS CycleLength
+    FROM cycle_length_events
+    GROUP BY DeviceId, ChangeTime
 ),
 
 -- Get preempt intervals and extend by recovery time

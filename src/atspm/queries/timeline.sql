@@ -2,9 +2,13 @@
 --Written in SQL for DuckDB. This is a jinja2 template, with variables inside curly braces.
 --jinja2 macros are used to reduce code duplication for common patterns.
 
+-- Two events stamped in the same tenth of a second have to be sorted by something other than time, or their order
+-- changes from run to run. The sorts here break those ties on EventId, so a start comes before its end (a momentary
+-- interval, not a new one starting as the old one ends), except that 65 sorts before 67 and 93 before 94. A toggle's
+-- ties are on Parameter, so off comes before on.
 -- Pair matching start/end events into intervals with a validity flag.
 -- max_duration (seconds), when given, is a sanity check: intervals longer than that are marked invalid.
-{% macro paired_event(name, start_event, end_event, partition_cols='DeviceID, Parameter', order_by='TimeStamp', max_duration=none, source='UncommonEvents') -%}
+{% macro paired_event(name, start_event, end_event, partition_cols='DeviceID, Parameter', order_by='TimeStamp, EventId', max_duration=none, source='UncommonEvents') -%}
 {{ name }}1 AS
 	(
 	SELECT *,
@@ -29,8 +33,8 @@
 {{ name }}1 AS
 	(
 	SELECT *,
-		LEAD(TimeStamp) OVER (PARTITION BY {{ partition_cols }} ORDER BY TimeStamp) AS EndTime,
-		LEAD(Parameter) OVER (PARTITION BY {{ partition_cols }} ORDER BY TimeStamp) AS NextParameter
+		LEAD(TimeStamp) OVER (PARTITION BY {{ partition_cols }} ORDER BY TimeStamp, Parameter) AS EndTime,
+		LEAD(Parameter) OVER (PARTITION BY {{ partition_cols }} ORDER BY TimeStamp, Parameter) AS NextParameter
 	FROM UncommonEvents
 	WHERE EventId = {{ event_id }}
 	),
@@ -65,8 +69,8 @@ UncommonEvents AS MATERIALIZED
 	WHERE EventId <= 218 AND EventId NOT IN (1, 7, 8, 9, 10, 11, 43, 44, 81, 82)
 	),
 -- Paired event macros
-{{ paired_event('AdvanceWarningOverlap', 71, 72, order_by='TimeStamp, EventId') }},
-{{ paired_event('AdvanceWarningPhase', 55, 56, order_by='TimeStamp, EventId') }},
+{{ paired_event('AdvanceWarningOverlap', 71, 72) }},
+{{ paired_event('AdvanceWarningPhase', 55, 56) }},
 {{ paired_event('FYA', 32, 33) }},
 {{ paired_event('Green', 1, 7, source=from_table) }},
 -- Phase yellow/red clearance intervals over 10 seconds indicate bad data, so flag them invalid.
@@ -79,11 +83,11 @@ UncommonEvents AS MATERIALIZED
 {{ paired_event('PhaseOmit', 46, 47) }},
 {{ paired_event('PedOmit', 48, 49) }},
 {{ paired_event('PedDetectorFailed', 91, 92) }},
-{{ paired_event('Preempt', 102, 104, order_by='TimeStamp, EventId') }},
+{{ paired_event('Preempt', 102, 104) }},
 {{ paired_event('SpecialFunction', 176, 177) }},
-{{ paired_event('TSP_Checkin', 112, 115, order_by='TimeStamp, EventId') }},
-{{ paired_event('TSP_Detector', 94, 93, order_by='TimeStamp, EventId') }},
-{{ paired_event('TSP_Service', 118, 119, order_by='TimeStamp, EventId') }},
+{{ paired_event('TSP_Checkin', 112, 115) }},
+{{ paired_event('TSP_Detector', 94, 93) }},
+{{ paired_event('TSP_Service', 118, 119) }},
 
 
 -- Parameter toggle macros
@@ -149,11 +153,12 @@ EventGapWindow AS
 
 -- Windows where event timestamps can't be trusted. EndTime is the latest end of any window starting at or
 -- before this one, so the ASOF join in the final SELECT only needs the latest window starting before an
--- interval ends, even when windows differ in length.
+-- interval ends, even when windows differ in length. Windows starting together all get the latest end of the group,
+-- since the ASOF join could pick any of them.
 InvalidWindow AS
 	(
 	SELECT DeviceID, StartTime,
-	       MAX(EndTime) OVER (PARTITION BY DeviceID ORDER BY StartTime ROWS UNBOUNDED PRECEDING) AS EndTime
+	       MAX(EndTime) OVER (PARTITION BY DeviceID ORDER BY StartTime) AS EndTime
 	FROM (
 		SELECT DeviceID, StartTime, EndTime FROM ClockUpdateWindow
 		{% if controller_type|default('')|lower == 'siemens' %}
@@ -351,10 +356,10 @@ TSP_Extend_Green_Adjust AS
 Fault1 AS /* intermediate step */
 	(
 	SELECT *,
-	LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp) AS EndTime,
-	LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp) AS NextEventId
+	LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS EndTime,
+	LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId
 	FROM UncommonEvents
-	WHERE EventId IN (83, 84, 85, 86, 87, 88) -- 83 = detector restored
+	WHERE EventId IN (83, 84, 85, 86, 87, 88) -- 83 = detector restored, so a restore sorts before a fault in the same tenth
 	),
 Fault AS
 	(
@@ -366,11 +371,15 @@ Fault AS
 	),
 PedDelay1 AS /* intermediate step */
 (
+	-- A press in the same tenth as a walk (21) or the start of flashing don't walk (22) sorts after it, so it counts as
+	-- a press during that service and not as one the service answered. The controller takes at least a tenth of a second
+	-- to answer: of about 21,000 first presses followed by a walk within a second, 9 were in the same tenth, 620 a tenth
+	-- before and about 19,000 two or three tenths before. A press after 22 waits for the next walk.
 	SELECT *,
-		LAG(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp) AS PrevEvent,
+		LAG(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS PrevEvent,
 		MIN(CASE WHEN EventId IN (21,22) THEN TimeStamp END)
 		OVER (PARTITION BY DeviceID, Parameter 
-				ORDER BY TimeStamp 
+				ORDER BY TimeStamp, EventId 
 				ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS WalkStart
 	FROM UncommonEvents
 	WHERE EventId IN (90, 21, 22)

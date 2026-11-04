@@ -31,9 +31,11 @@ If for two-in-a-row ON events more than 2000 milliseconds apart, an OFF event is
 For two-in-a-row OFF events, an ON event is added half-way between them regardless of the gap size
 */
 WITH lagged as (
+        -- Off sorts before on in the same tenth, as in with_cycle below. The sort is per phase too: a detector on two
+        -- phases has one copy of each event per phase, and the copies are not two events in a row.
         SELECT *,
-            LAG(EventId) OVER (PARTITION BY DeviceId, Detector ORDER BY TimeStamp) as PrevEventId,
-            datediff('MILLISECOND', LAG(TimeStamp) OVER (PARTITION BY DeviceId, Detector ORDER BY TimeStamp), TimeStamp) AS PrevDiff
+            LAG(EventId) OVER (PARTITION BY DeviceId, Detector, Phase ORDER BY TimeStamp, EventId) as PrevEventId,
+            datediff('MILLISECOND', LAG(TimeStamp) OVER (PARTITION BY DeviceId, Detector, Phase ORDER BY TimeStamp, EventId), TimeStamp) AS PrevDiff
         FROM step1
     ),
     interpolate_OFFS_rapid AS (
@@ -299,8 +301,9 @@ incomplete_cycles as (
 ),
 detector_states as (
     SELECT TimeStamp, DeviceId, Detector, Phase, Cycle_Number, Detector_State,
-        ROW_NUMBER() OVER (PARTITION BY DeviceId, Detector, Phase, Cycle_Number ORDER BY TimeStamp) as row_num,
-        ROW_NUMBER() OVER (PARTITION BY DeviceId, Detector, Phase, Cycle_Number ORDER BY TimeStamp DESC) as row_num_desc
+        -- First and last by the same sort as with_cycle, so the state saved is the one it worked out at that point
+        ROW_NUMBER() OVER (PARTITION BY DeviceId, Detector, Phase, Cycle_Number ORDER BY TimeStamp, EventId) as row_num,
+        ROW_NUMBER() OVER (PARTITION BY DeviceId, Detector, Phase, Cycle_Number ORDER BY TimeStamp DESC, EventId DESC) as row_num_desc
     FROM sf_intermediate
     NATURAL JOIN max_cycle
 ),

@@ -62,12 +62,13 @@ green_by_bin AS (
         b.bin AS TimeStamp,
         g.DeviceId,
         g.Phase,
+        -- Whole milliseconds are summed: a sum of fractions of a second depends on the order rows reach it
         SUM(
             DATE_DIFF('millisecond',
                 GREATEST(g.GreenStart, b.bin),
                 LEAST(g.GreenEnd, b.bin + INTERVAL '{{bin_size}} minutes')
-            )::DOUBLE / 1000.0
-        ) AS Green_Seconds
+            )
+        )::DOUBLE / 1000.0 AS Green_Seconds
     FROM greens_to_results_end g,
         LATERAL (
             SELECT UNNEST(generate_series(

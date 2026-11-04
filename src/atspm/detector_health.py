@@ -86,7 +86,7 @@ def _register_detectors(conn, detectors):
                    CASE configured_function WHEN 'Stopbar Count' THEN 'Count' ELSE configured_function END AS function,
                    1 AS lanes, configured_function
             FROM (SELECT DeviceId, Parameter AS Detector, min(Phase) AS phase,
-                         arg_min(Function, Phase) AS configured_function
+                         arg_min(Function, (Phase, Function)) AS configured_function
                   FROM detector_config GROUP BY DeviceId, Parameter)
         """)
         return
