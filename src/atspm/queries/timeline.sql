@@ -4,13 +4,13 @@
 
 -- Pair matching start/end events into intervals with a validity flag.
 -- max_duration (seconds), when given, is a sanity check: intervals longer than that are marked invalid.
-{% macro paired_event(name, start_event, end_event, partition_cols='DeviceID, Parameter', order_by='TimeStamp', max_duration=none) -%}
+{% macro paired_event(name, start_event, end_event, partition_cols='DeviceID, Parameter', order_by='TimeStamp', max_duration=none, source='UncommonEvents') -%}
 {{ name }}1 AS
 	(
 	SELECT *,
 		LEAD(TimeStamp) OVER (PARTITION BY {{ partition_cols }} ORDER BY {{ order_by }}) AS EndTime,
 		LEAD(EventId) OVER (PARTITION BY {{ partition_cols }} ORDER BY {{ order_by }}) AS NextEventId
-	FROM {{from_table}}               
+	FROM {{ source }}
 	WHERE EventId IN ({{ start_event }}, {{ end_event }})
 	),
 {{ name }} AS
@@ -31,7 +31,7 @@
 	SELECT *,
 		LEAD(TimeStamp) OVER (PARTITION BY {{ partition_cols }} ORDER BY TimeStamp) AS EndTime,
 		LEAD(Parameter) OVER (PARTITION BY {{ partition_cols }} ORDER BY TimeStamp) AS NextParameter
-	FROM {{from_table}}               
+	FROM UncommonEvents
 	WHERE EventId = {{ event_id }}
 	),
 {{ name }} AS
@@ -50,23 +50,31 @@
 	SELECT TimeStamp, DeviceID, EventId, Parameter,
 	       TimeStamp + INTERVAL ({{cushion_time}}) SECOND AS EndTime,
 	       TRUE AS IsValid
-	FROM {{from_table}}
+	FROM UncommonEvents
 	WHERE EventId = {{ event_id }}
 	)
 {%- endmacro %}
 
 WITH
+-- Most of what timeline reads is rare, and each of those reads would otherwise scan every event looking for its few.
+-- They share one read here. The common events, phase states and calls, are read where needed. Detector on and off
+-- (81, 82) are not used at all, and event ids above 218 are vendor-specific except for the synthetic ones below.
+UncommonEvents AS MATERIALIZED
+	(
+	SELECT * FROM {{from_table}}
+	WHERE EventId <= 218 AND EventId NOT IN (1, 7, 8, 9, 10, 11, 43, 44, 81, 82)
+	),
 -- Paired event macros
 {{ paired_event('AdvanceWarningOverlap', 71, 72, order_by='TimeStamp, EventId') }},
 {{ paired_event('AdvanceWarningPhase', 55, 56, order_by='TimeStamp, EventId') }},
 {{ paired_event('FYA', 32, 33) }},
-{{ paired_event('Green', 1, 7) }},
+{{ paired_event('Green', 1, 7, source=from_table) }},
 -- Phase yellow/red clearance intervals over 10 seconds indicate bad data, so flag them invalid.
-{{ paired_event('Yellow', 8, 9, max_duration=10) }},
-{{ paired_event('Red', 10, 11, max_duration=10) }},
+{{ paired_event('Yellow', 8, 9, max_duration=10, source=from_table) }},
+{{ paired_event('Red', 10, 11, max_duration=10, source=from_table) }},
 {{ paired_event('OverlapPed', 67, 65) }},
 {{ paired_event('Ped', 21, 23) }},
-{{ paired_event('PhaseCall', 43, 44) }},
+{{ paired_event('PhaseCall', 43, 44, source=from_table) }},
 {{ paired_event('PhaseHold', 41, 42) }},
 {{ paired_event('PhaseOmit', 46, 47) }},
 {{ paired_event('PedOmit', 48, 49) }},
@@ -102,7 +110,7 @@ ClockUpdateWindow AS
 	SELECT DeviceID,
 	       TimeStamp - INTERVAL 5 SECOND AS StartTime,
 	       TimeStamp + INTERVAL 5 SECOND AS EndTime
-	FROM {{from_table}}
+	FROM UncommonEvents
 	WHERE EventId = 181
 	),
 
@@ -311,7 +319,7 @@ Transition1 AS /* intermediate step */
 	(
 	SELECT *,
 	LEAD(TimeStamp) OVER (PARTITION BY DeviceID ORDER BY TimeStamp, Parameter DESC) AS EndTime
-	FROM {{from_table}}               
+	FROM UncommonEvents
 	WHERE EventId = 150 AND Parameter IN (0, 1, 2, 3, 4)
 	),
 Transition AS
@@ -325,7 +333,7 @@ TSP_AdjustEvents AS /* intermediate step */
 	(
 	SELECT *,
 	LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS EndTime
-	FROM {{from_table}}               
+	FROM UncommonEvents
 	WHERE EventId IN (113, 114, 115) -- 113=early green, 114=extend green, 115=checkout
 	),
 TSP_Early_Green_Adjust AS
@@ -345,7 +353,7 @@ Fault1 AS /* intermediate step */
 	SELECT *,
 	LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp) AS EndTime,
 	LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp) AS NextEventId
-	FROM {{from_table}}               
+	FROM UncommonEvents
 	WHERE EventId IN (83, 84, 85, 86, 87, 88) -- 83 = detector restored
 	),
 Fault AS
@@ -364,7 +372,7 @@ PedDelay1 AS /* intermediate step */
 		OVER (PARTITION BY DeviceID, Parameter 
 				ORDER BY TimeStamp 
 				ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING) AS WalkStart
-	FROM {{from_table}}
+	FROM UncommonEvents
 	WHERE EventId IN (90, 21, 22)
 	),
 PedDelay AS (
@@ -394,7 +402,7 @@ OverlapEvents AS /* intermediate step */
     LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS EndTime,
     LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId,
     MAX(CASE WHEN EventId = 65 THEN 1 ELSE 0 END) OVER (PARTITION BY DeviceID, Parameter) AS HasOverlapOff
-  FROM {{from_table}}
+  FROM UncommonEvents
   WHERE EventId BETWEEN 61 AND 66
 ),
 OverlapGreen AS (
@@ -429,7 +437,7 @@ AlarmStatus1 AS /* intermediate step */
 	(
 	SELECT *,
 	LEAD(TimeStamp) OVER (PARTITION BY DeviceID, EventId ORDER BY TimeStamp, Parameter DESC) AS EndTime
-	FROM {{from_table}}
+	FROM UncommonEvents
 	WHERE EventId IN (173, 174{% if maxtime|default(false) %}, 175{% endif %})
 	),
 AlarmStatus AS
