@@ -73,12 +73,6 @@ WITH lagged as (
         UNION ALL
         SELECT * FROM interpolate_ONs
     ),
-    --Now remove first row if it is an OFF event
-    ordered_rows AS (
-        SELECT *,
-            ROW_NUMBER() OVER(PARTITION BY DeviceId, Detector ORDER BY TimeStamp) as row_num
-        FROM combined
-    ),
     --The first detector event needs to be an ON event for later logic to work
     --Therefore this step adds an ON event if the first event is an OFF event
     on_before_off AS (
@@ -87,8 +81,8 @@ WITH lagged as (
             82 as EventId,
             Detector,
             Phase
-        FROM ordered_rows
-        WHERE row_num = 1 AND EventId = 81
+        FROM lagged
+        WHERE PrevEventId IS NULL AND EventId = 81 --no earlier event, so this is the detector's first
     )
     SELECT TimeStamp,
         DeviceId,
@@ -256,16 +250,19 @@ step5 AS (
     -- Group by cycle and label events as occuring during green, yellow, or red
     WITH step1a as (
         SELECT *,
-            CASE WHEN EventId = 1 THEN 1 ELSE 0 END AS Cycle_Number_Mask,
             CASE WHEN EventId < 81 THEN EventId ELSE 0 END AS Signal_State_Mask,
             CASE WHEN EventId = 81 THEN 0 WHEN EventId =82 THEN 1 END AS Detector_State_Change
         FROM step4
     ),
     step2a as (
         SELECT *,
-            CAST(SUM(Cycle_Number_Mask) OVER (PARTITION BY DeviceId, Detector, Phase ORDER BY TimeStamp, EventId) AS UINTEGER) AS Cycle_Number,
-            COUNT(Detector_State_Change) OVER (PARTITION BY DeviceId, Detector, Phase ORDER BY TimeStamp, EventId) AS Detector_Group
+            CAST(COUNT(*) FILTER (WHERE EventId = 1) OVER device_order AS UINTEGER) AS Cycle_Number,
+            -- The detector's state is its latest on or off event. Events tied on TimeStamp and EventId are the same state.
+            CAST(LAST_VALUE(Detector_State_Change IGNORE NULLS) OVER device_order AS BOOL) AS Detector_State,
+            -- Same sort as above, so saved here rather than sorted again for the time between events below
+            LEAD(TimeStamp) OVER device_order AS NextTimeStamp
             FROM step1a
+            WINDOW device_order AS (PARTITION BY DeviceId, Detector, Phase ORDER BY TimeStamp, EventId)
     )
     SELECT TimeStamp,
         DeviceId, 
@@ -274,7 +271,8 @@ step5 AS (
         Phase,
         Cycle_Number,
         CAST(MAX(Signal_State_Mask) OVER (PARTITION BY DeviceId, Detector, Phase, Cycle_Number ORDER BY TimeStamp, EventId) AS UTINYINT) AS Signal_State,
-        CAST(MAX(Detector_State_Change) OVER (PARTITION BY DeviceId, Detector, Phase, Detector_Group ORDER BY TimeStamp, EventId) AS BOOL) AS Detector_State--, Detector_Group, Detector_State_Mask
+        Detector_State,
+        NextTimeStamp
     FROM step2a  
 )
 SELECT * FROM step5 --step5
@@ -330,11 +328,6 @@ CREATE TABLE sf_final AS
 WITH step6 AS (
     -- time_diff
     -- Calc time diff between events
-    WITH device_lag AS (
-        SELECT *,
-        LEAD(TimeStamp) OVER (PARTITION BY DeviceId, Detector, Phase ORDER BY TimeStamp, EventId) AS NextTimeStamp
-        FROM sf_intermediate
-    )
     SELECT TimeStamp, 
         DeviceId, 
         EventId, 
@@ -344,7 +337,7 @@ WITH step6 AS (
         Signal_State, 
         Detector_State, 
         CAST(DATEDIFF('MILLISECOND', TimeStamp, NextTimeStamp) AS INT) AS TimeDiff
-    FROM device_lag
+    FROM sf_intermediate
 ),
 valid_cycles AS (
     -- Generate VALID CYCLES to remove cycles with missing data for current run, and save incomplete cycle data for next run
