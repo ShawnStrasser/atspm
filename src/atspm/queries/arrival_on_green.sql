@@ -1,114 +1,43 @@
 --Arrival on Green
 --Written in SQL for DuckDB. This is a jinja2 template, with variables inside curly braces.
+--
+--Each detector on event on an advance detector is projected to the vehicle's arrival at the stop bar. The
+--arrival belongs to the bin it lands in, and is on green if the phase is green at that moment: from green
+--begin (1) until yellow begin (8) or red clearance begin (10). A bin with no arrivals on green has no row.
 
 
-WITH view1 AS (
-    -- detector_with_phase_ON_ONLY
-    -- This is for arrival on green, or yellow/red actuation, where we only need detector ON events
-    -- It shift timestamps back to account for latency
-    -- And joins Phase Number to each Detector Event
-    -- Rename parameter as Detector to avoid cofusion
-    SELECT d.TimeStamp - INTERVAL ({{latency_offset_seconds}} * 1000) MILLISECOND as TimeStamp,
-        d.DeviceId, 
-        d.EventId, 
-        c.Phase::int16 AS Phase,
-    FROM {{from_table}} AS d
-    JOIN detector_config AS c ON 
-        d.DeviceId = c.DeviceId 
-        AND d.Parameter = c.Parameter
-    WHERE EventId = 82 
-        AND c.Function = 'Advance'
+WITH {% include 'arrival_phase_events.sql' %},
+
+{% include 'arrival_projection.sql' %},
+
+with_signal_state AS (
+    SELECT *,
+        LAST_VALUE(CASE WHEN EventId < 82 THEN EventId END IGNORE NULLS) OVER (
+            PARTITION BY DeviceId, Phase ORDER BY TimeStamp, EventId
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS Signal_State
+    FROM (
+        SELECT TimeStamp, DeviceId, EventId, Phase FROM phase_events
+        UNION ALL
+        SELECT TimeStamp, DeviceId, 82::INT16 AS EventId, Phase FROM arrivals
+    )
 ),
 
-view2 AS (
-    -- phase_with_detector_ByApproach
-    -- Combined phase and detector data without duplicating phase data (no need since detector/phases are combined already)
-    WITH 
-    phase AS (
-        SELECT r.TimeStamp as TimeStamp, 
-            r.DeviceId as DeviceId,
-            r.EventId as EventId,
-            r.Parameter::int16 AS Phase 
-        FROM {{from_table}} r
-        -- Join is for efficiency, to filter out phases that are not in the detector_config table
-        JOIN (SELECT
-                DISTINCT DeviceId, Phase
-                FROM detector_config
-                WHERE Function = 'Advance'
-                ) c 
-        ON r.DeviceId = c.DeviceId 
-           AND c.Phase = r.Parameter
-        WHERE r.EventId IN (1,8,10)
-    )
-    SELECT * FROM phase
-    UNION ALL
-    SELECT * FROM view1
-),
-
-view3 AS (
-    -- with_cycle
-    -- Group by cycle and label events as occuring during green, yellow, or red
-    WITH step1 as (
-        SELECT *,
-            CASE WHEN EventId = 1 THEN 1 ELSE 0 END AS Cycle_Number_Mask,
-            CASE WHEN EventId < 81 THEN EventId ELSE 0 END AS Signal_State_Mask,
-            CASE WHEN EventId = 81 THEN 0 WHEN EventId =82 THEN 1 END AS Detector_State_Change
-        FROM view2
-    ),
-    step2 as (
-        SELECT *,
-            CAST(SUM(Cycle_Number_Mask) OVER (PARTITION BY DeviceId, Phase ORDER BY TimeStamp, EventId) AS UINTEGER) AS Cycle_Number,
-            COUNT(Detector_State_Change) OVER (PARTITION BY DeviceId, Phase ORDER BY TimeStamp, EventId) AS Detector_Group
-            FROM step1
-    )
-    SELECT TimeStamp,
-        DeviceId, 
-        EventId, 
+binned AS (
+    SELECT time_bucket(INTERVAL '{{bin_size}} minutes', TimeStamp) AS Bin,
+        DeviceId,
         Phase,
-        Cycle_Number,
-        CAST(MAX(Signal_State_Mask) OVER (PARTITION BY DeviceId, Phase, Cycle_Number ORDER BY TimeStamp, EventId) AS UTINYINT) AS Signal_State,
-        CAST(MAX(Detector_State_Change) OVER (PARTITION BY DeviceId, Phase, Detector_Group ORDER BY TimeStamp, EventId) AS BOOL) AS Detector_State
-    FROM step2
-),
-
-view4 AS (
-    -- arrival_on_green
-    -- Transforms actuations into arrivals on green after they've been asssigned a signal state
-    WITH green AS (
-        SELECT
-            time_bucket(interval '{{bin_size}} minutes', TimeStamp) as Rounded_TimeStamp,
-            DeviceId,
-            Phase,
-            COUNT(*)::int16 as Green_Actuations
-        FROM view3
-        WHERE
-            EventId = 82
-            and Signal_State = 1
-        GROUP BY Rounded_TimeStamp, DeviceId, Phase
-    ),
-    not_green AS(
-        SELECT
-            time_bucket(interval '{{bin_size}} minutes', TimeStamp) as Rounded_TimeStamp,
-            DeviceId,
-            Phase,
-            COUNT(*)::int16 as Total_Actuations
-        FROM view3
-        WHERE
-            EventId = 82
-        GROUP BY Rounded_TimeStamp, DeviceId, Phase
-    )
-    SELECT
-        g.Rounded_TimeStamp as TimeStamp,
-        g.DeviceId,
-        g.Phase,
-        ng.Total_Actuations,
-        Green_Actuations::float / Total_Actuations as Percent_AOG
-    FROM green as g
-    JOIN not_green ng
-    ON 
-        g.Rounded_TimeStamp=ng.Rounded_TimeSTamp
-        and g.DeviceId=ng.DeviceId
-        and g.Phase=ng.Phase
+        Signal_State = 1 AS On_Green
+    FROM with_signal_state
+    WHERE EventId = 82
+      AND TimeStamp < (SELECT TimeStamp FROM results_end)
 )
 
-SELECT * FROM view4
+SELECT Bin AS TimeStamp,
+    DeviceId,
+    Phase,
+    COUNT(*)::INT16 AS Total_Actuations,
+    (COUNT(*) FILTER (WHERE On_Green))::FLOAT / COUNT(*) AS Percent_AOG
+FROM binned
+GROUP BY Bin, DeviceId, Phase
+HAVING COUNT(*) FILTER (WHERE On_Green) > 0

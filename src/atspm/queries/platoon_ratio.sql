@@ -21,51 +21,39 @@
 --Requires the arrival_on_green aggregation to have run first (declared in AGGREGATION_DEPENDENCIES).
 
 
-WITH phase_events AS (
-    -- Green begin (1) and yellow begin (8) events for phases that have an advance detector,
-    -- so the phase set matches arrival_on_green exactly.
-    SELECT r.TimeStamp,
-        r.DeviceId,
-        r.EventId,
-        r.Parameter::int16 AS Phase
-    FROM {{from_table}} r
-    JOIN (SELECT DISTINCT DeviceId, Phase
-          FROM detector_config
-          WHERE Function = 'Advance') c
-        ON r.DeviceId = c.DeviceId
-       AND c.Phase = r.Parameter
-    WHERE r.EventId IN (1, 8)
-),
+WITH {% include 'arrival_phase_events.sql' %},
 
 sequenced AS (
     SELECT *,
         LAG(EventId)     OVER (PARTITION BY DeviceId, Phase ORDER BY TimeStamp, EventId) AS PrevEventId,
-        LEAD(EventId)    OVER (PARTITION BY DeviceId, Phase ORDER BY TimeStamp, EventId) AS NextEventId,
         LEAD(TimeStamp)  OVER (PARTITION BY DeviceId, Phase ORDER BY TimeStamp, EventId) AS NextTimeStamp
     FROM phase_events
 ),
 
 green_intervals AS (
-    -- Closed greens: green begin followed by the next phase event. If the data ends while the
-    -- phase is still green (no following event), the green is assumed to run to the end of its
-    -- bin. This keeps per-bin green time exact across incremental runs whose chunks align with
-    -- bins, instead of dropping the straddling green from the earlier chunk.
+    -- Green begin to the next phase event, the same green as arrival_on_green. A green still open when the data
+    -- ends runs to where results stop, and an incremental run takes it from there in the next run.
     SELECT DeviceId, Phase,
         TimeStamp AS GreenStart,
-        COALESCE(NextTimeStamp,
-                 time_bucket(INTERVAL '{{bin_size}} minutes', TimeStamp) + INTERVAL '{{bin_size}} minutes') AS GreenEnd
+        COALESCE(NextTimeStamp, (SELECT TimeStamp FROM results_end)) AS GreenEnd
     FROM sequenced
     WHERE EventId = 1
 
     UNION ALL
 
-    -- Opening greens: a yellow begin with no preceding green begin in the data (first event of a
-    -- chunk) means the phase was already green; assume it was green from the start of its bin.
+    -- Opening greens: a yellow begin with no preceding green begin in the data (first event of the
+    -- data) means the phase was already green; assume it was green from the start of its bin.
     SELECT DeviceId, Phase,
         time_bucket(INTERVAL '{{bin_size}} minutes', TimeStamp) AS GreenStart,
         TimeStamp AS GreenEnd
     FROM sequenced
-    WHERE EventId = 8 AND (PrevEventId IS NULL OR PrevEventId = 8)
+    WHERE EventId = 8 AND (PrevEventId IS NULL OR PrevEventId IN (8, 10))
+),
+
+greens_to_results_end AS (
+    SELECT DeviceId, Phase, GreenStart,
+        LEAST(GreenEnd, (SELECT TimeStamp FROM results_end)) AS GreenEnd
+    FROM green_intervals
 ),
 
 green_by_bin AS (
@@ -80,7 +68,7 @@ green_by_bin AS (
                 LEAST(g.GreenEnd, b.bin + INTERVAL '{{bin_size}} minutes')
             )::DOUBLE / 1000.0
         ) AS Green_Seconds
-    FROM green_intervals g,
+    FROM greens_to_results_end g,
         LATERAL (
             SELECT UNNEST(generate_series(
                 time_bucket(INTERVAL '{{bin_size}} minutes', g.GreenStart),

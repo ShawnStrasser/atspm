@@ -82,7 +82,8 @@ from atspm import SignalDataProcessor, sample_data
 params = {
     # --- Global Settings ---
     'raw_data': sample_data.data,           # Path (CSV/Parquet/JSON) or Pandas DataFrame
-    'detector_config': sample_data.config,  # Path (CSV/Parquet/JSON) or Pandas DataFrame
+    'detector_config': sample_data.config,  # Path (CSV/Parquet/JSON) or Pandas DataFrame. Columns: DeviceId, Phase, Parameter,
+                                            # Function, and optionally DistanceFromStopBar and MPH (see Arrival on Green)
     'bin_size': 15,                         # Aggregation interval in minutes
     'output_dir': 'test_folder',            # Directory to save results
     'output_format': 'csv',                 # 'csv', 'parquet', or 'json'
@@ -123,7 +124,7 @@ params = {
         {
             'name': 'arrival_on_green', 
             'params': {
-                'latency_offset_seconds': 0 # Adjust for detector-to-controller latency
+                'latency_offset_seconds': 0 # Taken off each arrival time, for detector-to-controller latency
             }
         },
         {
@@ -216,7 +217,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 
 - **Has Data** (`has_data`): Marks intervals where each controller produced sufficient data (proxy for controller online/communications health). Also used to filter incomplete periods for other measures.
 - **Actuations** (`actuations`): Detector actuations per detector and interval (with optional zero-filling of missing intervals).
-- **Arrival on Green** (`arrival_on_green`): Percentage of detector actuations that occur during green by phase.
+- **Arrival on Green** (`arrival_on_green`): Percentage of vehicles reaching the stop bar during green by phase, with each advance detector actuation projected to the stop bar. See [Arrival on Green](#arrival-on-green).
 - **Platoon Ratio** (`platoon_ratio`): HCM platoon ratio by phase and interval, `Rp = Percent_AOG / (g/C)`, with the green ratio estimated from phase green time within each bin and the HCM arrival type (1–6). Unlike arrival on green, it is comparable across phases with different splits. Requires `arrival_on_green`.
 - **Yellow and Red Actuations** (`yellow_red`): Distribution of detector actuations relative to the start of red, including red offset and signal state.
 - **Split Failures** (`split_failures`): Green and red occupancies by phase (and optionally detector/approach) and a count of cycles that meet split-failure thresholds; can be returned either per cycle or aggregated into time bins.
@@ -228,6 +229,29 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
 - **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
 - **Detector Health** (`detector_health`): Which vehicle detectors and ped buttons are failing, when, and on what evidence, from `atspm-detector`. Needs `pip install atspm[detector-health]`. See [Detector health](#detector-health).
+
+### Arrival on Green
+
+`arrival_on_green` and `platoon_ratio` follow the UDOT method (ATSPM Methods and Assumptions Manual 4.3, Purdue Coordination Diagram, Step 1). A detector sits upstream of the stop bar, so each detector on event (`EventId` 82) on an advance detector is moved forward to when the vehicle reaches the stop bar:
+
+```
+arrival = detector on + distance / (speed * 1.467) - latency
+```
+
+The arrival time is used for everything after that. An arrival is on green if the phase is green at that moment, and it counts in the bin it lands in, so `Total_Actuations` for a bin differs slightly from the `actuations` table, which keeps the detector's own times.
+
+Distance and speed come from two optional `detector_config` columns, in UDOT's names:
+
+| Column | Meaning | If missing |
+| --- | --- | --- |
+| `DistanceFromStopBar` | Feet from the leading edge of the detector to the stop bar | 220 for phases 2 and 6, 120 for all others |
+| `MPH` | Speed in miles per hour. UDOT uses the speed limit | 35 |
+
+Each value is judged row by row: a row may have one and not the other, and whatever is blank, not a number, a negative distance or a speed of zero takes its default. A config with only `DeviceId`, `Phase`, `Parameter` and `Function` keeps working and takes the defaults for every detector. Column names ignore case, spaces and underscores. Latency is the `latency_offset_seconds` parameter, one value for the whole run, where UDOT has one per detector. With `to_sql=True` your own `detector_config` table needs both columns, which may be NULL.
+
+**Incremental runs** give the same rows as one big run wherever the runs are cut, for both measures. A bin is written once, whole, by the first run whose data reaches the end of it, and that is a run whose last event, across all signals, is within a second of the end of the bin. A run that stops short of that leaves the bin it stopped in for the next run. Vehicles that arrive after results stop, the phase events from there on and the phases still green are kept in `unmatched_events` (synthetic `EventId` 938 to 942), so `unmatched_event_settings` with `df_or_path` is all that is needed, with or without `timeline`. With runs cut on the bin and enough signals to fill the last second, every bin is written by the run that reaches it. With a few quiet signals the last event can be short of the end of the bin, and that bin is written one run later, with the same values. A run with no unmatched settings has nothing after it, so it writes all it has, up to its last event. Arrivals past that are not counted.
+
+Two limits: a run that really stops inside the last second of a bin is taken as having reached the end of it, and a `latency_offset_seconds` larger than the travel time can move an arrival back into a bin already written.
 
 ### Detector health
 
@@ -381,14 +405,14 @@ The following tables are produced by the aggregation process, depending on the c
 *   `TimeStamp` (DATETIME): Bin start time.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `Phase` (INT16): Phase number.
-*   `Total_Actuations` (BIGINT): Total actuations on the advance detector.
-*   `Percent_AOG` (FLOAT): Fraction of actuations arriving on green (0.0 - 1.0).
+*   `Total_Actuations` (INT16): Vehicles from the advance detectors arriving at the stop bar in this bin.
+*   `Percent_AOG` (FLOAT): Fraction of those arriving on green (0.0 - 1.0). A bin with none on green has no row.
 
 #### platoon_ratio
 *   `TimeStamp` (DATETIME): Bin start time.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `Phase` (INT16): Phase number.
-*   `Total_Actuations` (INT16): Total actuations on the advance detector (from `arrival_on_green`).
+*   `Total_Actuations` (INT16): Vehicles from the advance detectors arriving at the stop bar in this bin (from `arrival_on_green`).
 *   `Green_Actuations` (INT16): Of those, the ones that arrived during green.
 *   `Percent_AOG` (FLOAT): Fraction of actuations arriving on green (from `arrival_on_green`), equal to `Green_Actuations / Total_Actuations`.
 *   `Green_Seconds` (FLOAT): Seconds the phase displayed green within the bin. Green intervals that straddle a bin boundary are split between bins, so this column sums exactly across consecutive bins.
@@ -577,7 +601,7 @@ Only with `'active'` in `outputs`, and off by default until reviewed. The faults
 *   `EventId` (INT16): Event ID.
 *   `Parameter` (INT16): Parameter value.
 
-Rows with `EventId` 931 to 937 are state carried between runs, not controller events. `EventId` 937 holds each ped input's last press, one row per input, with the input number in `Parameter`.
+Rows with `EventId` 931 to 942 are state carried between runs, not controller events. `EventId` 937 holds each ped input's last press, one row per input, with the input number in `Parameter`. `EventId` 938 to 942 are what `arrival_on_green` and `platoon_ratio` have not written yet: arrivals (938) and green, yellow and red clearance begins (939, 940, 941), with the phase in `Parameter`, and bins that passed `has_data` (942).
 
 ## Release Notes
 
@@ -585,7 +609,6 @@ See [CHANGELOG.md](docs/CHANGELOG.md) for a full history of changes.
 
 ## Future Plans
 
-- Implement use of detector distance to stopbar for Arrival on Green calculations.
 - Develop comprehensive documentation for each performance measure.
 
 ## Contributing
