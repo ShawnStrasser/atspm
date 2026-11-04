@@ -515,11 +515,11 @@ def test_real_data_in_three_hour_windows_equals_one_big_run_and_a_run_with_no_fi
 
 
 def test_flag_off_gives_the_stored_values_of_udots_method():
-    """What the flag changes is all that changes: with it off, the sample still gives the stored expected values."""
+    """What the flag changes is all that changes: with it off, the sample gives the values from before the flag existed."""
     has_data = {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}}
     events = duckdb.query("SELECT * FROM 'tests/hires_test_data.parquet'").df()
     detectors = duckdb.query("SELECT * FROM 'tests/configs_test_data.parquet'").df()
     out = process(events, detectors, [has_data, AOG_OFF, PLATOON], remove_incomplete=True)
     for table in ('arrival_on_green', 'platoon_ratio'):
-        stored = pd.read_parquet(f'tests/precalculated/{table}.parquet')
+        stored = pd.read_parquet(f'tests/precalculated/{table}_no_spillback.parquet')
         same_rows(stored, out[table])

@@ -260,6 +260,20 @@ def test_remove_incomplete_keeps_a_bin_written_in_a_later_run():
     same_rows(big, cut)
 
 
+def test_to_sql_renders_a_query_that_runs():
+    with SignalDataProcessor(to_sql=True, bin_size=15, verbose=0, aggregations=[YR]) as p:
+        p.aggregate()
+        query = p.sql_queries['yellow_red']
+    assert 'unmatched_previous' not in query
+    connection = duckdb.connect()
+    events = frame(*cycle(0), at(40, 82, DETECTOR))
+    connection.register('events_frame', events)
+    connection.execute('CREATE TABLE raw_data AS SELECT * FROM events_frame')
+    connection.execute("CREATE TABLE detector_config AS SELECT 'A' AS DeviceId, 2::INT16 AS Phase, 3::INT16 AS Parameter, 'Yellow_Red' AS Function")
+    connection.execute(query)
+    assert connection.execute('SELECT Red_Offset, Count FROM yellow_red').fetchall() == [(6.0, 1.0)]
+
+
 # ---- real events
 
 REAL_EVENTS = 'tests/yellow_red_events_test_data.parquet'  # Two signals, 6:00 to 15:00 on Oct 27 2026
