@@ -21,8 +21,8 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
         # Add natural join with has_data table
         # Note: newline before closing paren ensures SQL comments in inner query don't break the wrapper
         complete_bins = 'has_data'
-        # These can write a bin that an earlier run saw in has_data, see arrival_on_green_carry.sql
-        if aggregation_name in ['arrival_on_green', 'platoon_ratio'] and kwargs.get('unmatched', False):
+        # These can write a bin that an earlier run saw in has_data, see complete_bins_carry.sql
+        if aggregation_name in ['arrival_on_green', 'platoon_ratio', 'unique_ped', 'full_ped'] and kwargs.get('unmatched', False):
             complete_bins = ("(SELECT TimeStamp, DeviceId FROM has_data "
                              "UNION SELECT TimeStamp, DeviceId FROM unmatched_previous WHERE EventId = 942)")
         query = f"SELECT * FROM ({query}\n) main_query NATURAL JOIN {complete_bins} "

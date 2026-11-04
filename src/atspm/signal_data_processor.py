@@ -4,7 +4,7 @@ from .data_loader import load_data
 from .data_aggregator import aggregate_data, render_query
 from .data_saver import save_data
 from .detector_health import detector_health_params, run_detector_health
-from .utils import round_down_15
+from .utils import STATE_EVENT_IDS
 from .utils import v_print
 import os
 
@@ -149,7 +149,7 @@ class SignalDataProcessor:
         The raw data to be processed, either as a file path or a DataFrame.
     detector_config : str or DataFrame
         The detector configuration, either as a file path or a DataFrame. Columns: DeviceId, Phase, Parameter, Function,
-        and optionally DistanceFromStopBar (feet) and MPH, which arrival_on_green uses to project arrivals to the stop bar.
+        and optionally DistanceFromStopBar (feet), MPH and LatencyCorrection (seconds), which arrival_on_green uses to project arrivals to the stop bar.
     bin_size : int
         The size of the time bins for aggregation, in minutes.
     output_dir : str
@@ -162,6 +162,10 @@ class SignalDataProcessor:
         Prefix to be added to all output file names.
     remove_incomplete : bool
         If True, removes periods with incomplete data based on the 'has_data' aggregation.
+    drop_fall_back_hour : bool
+        If True (the default), events in 1:00-2:00 am on the first Sunday of November are dropped when raw_data is
+        loaded, because the two passes through that hour when clocks fall back cannot be separated. Assumes US
+        daylight saving rules and raw_data in local time. Set False if your data is not.
     unmatched_event_settings : dict, optional
         Settings for handling unmatched events in incremental processing. Includes:
         - df_or_path: str, path to save/load unmatched events
@@ -230,6 +234,7 @@ class SignalDataProcessor:
         self.incremental_run = False
         self.event_gap_schedule = None  # Set from the timeline params when timeline runs
         self.remove_incomplete = False
+        self.drop_fall_back_hour = True # Drop events in the hour US clocks repeat when they fall back
         self.to_sql = False
         self.verbose = 1 # 0: only print errors, 1: print performance, 2: print debug statements
         self.controller_type = '' # Controller type: '' (default), 'maxtime' or 'siemens' (case-insensitive)
@@ -364,8 +369,7 @@ class SignalDataProcessor:
         self.data_loaded = False
 
         # Use connection to get current timestamp
-        # This is a placeholder for when to_sql is True. After the class is instantiated, 
-        # timestamps need to be set by the user for the full_ped query to work.
+        # This is a placeholder until data is loaded, and stays when to_sql is True.
         self.max_timestamp = self.conn.execute("SELECT CURRENT_TIMESTAMP").fetchall()[0][0]
         self.min_timestamp = self.max_timestamp
 
@@ -391,7 +395,8 @@ class SignalDataProcessor:
                     self.unmatched_event_settings,
                     self.unmatched_found,
                     self.known_detectors_settings,
-                    self.known_detectors_found)
+                    self.known_detectors_found,
+                    self.drop_fall_back_hour)
             # delete self.raw_data and self.detector_config to free up memory
             self.data_loaded = True
             if self.raw_data is not None:
@@ -412,7 +417,7 @@ class SignalDataProcessor:
             v_print('*'*50, self.verbose)
             v_print('WARNING: problem loading data!', self.verbose)
             v_print('Make sure raw_data column names are: TimeStamp, DeviceId, EventId, Parameter', self.verbose)
-            v_print('Make sure detector_config column names are: DeviceId, Phase, Parameter, Function (and optionally DistanceFromStopBar, MPH)', self.verbose)
+            v_print('Make sure detector_config column names are: DeviceId, Phase, Parameter, Function (and optionally DistanceFromStopBar, MPH, LatencyCorrection)', self.verbose)
             v_print('*'*50, self.verbose)
             raise e
         
@@ -493,13 +498,13 @@ class SignalDataProcessor:
         if has_previous:
             # Rows whose start came from an earlier run inherit that run's verdict, whether the row was
             # completed in this run or is still unmatched
-            self.conn.execute("""
+            self.conn.execute(f"""
                 UPDATE timeline t SET IsValid = FALSE
                 WHERE t.IsValid = TRUE
                   AND EXISTS (
                     SELECT 1 FROM unmatched_previous u
                     WHERE u.DeviceId = t.DeviceId AND u.TimeStamp = t.StartTime AND u.IsValid = FALSE
-                      AND u.EventId NOT BETWEEN 931 AND 937 -- state markers, not interval starts
+                      AND u.EventId NOT {STATE_EVENT_IDS} -- state markers, not interval starts
                   );
                 UPDATE unmatched_events e SET IsValid = FALSE
                 WHERE e.IsValid = TRUE
@@ -542,7 +547,7 @@ class SignalDataProcessor:
             CREATE OR REPLACE TEMP TABLE event_gaps AS {event_gaps};
             UPDATE unmatched_events u SET IsValid = FALSE
             WHERE u.IsValid = TRUE
-              AND u.EventId NOT BETWEEN 931 AND 937 -- state markers, not interval starts
+              AND u.EventId NOT {STATE_EVENT_IDS} -- state markers, not interval starts
               AND EXISTS (
                 SELECT 1 FROM event_gaps g
                 WHERE g.DeviceID = u.DeviceId AND g.StartTime >= u.TimeStamp
@@ -569,50 +574,85 @@ class SignalDataProcessor:
     def _save_arrival_carry(self):
         """Saves what arrival_on_green and platoon_ratio have not written yet to unmatched_events.
 
-        See arrival_on_green_carry.sql. A run without timeline has no unmatched_events yet, so the table is
-        created here.
+        See arrival_on_green_carry.sql.
         """
-        params = next(agg for agg in self.aggregations if agg['name'] == 'arrival_on_green')['params']
+        params = next(agg for agg in self.aggregations if agg['name'] == 'arrival_on_green').get('params', {})
         carry = render_query(
             'arrival_on_green_carry',
             **params,
             bin_size=self.bin_size,
             from_table='raw_data',
-            remove_incomplete=self.remove_incomplete,
-            carry_arrivals=True,
+            carry_bins=True,
             unmatched=self._table_exists('unmatched_previous'),
         )
+        self._add_to_unmatched_events(carry)
+
+    def _save_complete_bins(self):
+        """Saves the bins has_data passed from where results stopped onward, for a later run's remove_incomplete.
+
+        See complete_bins_carry.sql.
+        """
+        self._add_to_unmatched_events(render_query(
+            'complete_bins_carry',
+            bin_size=self.bin_size,
+            carry_bins=True,
+            unmatched=self._table_exists('unmatched_previous'),
+        ))
+
+    def _ped_carried(self, params):
+        """Whether unique_ped and full_ped read the bin counts carried from an earlier run.
+
+        An empty run has no dependable DeviceId type and writes nothing, so it leaves them out and
+        _save_ped_carry keeps them for the next run.
+        """
+        if self.to_sql or not params.get('unmatched', False):
+            return False
+        carried = self.conn.execute("SELECT COUNT(*) FROM unmatched_previous WHERE EventId BETWEEN 943 AND 947").fetchall()[0][0]
+        return carried > 0 and self.conn.execute("SELECT COUNT(*) FROM raw_data").fetchall()[0][0] > 0
+
+    def _save_ped_carry(self, params):
+        """Saves what unique_ped and full_ped need from this run to unmatched_events (synthetic EventId 943 to 947).
+
+        See ped_state.sql. Both read one carry, made with the params of the last of them in the list.
+        """
+        if self.conn.execute("SELECT COUNT(*) FROM raw_data").fetchall()[0][0] > 0:
+            self._add_to_unmatched_events(render_query('ped_carry', **params))
+        elif self._table_exists('unmatched_previous'):
+            self._add_to_unmatched_events(
+                "SELECT TimeStamp, DeviceId, EventId, Parameter, IsValid FROM unmatched_previous WHERE EventId BETWEEN 943 AND 947"
+            )
+
+    def _add_to_unmatched_events(self, rows):
+        """Adds rows to unmatched_events. A run without timeline has no such table yet, so it is created here if a
+        main unmatched file was asked for."""
         if self._table_exists('unmatched_events'):
-            self.conn.execute(f"INSERT INTO unmatched_events {carry}")
-        else:
-            self.conn.execute(f"CREATE TABLE unmatched_events AS {carry}")
+            self.conn.execute(f"INSERT INTO unmatched_events {rows}")
+        elif 'df_or_path' in (self.unmatched_event_settings or {}):
+            self.conn.execute(f"CREATE TABLE unmatched_events AS {rows}")
 
     def _save_last_ped_presses(self):
         """Saves each input's last press to unmatched_events (synthetic EventId 937), one row per input.
 
         The next run's unique_ped and full_ped count their first press against it. An input with no press in
         this run keeps its previous row until max_days_old drops it. A run without timeline has no
-        unmatched_events yet, so the table is created here if a main unmatched file was asked for.
+        unmatched_events yet, so the table is created if a main unmatched file was asked for.
         """
         previous_presses = (
             "UNION ALL SELECT TimeStamp, DeviceId, Parameter FROM unmatched_previous WHERE EventId = 937"
             if self._table_exists('unmatched_previous') else ""
         )
-        last_presses = f"""
+        self._add_to_unmatched_events(f"""
             SELECT MAX(TimeStamp) AS TimeStamp, DeviceId, 937::INT16 AS EventId, Parameter, TRUE AS IsValid
             FROM (SELECT TimeStamp, DeviceId, Parameter FROM raw_data WHERE EventId = 90 {previous_presses})
             GROUP BY DeviceId, Parameter
-        """
-        if self._table_exists('unmatched_events'):
-            self.conn.execute(f"INSERT INTO unmatched_events {last_presses}")
-        elif 'df_or_path' in (self.unmatched_event_settings or {}):
-            self.conn.execute(f"CREATE TABLE unmatched_events AS {last_presses}")
+        """)
 
     def aggregate(self):
         """Runs all aggregations."""
         # Instantiate a dictionary to store runtimes
         self.runtimes = {}
         self.sql_queries = {} # for storing sql string when to_sql is True
+        ped_params = None # the last unique_ped or full_ped params, for saving their carry
 
         # Create unmatched_events table if unmatched_events is not None
         # This table will be used to insert unmatched events, to be saved and reloaded in the next run
@@ -694,19 +734,11 @@ class SignalDataProcessor:
                     params['seconds_between_actuations'] = DEFAULT_SECONDS_BETWEEN_ACTUATIONS
 
                 #######################
-                ### Full Pedestrian ###
-                # Add min_timestamp and max_timestamp to params if detector_faults or full_ped
-                if aggregation['name'] == 'full_ped':
-                    # Round min_timestamp down to nearest bin_size
-                    params['min_timestamp'] = round_down_15(self.min_timestamp)
-                    params['max_timestamp'] = round_down_15(self.max_timestamp)
-
-                #######################
                 ### Unmatched Events ##
                 # If unmatched_event_settings is supplied, then change the from_table for timeline, split_failures, arrival_on_green, and yellow_red
                 # These are views that have the relateded unmatched events unioned to them
                 # coordination_agg and phase_wait also use unmatched events to store previous coordination state
-                # unique_ped and full_ped use them to store each input's last press
+                # unique_ped and full_ped use them to store each input's last press and what they have not written yet
                 # arrival_on_green and platoon_ratio use them to store what they have not written yet
                 if self.incremental_run and aggregation['name'] in ['timeline', 'yellow_red', 'split_failures', 'coordination_agg', 'phase_wait', *ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS]:
                     params['incremental_run'] = True #lets the aggregation know to save unmatched events for next run
@@ -730,8 +762,12 @@ class SignalDataProcessor:
                         params['unmatched'] = False
                 
                 # Without a main unmatched file nothing can wait for a later run
-                if aggregation['name'] in ARRIVAL_CARRY_AGGREGATIONS:
-                    params['carry_arrivals'] = 'df_or_path' in (self.unmatched_event_settings or {})
+                if aggregation['name'] in (*ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS):
+                    params['carry_bins'] = 'df_or_path' in (self.unmatched_event_settings or {})
+
+                if aggregation['name'] in PED_CARRY_AGGREGATIONS:
+                    params['ped_carried'] = self._ped_carried(params)
+                    ped_params = params
 
                 # Add known_detectors_found flag for actuations aggregation
                 if aggregation['name'] == 'actuations':
@@ -767,11 +803,11 @@ class SignalDataProcessor:
                     # window of 5 seconds either side. An unmatched event starting before a window ends will
                     # overlap it once matched, so mark it invalid now and the next incremental run inherits
                     # that through unmatched_previous.IsValid
-                    self.conn.execute("""
+                    self.conn.execute(f"""
                         UPDATE unmatched_events u
                         SET IsValid = FALSE
                         WHERE u.IsValid = TRUE
-                          AND u.EventId NOT BETWEEN 931 AND 937 -- state markers, not interval starts
+                          AND u.EventId NOT {STATE_EVENT_IDS} -- state markers, not interval starts
                           AND EXISTS (
                             SELECT 1 FROM raw_data r
                             WHERE r.EventId = 181
@@ -783,11 +819,11 @@ class SignalDataProcessor:
                     # Same for a Siemens hourly log restart (1000): its window ends at the restart, so an
                     # event still open afterwards overlaps it if it started at or before the restart
                     if self.controller_type == 'siemens':
-                        self.conn.execute("""
+                        self.conn.execute(f"""
                             UPDATE unmatched_events u
                             SET IsValid = FALSE
                             WHERE u.IsValid = TRUE
-                              AND u.EventId NOT BETWEEN 931 AND 937
+                              AND u.EventId NOT {STATE_EVENT_IDS}
                               AND EXISTS (
                                 SELECT 1 FROM raw_data r
                                 WHERE r.EventId = 1000
@@ -806,8 +842,12 @@ class SignalDataProcessor:
         # After the loop, because timeline creates unmatched_events wherever it falls in the list
         if 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql and any(agg['name'] == 'arrival_on_green' for agg in self.aggregations):
             self._save_arrival_carry()
-        if self.incremental_run and not self.to_sql and any(agg['name'] in PED_CARRY_AGGREGATIONS for agg in self.aggregations):
+        if self.incremental_run and not self.to_sql and ped_params is not None:
             self._save_last_ped_presses()
+            self._save_ped_carry(ped_params)
+        if self.remove_incomplete and 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql \
+                and any(agg['name'] in (*ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS) for agg in self.aggregations):
+            self._save_complete_bins()
 
         # Print out runtimes
         v_print(f"\n\nTotal aggregation runtime: {sum(self.runtimes.values()):.2f} seconds.", self.verbose)

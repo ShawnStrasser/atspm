@@ -3,7 +3,7 @@
 --
 --Each detector on event on an advance detector is projected to the vehicle's arrival at the stop bar. The
 --arrival belongs to the bin it lands in, and is on green if the phase is green at that moment: from green
---begin (1) until yellow begin (8) or red clearance begin (10). A bin with no arrivals on green has no row.
+--begin (1) until yellow begin (8) or red clearance begin (10). A bin with vehicles and none on green reads 0.
 
 
 WITH {% include 'arrival_phase_events.sql' %},
@@ -40,4 +40,3 @@ SELECT Bin AS TimeStamp,
     (COUNT(*) FILTER (WHERE On_Green))::FLOAT / COUNT(*) AS Percent_AOG
 FROM binned
 GROUP BY Bin, DeviceId, Phase
-HAVING COUNT(*) FILTER (WHERE On_Green) > 0

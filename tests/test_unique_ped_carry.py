@@ -1,5 +1,6 @@
 """unique_ped and full_ped: the default time lapse, the first press, and each input's last press carried
-between incremental runs (synthetic EventId 937 in unmatched_events)."""
+between incremental runs (synthetic EventId 937 in unmatched_events). A run with an unmatched file writes a bin only
+once it reaches the end of it. The volumes in full_ped are tested in test_full_ped_volumes.py."""
 import numpy as np
 import pandas as pd
 import pytest
@@ -43,23 +44,33 @@ def process(events, aggregations, carry=None, settings=None, **kwargs):
         return {t: p.conn.execute(f"SELECT * FROM {t}").df() for t in tables if t not in ('raw_data', 'raw_data_all', 'unmatched_previous')}
 
 
+def reach_bin_end(events):
+    """The events plus another signal's event in the last second of their last bin, so a run reaches the end of it."""
+    last = events.TimeStamp.max().floor('15min') + pd.Timedelta(minutes=15, milliseconds=-100)
+    device = 999999 if pd.api.types.is_numeric_dtype(events.DeviceId) else 'Z'
+    marker = pd.DataFrame({'TimeStamp': [last], 'DeviceId': device, 'EventId': 82, 'Parameter': 1})
+    return pd.concat([events, marker], ignore_index=True)
+
+
 def incremental(events, cuts, aggregations, **kwargs):
-    """Runs the events in pieces, carrying unmatched_events. Returns the outputs of every run and the last carry."""
+    """Runs the events in pieces, carrying unmatched_events. Returns the outputs of every run and the last carry.
+    The last run reaches the end of its bin, to write everything, as one big run does."""
     edges = [events.TimeStamp.min()] + sorted(cuts) + [events.TimeStamp.max() + pd.Timedelta(seconds=1)]
     carry, outputs = 'first', []
-    for start, end in zip(edges[:-1], edges[1:]):
-        out = process(events[(events.TimeStamp >= start) & (events.TimeStamp < end)], aggregations, carry=carry, **kwargs)
+    for i, (start, end) in enumerate(zip(edges[:-1], edges[1:])):
+        chunk = events[(events.TimeStamp >= start) & (events.TimeStamp < end)]
+        if i == len(edges) - 2:
+            chunk = reach_bin_end(chunk)
+        out = process(chunk, aggregations, carry=carry, **kwargs)
         carry = out['unmatched_events']
         outputs.append(out)
     return outputs, carry
 
 
-def totals(frames, columns):
-    """Counts per bin, adding up a bin that two runs share, without rows that count nothing."""
-    frame = pd.concat(frames)
-    frame = frame.groupby(KEYS, as_index=False)[columns].sum()
-    frame[columns] = frame[columns].astype('int64')
-    frame = frame[frame[columns].sum(axis=1) > 0]
+def rows(frames):
+    """The rows of all runs, with no bin written twice."""
+    frame = pd.concat(frames, ignore_index=True)
+    assert not frame.duplicated(KEYS).any(), 'a bin was written twice'
     return frame.sort_values(KEYS).reset_index(drop=True)
 
 
@@ -83,22 +94,23 @@ def test_real_data_batch_equals_incremental_at_random_cuts(real_events, name, se
     start, end = real_events.TimeStamp.min(), real_events.TimeStamp.max()
     seconds = rng.integers(1, int((end - start).total_seconds()), 40)
     cuts = sorted({start + pd.Timedelta(seconds=int(s), milliseconds=int(rng.integers(0, 10)) * 100) for s in seconds})
+    # None within a second of the end of a bin: such a run counts as having reached it
+    cuts = [c for c in cuts if (c.ceil('15min') - c).total_seconds() > 1]
 
-    batch = process(real_events, [aggregation(name)])[name]
+    batch = rows([process(real_events, [aggregation(name)])[name]])
     outputs, _ = incremental(real_events, cuts, [aggregation(name)])
 
-    expected = totals([batch], COUNTS[name])
-    assert expected['Unique_Actuations'].sum() > 1000
-    pd.testing.assert_frame_equal(totals([o[name] for o in outputs], COUNTS[name]), expected, check_dtype=False)
+    assert batch['Unique_Actuations'].sum() > 1000
+    pd.testing.assert_frame_equal(rows([o[name] for o in outputs]), batch)
 
 
 @pytest.mark.parametrize('name', PED)
 def test_real_data_batch_equals_incremental_at_three_hour_windows(real_events, name):
     start = real_events.TimeStamp.min().floor('3h')
     cuts = list(pd.date_range(start + pd.Timedelta(hours=3), real_events.TimeStamp.max(), freq='3h'))
-    batch = process(real_events, [aggregation(name)])[name]
+    batch = rows([process(real_events, [aggregation(name)])[name]])
     outputs, _ = incremental(real_events, cuts, [aggregation(name)])
-    pd.testing.assert_frame_equal(totals([o[name] for o in outputs], COUNTS[name]), totals([batch], COUNTS[name]), check_dtype=False)
+    pd.testing.assert_frame_equal(rows([o[name] for o in outputs]), batch)
 
 
 def test_real_data_is_not_all_kept(real_events):
@@ -117,7 +129,7 @@ class TestCounting:
         assert unique_total([process(presses(100), [aggregation(name)])[name]]) == 1
 
     def test_first_press_of_first_incremental_run_is_counted(self, name):
-        assert unique_total([process(presses(100), [aggregation(name)], carry='first')[name]]) == 1
+        assert unique_total([process(reach_bin_end(presses(100)), [aggregation(name)], carry='first')[name]]) == 1
 
     def test_default_is_fifteen_seconds(self, name):
         events = presses(0, 10, 40)  # 10 s repeat dropped, 40 s counted
@@ -153,36 +165,44 @@ class TestCounting:
     def test_run_crossing_several_runs_with_empty_run_between(self, name):
         out1 = process(presses(0, 10), [aggregation(name)], carry='first')
         out2 = process(presses(0, 10).iloc[:0], [aggregation(name)], carry=out1['unmatched_events'])
-        out3 = process(presses(20), [aggregation(name)], carry=out2['unmatched_events'])
+        out3 = process(reach_bin_end(presses(20)), [aggregation(name)], carry=out2['unmatched_events'])
         assert unique_total([out1[name], out2[name], out3[name]]) == 1
 
     def test_carry_is_per_input_and_device(self, name):
         first = pd.concat([presses(0), presses(0, parameter=4), presses(0, device='B')])
         second = pd.concat([presses(5), presses(30, parameter=4), presses(5, device='C')])
         out1 = process(first, [aggregation(name)], carry='first')
-        out2 = process(second, [aggregation(name)], carry=out1['unmatched_events'])
-        # A input 2 is a repeat, A input 4 is past the limit, C has no earlier press
-        counted = out2[name].query('Unique_Actuations > 0')
-        assert sorted(zip(counted.DeviceId, counted.Phase)) == [('A', 4), ('C', 2)]
+        out2 = process(reach_bin_end(second), [aggregation(name)], carry=out1['unmatched_events'])
+        # A input 2's second press is a repeat, A input 4's is past the limit, C has no earlier press
+        counted = out2[name].query('Unique_Actuations > 0').sort_values(['DeviceId', 'Phase'])
+        assert list(zip(counted.DeviceId, counted.Phase, counted.Unique_Actuations)) == [('A', 2, 1), ('A', 4, 2), ('B', 2, 1), ('C', 2, 1)]
 
     def test_carried_press_is_not_counted_again(self, name):
-        out1 = process(presses(0), [aggregation(name)], carry='first')
-        out2 = process(presses(500), [aggregation(name)], carry=out1['unmatched_events'])
+        out1 = process(reach_bin_end(presses(0)), [aggregation(name)], carry='first')
+        assert unique_total([out1[name]]) == 1
+        out2 = process(reach_bin_end(presses(1000)), [aggregation(name)], carry=out1['unmatched_events'])
         assert unique_total([out2[name]]) == 1
         bins = out2[name].query('Unique_Actuations > 0').TimeStamp.tolist()
-        assert bins == [(T0 + pd.Timedelta(seconds=500)).floor('15min')]
+        assert bins == [(T0 + pd.Timedelta(seconds=1000)).floor('15min')]
 
     def test_same_press_seen_again_is_not_counted_twice(self, name):
         """A press carried and also in the next run, from a window that overlaps the one before."""
         out1 = process(presses(0, 100), [aggregation(name)], carry='first')
-        out2 = process(presses(100, 300), [aggregation(name)], carry=out1['unmatched_events'])
-        assert unique_total([out2[name]]) == 1
+        out2 = process(reach_bin_end(presses(100, 300)), [aggregation(name)], carry=out1['unmatched_events'])
+        assert unique_total([out2[name]]) == 3
 
     def test_press_older_than_the_carried_one_is_judged_on_its_own(self, name):
-        """A late press has nothing known before it. The next one is still within the limit of the carried press."""
+        """A late press has nothing known before it, and its bin waits to be written like the rest of the input's.
+        The next one is still within the limit of the carried press."""
         out1 = process(presses(1000), [aggregation(name)], carry='first')
-        out2 = process(presses(500, 1005), [aggregation(name)], carry=out1['unmatched_events'])
-        assert unique_total([out2[name]]) == 1
+        out2 = process(reach_bin_end(presses(950, 1005)), [aggregation(name)], carry=out1['unmatched_events'])
+        assert unique_total([out2[name]]) == 2
+
+    def test_press_older_than_a_bin_already_written_is_not_written(self, name):
+        """A row is never written twice, so a late press in a bin already written has nowhere to go."""
+        out1 = process(reach_bin_end(presses(1000)), [aggregation(name)], carry='first')
+        out2 = process(reach_bin_end(presses(500, 2000)), [aggregation(name)], carry=out1['unmatched_events'])
+        assert out2[name].query('Unique_Actuations > 0').TimeStamp.tolist() == [(T0 + pd.Timedelta(seconds=2000)).floor('15min')]
 
 
 #########################################
@@ -235,7 +255,7 @@ def test_empty_run_keeps_the_carry():
 def test_carry_saved_to_a_file_without_timeline(tmp_path):
     path = str(tmp_path / 'unmatched.parquet')
     counts = []
-    for i, events in enumerate((presses(0), presses(5), presses(100))):
+    for i, events in enumerate((presses(0), presses(5), reach_bin_end(presses(100)))):
         SignalDataProcessor(
             raw_data=events, bin_size=15, verbose=0, output_dir=str(tmp_path), output_to_separate_folders=False,
             output_format='parquet', output_file_prefix=f'{i}_',
@@ -243,8 +263,8 @@ def test_carry_saved_to_a_file_without_timeline(tmp_path):
             aggregations=[aggregation('unique_ped')],
         ).run()
         counts.append(int(pd.read_parquet(tmp_path / f'{i}_unique_ped.parquet')['Unique_Actuations'].sum()))
-        assert len(pd.read_parquet(path)) == 1
-    assert counts == [1, 0, 1]
+        assert (pd.read_parquet(path).EventId == 937).sum() == 1
+    assert counts == [0, 0, 2]  # the bin is written by the run that reaches its end, with all of its counts
 
 
 def test_carry_with_timeline_keeps_timeline_rows():
@@ -279,7 +299,7 @@ def test_old_carry_file_loads_and_counts_first_press(tmp_path, name, has_isvalid
         old = old.drop(columns='IsValid')
     path = tmp_path / 'old.parquet'
     old.to_parquet(path)
-    out = process(presses(0, 5, 40), [aggregation(name)], settings={'df_or_path': str(path), 'max_days_old': 14})
+    out = process(reach_bin_end(presses(0, 5, 40)), [aggregation(name)], settings={'df_or_path': str(path), 'max_days_old': 14})
     assert unique_total([out[name]]) == 2
     assert len(carried(out['unmatched_events'])) == 1
 
@@ -331,29 +351,6 @@ def test_to_sql_renders_with_default(name):
 
 
 #########################################
-### Estimated_Volumes
-#########################################
-
-def test_estimated_volumes_runs_on_the_corrected_count(real_events):
-    """The published formula, recalculated from Unique_Actuations, gives the column."""
-    out = process(real_events, [aggregation('full_ped', return_volumes=True)])['full_ped']
-    frame = out.sort_values(KEYS).reset_index(drop=True)
-    rolling = (
-        frame.iloc[::-1].groupby(['DeviceId', 'Phase'])['Unique_Actuations']
-        .rolling(4, min_periods=1).sum().reset_index(level=[0, 1], drop=True).sort_index()
-    )
-    hourly = 0.7167 * rolling + 0.0599 * rolling ** 2
-    ratio = (frame['Unique_Actuations'] / rolling).fillna(0)
-    expected = hourly * ratio + 1.1063 / 4
-    np.testing.assert_allclose(frame['Estimated_Volumes'].astype(float), expected, rtol=1e-5)
-    assert frame['Unique_Actuations'].sum() < frame['PedActuation'].sum()
-
-
-def test_volumes_default_stays_on():
-    assert 'Estimated_Volumes' in process(presses(0, 100), [{'name': 'full_ped', 'params': {}}])['full_ped'].columns
-
-
-#########################################
 ### Other aggregations do not see the new rows
 #########################################
 
@@ -378,7 +375,7 @@ def test_other_aggregations_are_unchanged_by_the_carry():
         for table, frame in run_plain.items():
             other = run_ped[table]
             if table == 'unmatched_events':
-                other = other[other.EventId != 937]
+                other = other[~other.EventId.between(943, 947) & (other.EventId != 937)]
             sort = list(frame.columns)
             pd.testing.assert_frame_equal(
                 frame.sort_values(sort).reset_index(drop=True),

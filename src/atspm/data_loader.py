@@ -109,7 +109,7 @@ def _build_column_expression(mapping, key, use_alias=True):
 
 # Optional detector_config columns, in UDOT's names. Each is matched ignoring case, spaces and underscores, and
 # is NULL if the config does not have it.
-_OPTIONAL_CONFIG_COLUMNS = ['DistanceFromStopBar', 'MPH']
+_OPTIONAL_CONFIG_COLUMNS = ['DistanceFromStopBar', 'MPH', 'LatencyCorrection']
 
 
 def _optional_config_select(columns):
@@ -130,6 +130,12 @@ def _build_select_columns(column_map, include=None, extras=None):
         parts.extend(extras)
     return ", ".join(parts)
 
+def _fall_back_hour(timestamp):
+    """SQL that is true in 1:00-2:00 am on the first Sunday of November, the hour US clocks repeat."""
+    return (f"(month({timestamp}) = 11 AND day({timestamp}) <= 7 AND dayofweek({timestamp}) = 0 "
+            f"AND hour({timestamp}) = 1)")
+
+
 def load_data(conn,
               verbose,
               raw_data=None,
@@ -137,7 +143,8 @@ def load_data(conn,
               unmatched_events=None,
               use_unmatched=False,
               known_detectors=None,
-              use_known_detectors=False):
+              use_known_detectors=False,
+              drop_fall_back_hour=True):
 
     # Reference point for the max_days_old filters below. A run whose raw data is empty has no
     # MIN(TimeStamp), and a bare None would be interpolated into SQL as the string 'None'. The
@@ -161,11 +168,19 @@ def load_data(conn,
         column_map = _resolve_canonical_columns(source_columns, source_label)
         select_clause = _build_select_columns(column_map)
 
+        # When clocks fall back the two passes through 1:00-2:00 share one set of timestamps and cannot be told
+        # apart, so neither is kept. Everything after this reads raw_data, so to all of it the hour has no data.
+        fall_back_filter = ""
+        if drop_fall_back_hour:
+            timestamp = _build_column_expression(column_map, 'TimeStamp', use_alias=False)
+            fall_back_filter = f"AND {_fall_back_hour(timestamp)} IS NOT TRUE"
+
         load_sql = f"""
         CREATE TABLE raw_data AS
         SELECT DISTINCT {select_clause}
         FROM {source_reference}
         WHERE EventId >= 0 AND EventId <= 32767 AND Parameter >= 0 AND Parameter <= 32767
+        {fall_back_filter}
         """
 
         conn.query(load_sql)
@@ -240,7 +255,7 @@ def load_data(conn,
                     SELECT TimeStamp, DeviceId, EventId, Parameter FROM raw_data
                     UNION ALL
                     SELECT TimeStamp, DeviceId, EventId, Parameter FROM unmatched_previous
-                    WHERE EventId NOT BETWEEN 938 AND 942; -- only arrival_on_green and platoon_ratio read these
+                    WHERE EventId NOT BETWEEN 938 AND 947; -- only arrival_on_green, platoon_ratio, unique_ped and full_ped read these
                     """
                 elif key == 'split_fail_df_or_path':
                     load_sql = f"""

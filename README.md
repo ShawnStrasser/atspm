@@ -83,13 +83,14 @@ params = {
     # --- Global Settings ---
     'raw_data': sample_data.data,           # Path (CSV/Parquet/JSON) or Pandas DataFrame
     'detector_config': sample_data.config,  # Path (CSV/Parquet/JSON) or Pandas DataFrame. Columns: DeviceId, Phase, Parameter,
-                                            # Function, and optionally DistanceFromStopBar and MPH (see Arrival on Green)
+                                            # Function, and optionally DistanceFromStopBar, MPH and LatencyCorrection (see Arrival on Green)
     'bin_size': 15,                         # Aggregation interval in minutes
     'output_dir': 'test_folder',            # Directory to save results
     'output_format': 'csv',                 # 'csv', 'parquet', or 'json'
     'output_file_prefix': 'run1_',          # Optional prefix for output files
     'output_to_separate_folders': True,     # Save each measure in its own subfolder
     'remove_incomplete': True,              # Remove bins with insufficient data (requires 'has_data' agg)
+    'drop_fall_back_hour': True,            # Drop events in the hour US clocks repeat each November (default shown, see The fall clock change)
     'verbose': 1,                           # 0: Errors only, 1: Performance, 2: Debug
     'to_sql': False,                        # If True, returns SQL strings instead of executing
     'controller_type': 'maxtime',           # Global: '' (default), 'maxtime' or 'siemens' (case-insensitive)
@@ -124,7 +125,7 @@ params = {
         {
             'name': 'arrival_on_green', 
             'params': {
-                'latency_offset_seconds': 0 # Taken off each arrival time, for detector-to-controller latency
+                'latency_offset_seconds': 0 # Taken off each arrival time for detectors with no LatencyCorrection
             }
         },
         {
@@ -225,7 +226,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Splits** (`splits`): MAXTIME-specific split events (cycle length/split services) aggregated by interval.
 - **Coordination** (`coordination`): Raw events for Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME). Includes both `Raw_TimeStamp` and binned `TimeStamp`.
 - **Coordination Aggregate** (`coordination_agg`): Binned coordination state per interval. Provides the active Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME) for every bin using fill-forward logic.
-- **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations. A press is a unique actuation if it comes more than `seconds_between_actuations` (default 15) after the previous press on that input, or if no earlier press is known. Incremental runs carry each input's last press (synthetic `EventId` 937 in the unmatched events), so `full_ped` and `unique_ped` count the same as one big run. `Estimated_Volumes` looks ahead up to 3 bins, which the end of a run does not have, so the last 3 bins of a run read low.
+- **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations. A press is a unique actuation if it comes more than `seconds_between_actuations` (default 15) after the previous press on that input, or if no earlier press is known. See [Pedestrian counts and volumes](#pedestrian-counts-and-volumes).
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
 - **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
 - **Detector Health** (`detector_health`): Which vehicle detectors and ped buttons are failing, when, and on what evidence, from `atspm-detector`. Needs `pip install atspm[detector-health]`. See [Detector health](#detector-health).
@@ -240,18 +241,60 @@ arrival = detector on + distance / (speed * 1.467) - latency
 
 The arrival time is used for everything after that. An arrival is on green if the phase is green at that moment, and it counts in the bin it lands in, so `Total_Actuations` for a bin differs slightly from the `actuations` table, which keeps the detector's own times.
 
-Distance and speed come from two optional `detector_config` columns, in UDOT's names:
+A bin with vehicles and none on green reads 0, including a bin where the phase never turned green. A bin with no vehicles has no row. `platoon_ratio` reads 0 in a bin with green and none of its vehicles on green, and has no row for a bin with no green, where the ratio has no meaning.
+
+Distance, speed and latency come from three optional `detector_config` columns, in UDOT's names:
 
 | Column | Meaning | If missing |
 | --- | --- | --- |
 | `DistanceFromStopBar` | Feet from the leading edge of the detector to the stop bar | 220 for phases 2 and 6, 120 for all others |
 | `MPH` | Speed in miles per hour. UDOT uses the speed limit | 35 |
+| `LatencyCorrection` | Seconds from the vehicle crossing the detector to the controller logging it | `latency_offset_seconds`, or 0 without it |
 
-Each value is judged row by row: a row may have one and not the other, and whatever is blank, not a number, a negative distance or a speed of zero takes its default. A config with only `DeviceId`, `Phase`, `Parameter` and `Function` keeps working and takes the defaults for every detector. Column names ignore case, spaces and underscores. Latency is the `latency_offset_seconds` parameter, one value for the whole run, where UDOT has one per detector. With `to_sql=True` your own `detector_config` table needs both columns, which may be NULL.
+Each value is judged row by row: a row may have one and not the others, and whatever is blank, not a number, a negative distance or a speed of zero takes its default. A latency of 0 in the column is a real 0, and beats `latency_offset_seconds`. A config with only `DeviceId`, `Phase`, `Parameter` and `Function` keeps working and takes the defaults for every detector. Column names ignore case, spaces and underscores. With `to_sql=True` your own `detector_config` table needs all three columns, which may be NULL.
 
-**Incremental runs** give the same rows as one big run wherever the runs are cut, for both measures. A bin is written once, whole, by the first run whose data reaches the end of it, and that is a run whose last event, across all signals, is within a second of the end of the bin. A run that stops short of that leaves the bin it stopped in for the next run. Vehicles that arrive after results stop, the phase events from there on and the phases still green are kept in `unmatched_events` (synthetic `EventId` 938 to 942), so `unmatched_event_settings` with `df_or_path` is all that is needed, with or without `timeline`. With runs cut on the bin and enough signals to fill the last second, every bin is written by the run that reaches it. With a few quiet signals the last event can be short of the end of the bin, and that bin is written one run later, with the same values. A run with no unmatched settings has nothing after it, so it writes all it has, up to its last event. Arrivals past that are not counted.
+**Incremental runs** give the same rows as one big run wherever the runs are cut, for both measures. A bin is written once, whole, by the first run whose data reaches the end of it, and that is a run whose last event, across all signals, is within a second of the end of the bin. A run that stops short of that leaves the bin it stopped in for the next run. Vehicles that arrive after results stop, the phase events from there on and the phases still green are kept in `unmatched_events` (synthetic `EventId` 938 to 941, and 942 with `remove_incomplete`), so `unmatched_event_settings` with `df_or_path` is all that is needed, with or without `timeline`. With runs cut on the bin and enough signals to fill the last second, every bin is written by the run that reaches it. With a few quiet signals the last event can be short of the end of the bin, and that bin is written one run later, with the same values. A run with no unmatched settings has nothing after it, so it writes all it has, up to its last event. Arrivals past that are not counted.
 
-Two limits: a run that really stops inside the last second of a bin is taken as having reached the end of it, and a `latency_offset_seconds` larger than the travel time can move an arrival back into a bin already written.
+Two limits: a run that really stops inside the last second of a bin is taken as having reached the end of it, and a latency larger than the travel time can move an arrival back into a bin already written.
+
+### Pedestrian counts and volumes
+
+`Estimated_Volumes` in `full_ped` is the published estimate, with its rolling hour taken over a bin and the 3 bins before it:
+
+```
+hour = unique actuations in this bin and the 3 before it
+Estimated_Volumes = (0.7167 * hour + 0.0599 * hour^2) * (unique actuations in this bin / hour) + 1.1063 / 4
+```
+
+Looking back is what lets a bin be final the moment it is written. It used to look at the next 3 bins, which the end of a run does not have, so the last 3 bins of every run read low and could only be fixed by changing a row already written. On 758 ODOT signals over 2 days (Oct 5 and 6 2026), against the forward-looking form on the same counts:
+
+| | Measured |
+| --- | --- |
+| Peds in a day, network | Up 0.00% and 0.02%. Every pair of presses within the hour counts once either way, so only the ends of the data differ |
+| Peds in a day, one input with 10 or more | 90% unchanged, 99% within 0.3%, largest 4.2% |
+| Peak hour (4 bins in a row) | Same size on average, 80% within about 5%. It starts in the same bin 59% of the time and within 15 minutes 77% of the time |
+| Shape of the day | The same volumes sit a few minutes later: the middle of an input's day moves by a median of 3.7 minutes, and network hours read up to 8.5% lower on the morning rise and up to 7.7% higher on the evening fall |
+| Each bin | 95% of bins with peds move by 1 ped or less. The largest moves, up to 40, are on the busiest bins, where a burst reads higher at its end and lower at its start |
+
+**Incremental runs** give the same rows as one big run wherever the runs are cut, for `unique_ped` and `full_ped`, with or without `timeline`, when `unmatched_event_settings` has `df_or_path`. A bin is written once, whole, by the first run that reaches the end of it, the same rule as [Arrival on Green](#arrival-on-green), so nothing is held back from a run that reaches the end of its last bin and no past row ever changes. Each input's last press (synthetic `EventId` 937), the unique actuations of the last 3 bins written and of any bin not written yet (943), each input's next bin to write (944) and last activity (945), and the presses and ped services of any bin not written yet (946, 947) are kept in `unmatched_events`. A run with no unmatched settings has nothing after it, so it writes all it has.
+
+With volumes on, an input has a row in every bin from its first activity (a press or a ped service) on, quiet bins included, with an estimate of just the intercept. That goes on through runs where it does nothing, until `max_days_old` passes with no activity, and it starts again at its next activity. One big run has no such limit, so it also has the intercept rows of an input quiet for longer than `max_days_old`, and that is the one difference between it and incremental runs. A device that stops logging keeps its intercept rows the same way. Join `has_data` or set `remove_incomplete` to leave them out. `return_volumes=False` leaves out all rows that count nothing.
+
+Three limits: a run that really stops inside the last second of a bin is taken as having reached the end of it, a press in a bin already written is too late to count, and if `unique_ped` and `full_ped` run together they should use the same `seconds_between_actuations`, since they share one carry. Volumes assume a `bin_size` of 15. The first run from an older unmatched file has no earlier bins to read, so its first 3 bins read a little low, once.
+
+### The fall clock change
+
+When clocks fall back, local time runs through 1:00 to 2:00 am twice on the first Sunday of November. Events from the two passes share one set of timestamps and cannot be separated, so durations and phase sequences built on them are wrong. ODOT's staging data of Nov 1 2026 had about 100 copies of each event in that hour, and false phase conflicts followed. So both passes are thrown out.
+
+`drop_fall_back_hour`, on by default, drops every event from 1:00:00 up to but not including 2:00:00 on that day when `raw_data` is loaded, before anything is computed. Every aggregation reads `raw_data`, so to all of them the hour has no data, the same as an outage: `has_data` has no row for it, `timeline` marks an interval across it invalid, and with `remove_incomplete` no measure has a row in it. Without `remove_incomplete` a few rows can touch the hour, as with any outage: a vehicle that crossed a detector just before 1:00 arrives just after it, and a known ped input keeps its zero rows.
+
+It assumes US rules (since 2007, the change is at 2:00 am on the first Sunday of November) and that `TimeStamp` is local time. If your data is in UTC or another fixed offset, is from somewhere with other rules, or has already been cleaned, turn it off:
+
+```python
+SignalDataProcessor(raw_data=events, drop_fall_back_hour=False, ...)
+```
+
+The spring change skips an hour and repeats none, so nothing is needed then. `to_sql=True` loads nothing, so the setting does not apply there, and your own `raw_data` table is read as it is.
 
 ### Detector health
 
@@ -406,7 +449,7 @@ The following tables are produced by the aggregation process, depending on the c
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `Phase` (INT16): Phase number.
 *   `Total_Actuations` (INT16): Vehicles from the advance detectors arriving at the stop bar in this bin.
-*   `Percent_AOG` (FLOAT): Fraction of those arriving on green (0.0 - 1.0). A bin with none on green has no row.
+*   `Percent_AOG` (FLOAT): Fraction of those arriving on green (0.0 - 1.0). A bin with vehicles and none on green reads 0, and a bin with no vehicles has no row.
 
 #### platoon_ratio
 *   `TimeStamp` (DATETIME): Bin start time.
@@ -505,7 +548,7 @@ Only with `'active'` in `outputs`, and off by default until reviewed. The faults
 *   `PedServices` (INT16): Count of ped services.
 *   `PedActuation` (INT16): Count of ped actuations.
 *   `Unique_Actuations` (INT16): Count of unique ped actuations: presses more than `seconds_between_actuations` (default 15) after the previous press on that input.
-*   `Estimated_Volumes` (FLOAT): Estimated pedestrian volume (only present if `return_volumes=True`).
+*   `Estimated_Volumes` (FLOAT): Estimated pedestrian volume from this bin and the 3 before it (only present if `return_volumes=True`, the default). See [Pedestrian counts and volumes](#pedestrian-counts-and-volumes).
 
 #### has_data
 *   `TimeStamp` (DATETIME): Bin start time where data exists.
@@ -601,7 +644,19 @@ Only with `'active'` in `outputs`, and off by default until reviewed. The faults
 *   `EventId` (INT16): Event ID.
 *   `Parameter` (INT16): Parameter value.
 
-Rows with `EventId` 931 to 942 are state carried between runs, not controller events. `EventId` 937 holds each ped input's last press, one row per input, with the input number in `Parameter`. `EventId` 938 to 942 are what `arrival_on_green` and `platoon_ratio` have not written yet: arrivals (938) and green, yellow and red clearance begins (939, 940, 941), with the phase in `Parameter`, and bins that passed `has_data` (942).
+Rows with `EventId` 931 to 947 are state carried between runs, not controller events. Each number has one meaning:
+
+| `EventId` | Written by | Holds | `Parameter` |
+| --- | --- | --- | --- |
+| 931 to 934 | `coordination_agg` | Pattern, cycle length, actual cycle length, actual offset | The value |
+| 935, 936 | `timeline` | The last bin with data and the last event of each device | 0 |
+| 937 | `unique_ped`, `full_ped` | Each input's last press, one row per input | Input |
+| 938 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped, at its projected time | Phase |
+| 939, 940, 941 | `arrival_on_green`, `platoon_ratio` | Green, yellow and red clearance begins not written yet. 939 also marks a phase green when results stopped | Phase |
+| 942 | Any of these four with `remove_incomplete` | A bin not written yet that passed `has_data` | 0 |
+| 943 | `unique_ped`, `full_ped` | One unique actuation, stamped with its bin, in a bin not written yet or the last 3 written | Input |
+| 944, 945 | `unique_ped`, `full_ped` | Each input's next bin to write, and its last activity | Input |
+| 946, 947 | `unique_ped`, `full_ped` | One press, or one ped service, stamped with its bin, in a bin not written yet | Input |
 
 ## Release Notes
 

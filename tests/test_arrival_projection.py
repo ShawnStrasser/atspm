@@ -146,10 +146,77 @@ def test_latency_is_taken_off_the_arrival_time():
     assert process(events, config((2, 3)))['arrival_on_green'].Percent_AOG.tolist() == [1.0]
     latency = {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 1}}
     out = process(events, config((2, 3)), [latency])['arrival_on_green']
-    assert len(out) == 0  # now it arrives on red, the only arrival in its bin, and a bin with none on green has no row
+    assert out.Total_Actuations.tolist() == [1] and out.Percent_AOG.tolist() == [0.0]  # now it arrives on red
 
 
-def test_to_sql_renders_a_query_for_a_table_with_both_columns():
+# Green from 100 s to 200 s, and on events 0.5 s after an arrival would reach green with no latency at all
+def latency_events(detector=3, travel=TRAVEL_220):
+    return frame(at(100, 1, 2), at(100 - travel + 0.5, 82, detector), at(200, 8, 2), at(899.9, 1, 15))
+
+
+@pytest.mark.parametrize('columns, percent', [
+    ({'LatencyCorrection': [1.0]}, 0.0),                # the detector's own moves it back onto red
+    ({'LatencyCorrection': [0.0]}, 1.0),                # a real zero beats a run-wide value
+    ({'latency_correction': [1.0]}, 0.0),               # names ignore case and underscores
+    ({'LatencyCorrection': [None]}, None),              # blank falls back
+    ({'LatencyCorrection': ['n/a']}, None),             # text is not a number, and falls back
+    ({}, None),                                         # no column falls back
+])
+@pytest.mark.parametrize('run_wide', [0, 1])
+def test_latency_is_per_detector_with_the_setting_as_fallback(columns, percent, run_wide):
+    expected = percent if percent is not None else (0.0 if run_wide else 1.0)
+    aggregation = {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': run_wide}}
+    out = process(latency_events(), config((2, 3), **columns), [aggregation])['arrival_on_green']
+    assert out.Percent_AOG.tolist() == [expected]
+
+
+def test_detectors_on_one_phase_each_use_their_own_latency():
+    detectors = config((2, 3), (2, 4), (2, 5), LatencyCorrection=[1.0, 0.25, None])
+    events = pd.concat([latency_events(3), latency_events(4), latency_events(5)]).drop_duplicates()
+    out = process(events, detectors, [{'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 2}}])['arrival_on_green']
+    # Detector 3 lands on red, 4 on green, and 5 falls back to 2 seconds and lands on red
+    assert out.Total_Actuations.tolist() == [3] and out.Percent_AOG.tolist() == [pytest.approx(1 / 3)]
+
+
+def test_latency_alone_needs_no_setting():
+    aggregation = {'name': 'arrival_on_green', 'params': {}}
+    out = process(latency_events(), config((2, 3), LatencyCorrection=[1.0]), [aggregation])['arrival_on_green']
+    assert out.Percent_AOG.tolist() == [0.0]
+    assert process(latency_events(), config((2, 3)), [aggregation])['arrival_on_green'].Percent_AOG.tolist() == [1.0]
+
+
+# ---- bins with vehicles and none on green
+
+def test_bin_with_vehicles_and_none_on_green_reads_zero():
+    # The first bin has green and all of its vehicles on red. The second has no green at all.
+    events = frame(at(100, 1, 2), at(110, 8, 2), at(200, 82, 3), at(210, 82, 3), at(1000, 82, 3), at(1799.9, 1, 15))
+    out = process(events, config((2, 3)))
+    aog = out['arrival_on_green'].sort_values('TimeStamp')
+    assert aog.Total_Actuations.tolist() == [2, 1] and aog.Percent_AOG.tolist() == [0.0, 0.0]
+    # A phase with green and no vehicles on it is a platoon ratio of zero. A phase with no green has no ratio at all.
+    platoon = out['platoon_ratio']
+    assert platoon.TimeStamp.tolist() == [T0]
+    row = platoon.iloc[0]
+    assert row.Green_Actuations == 0 and row.Platoon_Ratio == 0 and row.Arrival_Type == 1 and row.Green_Seconds == 10
+
+
+def test_bin_with_no_vehicles_has_no_row():
+    events = frame(at(100, 1, 2), at(110, 8, 2), at(200, 82, 3), at(1000, 1, 2), at(1100, 8, 2), at(1799.9, 1, 15))
+    assert process(events, config((2, 3)))['arrival_on_green'].TimeStamp.tolist() == [T0]
+
+
+def test_zero_bins_match_across_runs():
+    events = frame(at(100, 1, 2), at(110, 8, 2), at(200, 82, 3), at(899.9, 1, 15),
+                   at(1000, 82, 3), at(1799.9, 1, 15), at(1900, 1, 2), at(1910, 82, 3), at(1950, 8, 2), at(2699.9, 1, 15))
+    detectors = config((2, 3))
+    runs, _ = cut_runs(events, detectors, [T0 + pd.Timedelta(minutes=m) for m in (15, 30)])
+    big = process(events, detectors, carry='first')
+    assert runs['arrival_on_green'].Percent_AOG.tolist().count(0.0) == 2
+    same_rows(big['arrival_on_green'], runs['arrival_on_green'])
+    same_rows(big['platoon_ratio'], runs['platoon_ratio'])
+
+
+def test_to_sql_renders_a_query_for_a_table_with_the_three_columns():
     with SignalDataProcessor(to_sql=True, bin_size=15, verbose=0, aggregations=TWO_TABLES) as p:
         p.aggregate()
         query = p.sql_queries['arrival_on_green']
@@ -159,7 +226,7 @@ def test_to_sql_renders_a_query_for_a_table_with_both_columns():
     connection.register('events_frame', events)
     connection.execute("CREATE TABLE raw_data AS SELECT * FROM events_frame")
     connection.execute("""CREATE TABLE detector_config AS SELECT 'A' AS DeviceId, 2::INT16 AS Phase, 3::INT16 AS Parameter,
-        'Advance' AS Function, NULL::DOUBLE AS DistanceFromStopBar, NULL::DOUBLE AS MPH""")
+        'Advance' AS Function, NULL::DOUBLE AS DistanceFromStopBar, NULL::DOUBLE AS MPH, NULL::DOUBLE AS LatencyCorrection""")
     connection.execute(query)
     assert connection.execute("SELECT Total_Actuations, Percent_AOG FROM arrival_on_green").fetchall() == [(1, 1.0)]
 
@@ -252,7 +319,7 @@ def test_older_unmatched_file_still_loads():
     # A file written before these markers, as timeline left it
     old = pd.DataFrame({'TimeStamp': [T0], 'DeviceId': 'A', 'EventId': [1], 'Parameter': [2], 'IsValid': [True]})
     events = frame(at(100, 82, 3), at(200, 8, 2), at(899.9, 1, 7))
-    assert len(process(events, config((2, 3)), carry=old)['arrival_on_green']) == 0  # the old green is not read
+    assert process(events, config((2, 3)), carry=old)['arrival_on_green'].Percent_AOG.tolist() == [0.0]  # the old green is not read
 
 
 @pytest.mark.parametrize('seed', [1, 2, 3])

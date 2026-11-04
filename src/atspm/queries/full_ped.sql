@@ -1,98 +1,89 @@
---Aggregate Pedestiran Services, Actuations, Unique Actuations
---MUST BE RUN OVER MULTIPLE TIME PERIODS FOR VOLUMES TO WORK!
---Uses a rolling 15-minute window, data at the end is cut off or distorted. So for example run over a day and 11:15pm-midnight will be cut off.
+--Aggregate Pedestrian Services, Actuations, Unique Actuations and Estimated Volumes
 --Written in SQL for DuckDB. This is a jinja2 template, with variables inside curly braces.
 
---Unique actuations come from unique_ped.sql, see that file for how they are counted.
+--Unique actuations come from unique_ped_counts.sql, see that file for how they are counted.
+--Each bin is written once, whole, by the run that reaches its end, see ped_state.sql.
 
--- services and actuations
-WITH ped1 AS(
-	SELECT 
-		TimeStamp, 
-		DeviceId, 
-		Parameter::int16 AS Phase, 
-		COALESCE("21", 0)::int16 + COALESCE("67", 0)::int16 AS PedServices, 
-		COALESCE("90", 0)::int16 AS PedActuation
-	FROM (
-		SELECT 
-			TIME_BUCKET(interval '{{bin_size}} minutes', TimeStamp) AS TimeStamp, 
-			DeviceId, 
-			EventId, 
-			Parameter,
-			COUNT(*) AS Total
-		FROM 
-			{{from_table}}
-		WHERE 
-			EventId IN (21, 90, 67)
-		GROUP BY ALL
-	) q
-	PIVOT (
-		SUM(Total) FOR EventID IN (21 AS "21", 90 AS "90", 67 AS "67")
-	)
+WITH {% include 'ped_state.sql' %},
+
+ped_counts AS (
+    SELECT
+        TimeStamp,
+        DeviceId,
+        Phase,
+        (COUNT(*) FILTER (WHERE NOT Is_Press))::int16 AS PedServices,
+        (COUNT(*) FILTER (WHERE Is_Press))::int16 AS PedActuation
+    FROM ped_events
+    GROUP BY ALL
 ),
 
---unique actuations
-ped2 AS(
-    {% include 'unique_ped.sql' %}
-),
-
---combined
-ped_combined AS(
-    SELECT *
-    FROM ped1
-    FULL JOIN ped2 USING (TimeStamp, DeviceId, Phase)
+ped_combined AS (
+    SELECT
+        TimeStamp,
+        DeviceId,
+        Phase,
+        COALESCE(PedServices, 0)::int16 AS PedServices,
+        COALESCE(PedActuation, 0)::int16 AS PedActuation,
+        COALESCE(Unique_Actuations, 0)::int16 AS Unique_Actuations
+    FROM ped_counts
+    FULL JOIN unique_counts USING (TimeStamp, DeviceId, Phase)
 )
 
 --if variable return_volumes is False, return the combined table below
 {% if return_volumes == False %}
-SELECT 
-    TimeStamp,
-    DeviceId,
-    Phase, 
-    COALESCE(PedServices, 0) AS PedServices,
-    COALESCE(PedActuation, 0) AS PedActuation,
-    COALESCE(Unique_Actuations, 0) AS Unique_Actuations
-FROM ped_combined
+SELECT c.*
+FROM ped_combined c
+JOIN inputs i ON i.DeviceId = c.DeviceId AND i.Phase = c.Phase
+CROSS JOIN results_end e
+WHERE c.TimeStamp >= i.Next_Bin
+  AND c.TimeStamp < e.TimeStamp
 
 --if variable return_volumes is True, return the volumes table below
 {% else %}
 ,
-T AS (
-    SELECT generate_series AS TimeStamp
-    FROM generate_series(
-        TIMESTAMP '{{min_timestamp}}',
-        TIMESTAMP '{{max_timestamp}}',
-        INTERVAL '{{bin_size}} minutes'
-    )
+last_bin AS (
+    SELECT TIME_BUCKET(interval '{{bin_size}} minutes', TimeStamp - INTERVAL 1 MILLISECOND) AS TimeStamp
+    FROM results_end
 ),
-U AS (
-    SELECT DISTINCT DeviceId, Phase
-    FROM ped_combined
-),
+
+--Every known input in every bin from the first not written yet through the last this run writes, quiet bins included,
+--starting 3 bins sooner for the rolling sum
 all_times AS (
-    SELECT *
-    FROM T
-    CROSS JOIN U
+    SELECT
+        UNNEST(generate_series(
+            i.Next_Bin - INTERVAL '{{bin_size * 3}} minutes',
+            l.TimeStamp,
+            INTERVAL '{{bin_size}} minutes'
+        )) AS TimeStamp,
+        i.DeviceId,
+        i.Phase,
+        i.Next_Bin
+    FROM inputs i, last_bin l
 ),
 filled_in AS (
     SELECT
-        TimeStamp,
-        DeviceId,
-        Phase, 
-        COALESCE(PedServices, 0) AS PedServices,
-        COALESCE(PedActuation, 0) AS PedActuation,
-        COALESCE(Unique_Actuations, 0) AS Unique_Actuations
-    FROM all_times
-    LEFT JOIN ped_combined USING (TimeStamp, DeviceId, Phase)
+        a.TimeStamp,
+        a.DeviceId,
+        a.Phase,
+        a.Next_Bin,
+        COALESCE(c.PedServices, 0)::int16 AS PedServices,
+        COALESCE(c.PedActuation, 0)::int16 AS PedActuation,
+        COALESCE(c.Unique_Actuations, 0)::int16 AS Unique_Actuations
+    FROM all_times a
+    LEFT JOIN ped_combined c
+        ON c.TimeStamp = a.TimeStamp AND c.DeviceId = a.DeviceId AND c.Phase = a.Phase
 ),
+
+--A bin and the 3 before it, the same in every run because the 3 before it are carried. Looking at the 3 bins after it
+--would leave the last 3 bins of a run reading low, with no way to fix them but changing a row already written.
 add_rolling_sum AS (
-    SELECT 
+    SELECT
         *,
         SUM(Unique_Actuations) OVER (
             PARTITION BY DeviceId, Phase
             ORDER BY TimeStamp
-            ROWS BETWEEN CURRENT ROW AND 3 FOLLOWING
-        ) AS Unique_Actuations_Rolling
+            ROWS BETWEEN 3 PRECEDING AND CURRENT ROW
+        )::DOUBLE AS Unique_Actuations_Rolling
     FROM filled_in
 ),
 
@@ -107,11 +98,15 @@ volumes AS (
         CASE WHEN Unique_Actuations_Rolling = 0 THEN 0 ELSE Unique_Actuations / Unique_Actuations_Rolling END AS Ratio
     FROM add_rolling_sum
 )
-SELECT * EXCLUDE (Unique_Actuations_Rolling, Ratio, Estimated_Hourly),
+SELECT
+    TimeStamp,
+    DeviceId,
+    Phase,
+    PedServices,
+    PedActuation,
+    Unique_Actuations,
     (Estimated_Hourly * Ratio + (1.1063 / 4))::FLOAT AS Estimated_Volumes
 FROM volumes
+WHERE TimeStamp >= Next_Bin
 
 {% endif %}
-
-
-
