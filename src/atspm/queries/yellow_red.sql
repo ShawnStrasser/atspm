@@ -42,13 +42,13 @@ view3 AS (
     -- Group by cycle and label events as occuring during green, yellow, or red
     WITH step1 as (
         SELECT *,
-            CASE WHEN EventId = 1 THEN 1 ELSE 0 END AS Cycle_Number_Mask,
             CASE WHEN EventId < 81 THEN EventId ELSE 0 END AS Signal_State_Mask
         FROM view2
     ),
     step2 as (
         SELECT *,
-            SUM(Cycle_Number_Mask) OVER (PARTITION BY DeviceId, Phase ORDER BY TimeStamp, EventId) AS Cycle_Number            FROM step1
+            COUNT(*) FILTER (WHERE EventId = 1) OVER (PARTITION BY DeviceId, Phase ORDER BY TimeStamp, EventId) AS Cycle_Number
+        FROM step1
     )
     SELECT TimeStamp,
         DeviceId, 
