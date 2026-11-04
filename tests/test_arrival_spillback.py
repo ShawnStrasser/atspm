@@ -8,6 +8,8 @@ clearing, about one vehicle every 2 seconds, and goes only after the detector ha
 
 The times here are seconds from T0. With DistanceFromStopBar 0 an arrival lands the moment the detector turns on.
 """
+import random
+
 import duckdb
 import pandas as pd
 import pytest
@@ -352,7 +354,7 @@ def test_a_flagged_detector_in_its_gap_is_carried_with_when_it_turned_off():
 
 def test_a_flagged_detector_on_at_the_cut_is_carried_as_both():
     events = queue_across_bins()
-    _, carry = cut_runs(events[events.TimeStamp < T0 + pd.Timedelta(seconds=930.2)], [])
+    _, carry = cut_runs(events[events.TimeStamp < T0 + pd.Timedelta(seconds=929.2)], [])
     assert state(carry, FLAG).Parameter.tolist() == [DETECTOR]
     assert state(carry, STILL_ON).TimeStamp.tolist() == [T0 + pd.Timedelta(seconds=929)]
 
@@ -367,7 +369,7 @@ def test_nothing_is_carried_once_the_gap_has_passed():
 def test_a_flagged_arrival_past_the_results_end_stays_on_red_in_the_next_run():
     # The flagged vehicle reaches the detector just before the end of the first bin and the stop bar after it, on green
     detectors = config((PHASE, DETECTOR), distance=220.0)
-    first = frame(at(600, 1, PHASE), *actuation(880, 890), *actuation(897.9, 898.4), at(899.9, 1, 7))
+    first = frame(at(600, 1, PHASE), *actuation(880, 895), *actuation(897.9, 898.4), at(899.9, 1, 7))
     second = frame(at(1000, 8, PHASE), at(1799.9, 1, 7))
     run1 = process(first, detectors, carry='first')
     held = state(run1['unmatched_events'], HELD)
@@ -391,8 +393,8 @@ def test_a_detector_on_across_a_whole_run_with_nothing_of_its_own():
 
 def test_an_empty_run_keeps_the_flag():
     events = queue_across_bins()
-    first = events[events.TimeStamp < T0 + pd.Timedelta(seconds=930.2)]
-    second = events[events.TimeStamp >= T0 + pd.Timedelta(seconds=930.2)]
+    first = events[events.TimeStamp < T0 + pd.Timedelta(seconds=929.2)]
+    second = events[events.TimeStamp >= T0 + pd.Timedelta(seconds=929.2)]
     carry = process(first, carry='first')['unmatched_events']
     empty = process(first.iloc[0:0], carry=carry)
     kept = lambda df: df[df.EventId.isin([FLAG, STILL_ON])].sort_values(['EventId']).reset_index(drop=True)
@@ -442,3 +444,82 @@ def test_to_sql_renders_a_query_that_runs():
         0.0::DOUBLE AS DistanceFromStopBar, NULL::DOUBLE AS MPH, NULL::DOUBLE AS LatencyCorrection""")
     connection.execute(query)
     assert connection.execute('SELECT Total_Actuations, Percent_AOG FROM arrival_on_green').fetchall() == [(10, 0.0)]
+
+# ---- real events, with the flag at its defaults
+
+REAL_EVENTS = 'tests/spillback_events_test_data.parquet'  # Two signals, 12:00 to 21:00 on Oct 27 2026, one with queues over its detectors
+REAL_CONFIG = 'tests/spillback_config_test_data.parquet'
+DEFAULTS = {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}}
+
+
+def real_events():
+    return duckdb.query(f"SELECT * FROM '{REAL_EVENTS}' ORDER BY TimeStamp").df()
+
+
+def real_config():
+    return duckdb.query(f"SELECT * FROM '{REAL_CONFIG}'").df()
+
+
+def real_cut_runs(events, detectors, cuts):
+    edges = [events.TimeStamp.min()] + sorted(cuts) + [events.TimeStamp.max() + pd.Timedelta(seconds=1)]
+    outputs, carry = {'arrival_on_green': [], 'platoon_ratio': []}, 'first'
+    for start, end in zip(edges, edges[1:]):
+        result = process(events[(events.TimeStamp >= start) & (events.TimeStamp < end)], detectors, [DEFAULTS, PLATOON], carry)
+        carry = result['unmatched_events']
+        for table in outputs:
+            outputs[table].append(result[table])
+    return {t: pd.concat(v) for t, v in outputs.items()}, carry
+
+
+def test_real_data_moves_vehicles_off_green():
+    events, detectors = real_events(), real_config()
+    on = process(events, detectors, [DEFAULTS])['arrival_on_green']
+    off = process(events, detectors, [AOG_OFF])['arrival_on_green']
+    assert on.Total_Actuations.sum() == off.Total_Actuations.sum()
+    on_green = lambda df: (df.Percent_AOG * df.Total_Actuations).sum()
+    assert on_green(on) < 0.95 * on_green(off)
+
+
+@pytest.mark.parametrize('seed', [1, 2, 3])
+def test_real_data_at_random_cuts_equals_one_big_run(seed):
+    events, detectors = real_events(), real_config()
+    big = process(events, detectors, [DEFAULTS, PLATOON], carry='first')
+    span = (events.TimeStamp.max() - events.TimeStamp.min()).total_seconds()
+    rng = random.Random(seed)
+    cuts = [events.TimeStamp.min() + pd.Timedelta(seconds=round(rng.uniform(0, span), 1)) for _ in range(9)]
+    # None within a second of the end of a bin: such a run counts as having reached it
+    runs, _ = real_cut_runs(events, detectors, [c for c in cuts if (c.ceil('15min') - c).total_seconds() > 1])
+    same_rows(big['arrival_on_green'], runs['arrival_on_green'])
+    same_rows(big['platoon_ratio'], runs['platoon_ratio'])
+
+
+def test_real_data_cut_inside_a_queue_carries_the_flag():
+    # The evening queue on one detector runs for minutes around this moment
+    events, detectors = real_events(), real_config()
+    cut = pd.Timestamp('2026-10-27 16:50:00')
+    big = process(events, detectors, [DEFAULTS, PLATOON], carry='first')
+    runs, _ = real_cut_runs(events, detectors, [cut])
+    same_rows(big['arrival_on_green'], runs['arrival_on_green'])
+    first = process(events[events.TimeStamp < cut], detectors, [DEFAULTS, PLATOON], carry='first')['unmatched_events']
+    assert (first.EventId == FLAG).any()
+
+
+def test_real_data_in_three_hour_windows_equals_one_big_run_and_a_run_with_no_file():
+    events, detectors = real_events(), real_config()
+    start = events.TimeStamp.min().floor('15min')
+    runs, _ = real_cut_runs(events, detectors, [start + pd.Timedelta(hours=h) for h in (3, 6)])
+    for big in (process(events, detectors, [DEFAULTS, PLATOON], carry='first'), process(events, detectors, [DEFAULTS, PLATOON])):
+        written = runs['arrival_on_green'].TimeStamp.max()
+        same_rows(big['arrival_on_green'][big['arrival_on_green'].TimeStamp <= written], runs['arrival_on_green'])
+        same_rows(big['platoon_ratio'][big['platoon_ratio'].TimeStamp <= written], runs['platoon_ratio'])
+
+
+def test_flag_off_gives_the_stored_values_of_udots_method():
+    """What the flag changes is all that changes: with it off, the sample still gives the stored expected values."""
+    has_data = {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}}
+    events = duckdb.query("SELECT * FROM 'tests/hires_test_data.parquet'").df()
+    detectors = duckdb.query("SELECT * FROM 'tests/configs_test_data.parquet'").df()
+    out = process(events, detectors, [has_data, AOG_OFF, PLATOON], remove_incomplete=True)
+    for table in ('arrival_on_green', 'platoon_ratio'):
+        stored = pd.read_parquet(f'tests/precalculated/{table}.parquet')
+        same_rows(stored, out[table])

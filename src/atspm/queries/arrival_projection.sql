@@ -20,22 +20,37 @@ advance_detectors AS (
     FROM detector_config
     WHERE Function = 'Advance'
 ),
+{%- if spillback_on_seconds %}
 
--- One row per vehicle per phase at its time of arrival at the stop bar, plus the ones an earlier run held
--- because they arrive after its results stopped (938, already projected, with the phase as Parameter).
+{% include 'arrival_spillback.sql' %},
+{%- endif %}
+
+-- One row per vehicle per phase at its time of arrival at the stop bar, plus the ones an earlier run held because
+-- they arrive after its results stopped (already projected, with the phase as Parameter: 938, or 948 if flagged).
+-- Spillback says the vehicle counts as arriving on red whatever the phase shows.
 arrivals AS (
     SELECT d.TimeStamp + to_milliseconds(c.Offset_Milliseconds) AS TimeStamp,
         d.DeviceId,
-        c.Phase
+        c.Phase,
+        {%- if spillback_on_seconds %}
+        d.Spillback
+    FROM detector_flags d
+    JOIN advance_detectors c
+        ON d.DeviceId = c.DeviceId
+       AND d.Parameter = c.Parameter
+    WHERE d.Is_New
+    {%- else %}
+        FALSE AS Spillback
     FROM {{from_table}} d
     JOIN advance_detectors c
         ON d.DeviceId = c.DeviceId
        AND d.Parameter = c.Parameter
     WHERE d.EventId = 82
+    {%- endif %}
     {%- if unmatched %}
     UNION ALL
-    SELECT TimeStamp, DeviceId, Parameter::INT16 AS Phase
+    SELECT TimeStamp, DeviceId, Parameter::INT16 AS Phase, EventId = 948 AS Spillback
     FROM unmatched_previous
-    WHERE EventId = 938
+    WHERE EventId IN (938, 948)
     {%- endif %}
 )

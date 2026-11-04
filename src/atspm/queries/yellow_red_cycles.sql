@@ -1,0 +1,92 @@
+-- Included by yellow_red.sql and yellow_red_carry.sql. A list of CTEs, not a query.
+--
+-- A cycle runs from one green begin to the next. Each actuation belongs to its cycle and its row to the bin of the
+-- cycle's red begin, so a bin is only known once the last cycle with a red in it has finished. The cycles an earlier
+-- run could not finish come back here (951 green, 952 yellow, 953 red clearance, 954 actuation, already moved back by
+-- the latency, all with the phase as Parameter).
+{%- if carry_bins %}
+{% include 'results_end.sql' %},
+
+-- The on events still to come are later than this once moved back by the latency, so a cycle ending by then is whole.
+known_events AS (
+    SELECT MAX(TimeStamp) - INTERVAL (GREATEST({{latency_offset_seconds}}, 0) * 1000) MILLISECOND AS Known_Until
+    FROM {{from_table}}
+),
+{%- endif %}
+
+cycle_events AS (
+    -- Detector on events moved back by the latency, with the phase of each
+    SELECT TimeStamp - INTERVAL ({{latency_offset_seconds}} * 1000) MILLISECOND AS TimeStamp,
+        DeviceId,
+        EventId::INT16 AS EventId,
+        Phase::INT16 AS Phase
+    FROM {{from_table}}
+    NATURAL JOIN detector_config
+    WHERE EventId = 82 AND Function = 'Yellow_Red'
+
+    UNION ALL
+
+    -- Green begin, yellow begin and red clearance begin. The join leaves out phases with no yellow_red detector.
+    SELECT r.TimeStamp,
+        r.DeviceId,
+        r.EventId::INT16 AS EventId,
+        r.Parameter::INT16 AS Phase
+    FROM {{from_table}} r
+    JOIN (SELECT DISTINCT DeviceId, Phase
+          FROM detector_config
+          WHERE Function = 'Yellow_Red') c
+        ON r.DeviceId = c.DeviceId
+       AND c.Phase = r.Parameter
+    WHERE r.EventId IN (1, 8, 10)
+    {%- if unmatched %}
+
+    UNION ALL
+
+    SELECT TimeStamp,
+        DeviceId,
+        (CASE EventId WHEN 951 THEN 1 WHEN 952 THEN 8 WHEN 953 THEN 10 ELSE 82 END)::INT16 AS EventId,
+        Parameter::INT16 AS Phase
+    FROM unmatched_previous
+    WHERE EventId IN (951, 952, 953, 954)
+    {%- endif %}
+),
+
+numbered_events AS (
+    SELECT *,
+        COUNT(*) FILTER (WHERE EventId = 1) OVER (PARTITION BY DeviceId, Phase ORDER BY TimeStamp, EventId) AS Cycle_Number
+    FROM cycle_events
+),
+
+cycles AS (
+    SELECT DeviceId,
+        Phase,
+        Cycle_Number,
+        MIN(TimeStamp) FILTER (WHERE EventId = 1) AS Green_Begin,
+        MIN(TimeStamp) FILTER (WHERE EventId = 10) AS Red_Begin,
+        -- Events missing or doubled in a cycle throw the cycle out. Events before the first green have no cycle.
+        Cycle_Number > 0
+            AND COUNT(*) FILTER (WHERE EventId = 1) = 1
+            AND COUNT(*) FILTER (WHERE EventId = 8) = 1
+            AND COUNT(*) FILTER (WHERE EventId = 10) = 1 AS Is_Valid
+    FROM numbered_events
+    GROUP BY DeviceId, Phase, Cycle_Number
+){%- if carry_bins %},
+
+cycles_finished AS (
+    SELECT *,
+        COALESCE(LEAD(Green_Begin) OVER (PARTITION BY DeviceId, Phase ORDER BY Cycle_Number)
+                 <= (SELECT Known_Until FROM known_events), FALSE) AS Is_Finished
+    FROM cycles
+    WHERE Cycle_Number > 0
+),
+
+-- Each phase's results stop at the bin of its first red in a cycle still open, or where results stop anyway
+phase_limits AS (
+    SELECT DeviceId,
+        Phase,
+        LEAST((SELECT TimeStamp FROM results_end),
+              MIN(time_bucket(INTERVAL '{{bin_size}} minutes', Red_Begin)) FILTER (WHERE NOT Is_Finished)) AS Write_Until
+    FROM cycles_finished
+    GROUP BY DeviceId, Phase
+)
+{%- endif %}

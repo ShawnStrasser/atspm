@@ -4,6 +4,7 @@
 --Each detector on event on an advance detector is projected to the vehicle's arrival at the stop bar. The
 --arrival belongs to the bin it lands in, and is on green if the phase is green at that moment: from green
 --begin (1) until yellow begin (8) or red clearance begin (10). A bin with vehicles and none on green reads 0.
+--An actuation that begins while its detector holds the spillback flag is an arrival on red, see arrival_spillback.sql.
 
 
 WITH {% include 'arrival_phase_events.sql' %},
@@ -17,9 +18,9 @@ with_signal_state AS (
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
         ) AS Signal_State
     FROM (
-        SELECT TimeStamp, DeviceId, EventId, Phase FROM phase_events
+        SELECT TimeStamp, DeviceId, EventId, Phase, FALSE AS Spillback FROM phase_events
         UNION ALL
-        SELECT TimeStamp, DeviceId, 82::INT16 AS EventId, Phase FROM arrivals
+        SELECT TimeStamp, DeviceId, 82::INT16 AS EventId, Phase, Spillback FROM arrivals
     )
 ),
 
@@ -27,7 +28,7 @@ binned AS (
     SELECT time_bucket(INTERVAL '{{bin_size}} minutes', TimeStamp) AS Bin,
         DeviceId,
         Phase,
-        Signal_State = 1 AS On_Green
+        Signal_State = 1 AND NOT Spillback AS On_Green
     FROM with_signal_state
     WHERE EventId = 82
       AND TimeStamp < (SELECT TimeStamp FROM results_end)

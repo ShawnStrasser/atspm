@@ -27,9 +27,31 @@ DEFAULT_MAX_EVENT_GAP_SECONDS = {'05:00': 300, '06:00': 120, '21:00': 300, '23:0
 # Aggregations that read what arrival_on_green carries between runs (see arrival_on_green_carry.sql).
 ARRIVAL_CARRY_AGGREGATIONS = ('arrival_on_green', 'platoon_ratio')
 
+# An advance detector ON for more than this many seconds has a queue over it, and keeps the flag until it has been OFF
+# for the gap (see arrival_spillback.sql). spillback_on_seconds=None turns the flag off.
+DEFAULT_SPILLBACK_ON_SECONDS = 6
+DEFAULT_SPILLBACK_GAP_SECONDS = 5
+
 # Aggregations that count unique ped actuations, and the default time lapse before a new one is counted.
 PED_CARRY_AGGREGATIONS = ('unique_ped', 'full_ped')
 DEFAULT_SECONDS_BETWEEN_ACTUATIONS = 15
+
+# Aggregations that keep what they have not written yet in the main unmatched file, each with its own rows.
+OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS, 'yellow_red')
+
+
+def _spillback_params(params):
+    """arrival_on_green params with both spillback settings, checked. A copy, leaving the caller's dict alone."""
+    params = {**params}
+    params.setdefault('spillback_on_seconds', DEFAULT_SPILLBACK_ON_SECONDS)
+    params.setdefault('spillback_gap_seconds', DEFAULT_SPILLBACK_GAP_SECONDS)
+    for name in ('spillback_on_seconds', 'spillback_gap_seconds'):
+        value = params[name]
+        if value is None and name == 'spillback_on_seconds':
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+            raise ValueError(f"{name} must be a positive number of seconds" + (", or None to turn the flag off" if name == 'spillback_on_seconds' else ""))
+    return params
 
 
 def _event_gap_schedule(value):
@@ -357,7 +379,9 @@ class SignalDataProcessor:
         # Check the detector_health parameters now rather than after the other aggregations have run. A copy leaves
         # the caller's list and dicts untouched.
         self.aggregations = [
-            {**agg, 'params': detector_health_params(agg.get('params', {}))} if agg['name'] == 'detector_health' else agg
+            {**agg, 'params': detector_health_params(agg.get('params', {}))} if agg['name'] == 'detector_health'
+            else {**agg, 'params': _spillback_params(agg.get('params', {}))} if agg['name'] == 'arrival_on_green'
+            else agg
             for agg in self.aggregations
         ]
      
@@ -587,6 +611,21 @@ class SignalDataProcessor:
         )
         self._add_to_unmatched_events(carry)
 
+    def _save_yellow_red_carry(self):
+        """Saves the cycles yellow_red has not finished writing to unmatched_events.
+
+        See yellow_red_carry.sql.
+        """
+        params = next(agg for agg in self.aggregations if agg['name'] == 'yellow_red').get('params', {})
+        self._add_to_unmatched_events(render_query(
+            'yellow_red_carry',
+            **params,
+            bin_size=self.bin_size,
+            from_table='raw_data',
+            carry_bins=True,
+            unmatched=self._table_exists('unmatched_previous'),
+        ))
+
     def _save_complete_bins(self):
         """Saves the bins has_data passed from where results stopped onward, for a later run's remove_incomplete.
 
@@ -597,6 +636,7 @@ class SignalDataProcessor:
             bin_size=self.bin_size,
             carry_bins=True,
             unmatched=self._table_exists('unmatched_previous'),
+            yellow_red_carried=any(agg['name'] == 'yellow_red' for agg in self.aggregations),
         ))
 
     def _ped_carried(self, params):
@@ -739,13 +779,13 @@ class SignalDataProcessor:
                 # These are views that have the relateded unmatched events unioned to them
                 # coordination_agg and phase_wait also use unmatched events to store previous coordination state
                 # unique_ped and full_ped use them to store each input's last press and what they have not written yet
-                # arrival_on_green and platoon_ratio use them to store what they have not written yet
-                if self.incremental_run and aggregation['name'] in ['timeline', 'yellow_red', 'split_failures', 'coordination_agg', 'phase_wait', *ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS]:
+                # arrival_on_green and platoon_ratio use them to store what they have not written yet, and yellow_red its unfinished cycles
+                if self.incremental_run and aggregation['name'] in ['timeline', 'split_failures', 'coordination_agg', 'phase_wait', *OWN_CARRY_AGGREGATIONS]:
                     params['incremental_run'] = True #lets the aggregation know to save unmatched events for next run
                     # split_failures uses its own unmatched file (sf_unmatched), others use the main unmatched file
                     if aggregation['name'] == 'split_failures':
                         unmatched_available = self.sf_unmatched_found
-                    elif aggregation['name'] in (*ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS):
+                    elif aggregation['name'] in OWN_CARRY_AGGREGATIONS:
                         # These ran without the main unmatched file before, so must not assume it was given
                         unmatched_available = self.unmatched_found and 'df_or_path' in (self.unmatched_event_settings or {})
                     else:
@@ -754,15 +794,15 @@ class SignalDataProcessor:
                     if unmatched_available:
                         v_print(f"Incremental run using previous events for {aggregation['name']}", self.verbose, 2)
                         params['unmatched'] = True #lets the aggregation know to use the unmatched events from previous run
-                        # split_failures, coordination_agg, phase_wait, arrival_on_green, platoon_ratio, unique_ped and full_ped use their own logic
-                        if aggregation['name'] not in ['split_failures', 'coordination_agg', 'phase_wait', *ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS]:
+                        # split_failures, coordination_agg, phase_wait and the ones with their own rows use their own logic
+                        if aggregation['name'] not in ['split_failures', 'coordination_agg', 'phase_wait', *OWN_CARRY_AGGREGATIONS]:
                             params['from_table'] = 'raw_data_all'
                     else:
                         v_print(f"First Run For {aggregation['name']}", self.verbose, 2)
                         params['unmatched'] = False
-                
+
                 # Without a main unmatched file nothing can wait for a later run
-                if aggregation['name'] in (*ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS):
+                if aggregation['name'] in OWN_CARRY_AGGREGATIONS:
                     params['carry_bins'] = 'df_or_path' in (self.unmatched_event_settings or {})
 
                 if aggregation['name'] in PED_CARRY_AGGREGATIONS:
@@ -842,11 +882,13 @@ class SignalDataProcessor:
         # After the loop, because timeline creates unmatched_events wherever it falls in the list
         if 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql and any(agg['name'] == 'arrival_on_green' for agg in self.aggregations):
             self._save_arrival_carry()
+        if 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql and any(agg['name'] == 'yellow_red' for agg in self.aggregations):
+            self._save_yellow_red_carry()
         if self.incremental_run and not self.to_sql and ped_params is not None:
             self._save_last_ped_presses()
             self._save_ped_carry(ped_params)
         if self.remove_incomplete and 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql \
-                and any(agg['name'] in (*ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS) for agg in self.aggregations):
+                and any(agg['name'] in OWN_CARRY_AGGREGATIONS for agg in self.aggregations):
             self._save_complete_bins()
 
         # Print out runtimes

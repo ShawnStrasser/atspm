@@ -4,6 +4,9 @@ A cycle runs from one green begin to the next. Each actuation belongs to its cyc
 red begin. So a bin is not known until the last cycle with a red in it has finished, and its events wait for a later run
 in unmatched_events (synthetic EventIds 951 to 954).
 """
+import random
+
+import duckdb
 import pandas as pd
 import pytest
 from src.atspm import SignalDataProcessor
@@ -255,3 +258,52 @@ def test_remove_incomplete_keeps_a_bin_written_in_a_later_run():
     cut, _ = cut_runs(events, seconds(900, 1800), aggregations=aggregations, remove_incomplete=True)
     assert cut.Count.tolist() == [1.0]
     same_rows(big, cut)
+
+
+# ---- real events
+
+REAL_EVENTS = 'tests/yellow_red_events_test_data.parquet'  # Two signals, 6:00 to 15:00 on Oct 27 2026
+REAL_CONFIG = 'tests/yellow_red_config_test_data.parquet'
+REAL_YR = {'name': 'yellow_red', 'params': {'latency_offset_seconds': 1.5, 'min_red_offset': -8}}
+
+
+def real_events():
+    return duckdb.query(f"SELECT * FROM '{REAL_EVENTS}' ORDER BY TimeStamp").df()
+
+
+def real_config():
+    return duckdb.query(f"SELECT * FROM '{REAL_CONFIG}'").df()
+
+
+@pytest.mark.parametrize('seed', [1, 2, 3])
+def test_real_data_at_random_cuts_equals_one_big_run(seed):
+    events, detectors = real_events(), real_config()
+    big = process(events, detectors, [REAL_YR], carry='first')['yellow_red']
+    assert len(big) > 1000
+    span = (events.TimeStamp.max() - events.TimeStamp.min()).total_seconds()
+    rng = random.Random(seed)
+    cuts = [events.TimeStamp.min() + pd.Timedelta(seconds=round(rng.uniform(0, span), 1)) for _ in range(9)]
+    # None within a second of the end of a bin: such a run counts as having reached it
+    cut, _ = cut_runs(events, [c for c in cuts if (c.ceil('15min') - c).total_seconds() > 1], detectors, [REAL_YR])
+    same_rows(big, cut)
+
+
+@pytest.mark.parametrize('bin_size', [5, 15, 60])
+def test_real_data_in_three_hour_windows_equals_one_big_run(bin_size):
+    events, detectors = real_events(), real_config()
+    start = events.TimeStamp.min().floor('15min')
+    big = process(events, detectors, [REAL_YR], carry='first', bin_size=bin_size)['yellow_red']
+    cut, _ = cut_runs(events, [start + pd.Timedelta(hours=h) for h in (3, 6)], detectors, [REAL_YR], bin_size=bin_size)
+    same_rows(big, cut)
+
+
+def test_real_data_written_bins_equal_a_run_with_no_file():
+    """A run with no file writes every open cycle at the end as well. Every row it has is one the cut runs wrote or still hold."""
+    events, detectors = real_events(), real_config()
+    no_file = process(events, detectors, [REAL_YR])['yellow_red']
+    start = events.TimeStamp.min().floor('15min')
+    cut, _ = cut_runs(events, [start + pd.Timedelta(minutes=15 * i) for i in range(1, 36)], detectors, [REAL_YR])
+    last = cut.groupby(['DeviceId', 'Phase']).TimeStamp.max().rename('Last').reset_index()
+    both = no_file.merge(last, on=['DeviceId', 'Phase'])
+    same_rows(both[both.TimeStamp <= both.Last].drop(columns='Last'), cut)
+    assert (no_file.TimeStamp.max() - cut.TimeStamp.max()) <= pd.Timedelta(minutes=30)

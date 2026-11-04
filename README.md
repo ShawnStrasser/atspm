@@ -125,7 +125,9 @@ params = {
         {
             'name': 'arrival_on_green', 
             'params': {
-                'latency_offset_seconds': 0 # Taken off each arrival time for detectors with no LatencyCorrection
+                'latency_offset_seconds': 0, # Taken off each arrival time for detectors with no LatencyCorrection
+                'spillback_on_seconds': 6,   # A detector ON for more than this has a queue over it (default shown), None to turn this off
+                'spillback_gap_seconds': 5   # and its actuations count as on red until it has been OFF for this long (default shown)
             }
         },
         {
@@ -220,7 +222,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Actuations** (`actuations`): Detector actuations per detector and interval (with optional zero-filling of missing intervals).
 - **Arrival on Green** (`arrival_on_green`): Percentage of vehicles reaching the stop bar during green by phase, with each advance detector actuation projected to the stop bar. See [Arrival on Green](#arrival-on-green).
 - **Platoon Ratio** (`platoon_ratio`): HCM platoon ratio by phase and interval, `Rp = Percent_AOG / (g/C)`, with the green ratio estimated from phase green time within each bin and the HCM arrival type (1–6). Unlike arrival on green, it is comparable across phases with different splits. Requires `arrival_on_green`.
-- **Yellow and Red Actuations** (`yellow_red`): Distribution of detector actuations relative to the start of red, including red offset and signal state.
+- **Yellow and Red Actuations** (`yellow_red`): Distribution of detector actuations relative to the start of red, including red offset and signal state. A row belongs to the `bin_size` bin of its cycle's red begin. Incremental runs give the same rows as one big run: a bin is written once the last cycle with a red in it has finished, so with runs cut on the bin each one comes out a run later, and the events it waits for are kept in `unmatched_events` (synthetic `EventId` 951 to 954).
 - **Split Failures** (`split_failures`): Green and red occupancies by phase (and optionally detector/approach) and a count of cycles that meet split-failure thresholds; can be returned either per cycle or aggregated into time bins.
 - **Terminations** (`terminations`): Counts of GapOut, MaxOut, and ForceOff terminations by phase.
 - **Splits** (`splits`): MAXTIME-specific split events (cycle length/split services) aggregated by interval.
@@ -253,7 +255,11 @@ Distance, speed and latency come from three optional `detector_config` columns, 
 
 Each value is judged row by row: a row may have one and not the others, and whatever is blank, not a number, a negative distance or a speed of zero takes its default. A latency of 0 in the column is a real 0, and beats `latency_offset_seconds`. A config with only `DeviceId`, `Phase`, `Parameter` and `Function` keeps working and takes the defaults for every detector. Column names ignore case, spaces and underscores. With `to_sql=True` your own `detector_config` table needs all three columns, which may be NULL.
 
-**Incremental runs** give the same rows as one big run wherever the runs are cut, for both measures. A bin is written once, whole, by the first run whose data reaches the end of it, and that is a run whose last event, across all signals, is within a second of the end of the bin. A run that stops short of that leaves the bin it stopped in for the next run. Vehicles that arrive after results stop, the phase events from there on and the phases still green are kept in `unmatched_events` (synthetic `EventId` 938 to 941, and 942 with `remove_incomplete`), so `unmatched_event_settings` with `df_or_path` is all that is needed, with or without `timeline`. With runs cut on the bin and enough signals to fill the last second, every bin is written by the run that reaches it. With a few quiet signals the last event can be short of the end of the bin, and that bin is written one run later, with the same values. A run with no unmatched settings has nothing after it, so it writes all it has, up to its last event. Arrivals past that are not counted.
+**Queues over the detector.** UDOT's method has no step for a queue that reaches the advance detector. Vehicles stop on it while the phase is red. When the phase turns green the queue moves, and its vehicles begin actuating the detector on green, so they read as arriving on green although they all arrived on red. So an advance detector that stays ON for more than `spillback_on_seconds` (default 6) gets a flag, and every actuation that begins while it holds the flag counts as an arrival on red, whatever the phase shows. `Total_Actuations` does not change, and `platoon_ratio` follows through `Percent_AOG`.
+
+The flag goes only when the detector has been OFF for `spillback_gap_seconds` (default 5), measured from off to the next on, not when traffic starts moving, because the queue clears at about one vehicle every 2 seconds. Each detector has its own flag. The flag begins when the detector has been ON long enough, so the actuation that trips it keeps its own reading. A detector with no off events never gets the flag. `spillback_on_seconds=None` turns all of this off and gives UDOT's method alone. The two defaults come from three days of real events on 846 signals, with no ground truth to tune against: more than 6 seconds on is a car at walking pace or stopped, and 5 seconds of empty lane is well past the gap between vehicles in a queue that is clearing.
+
+**Incremental runs** give the same rows as one big run wherever the runs are cut, for both measures. A bin is written once, whole, by the first run whose data reaches the end of it, and that is a run whose last event, across all signals, is within a second of the end of the bin. A run that stops short of that leaves the bin it stopped in for the next run. Vehicles that arrive after results stop, the phase events from there on, the phases still green, the detectors holding the flag and the detectors still on are kept in `unmatched_events` (synthetic `EventId` 938 to 941 and 948 to 950, and 942 with `remove_incomplete`), so `unmatched_event_settings` with `df_or_path` is all that is needed, with or without `timeline`. With runs cut on the bin and enough signals to fill the last second, every bin is written by the run that reaches it. With a few quiet signals the last event can be short of the end of the bin, and that bin is written one run later, with the same values. A run with no unmatched settings has nothing after it, so it writes all it has, up to its last event. Arrivals past that are not counted.
 
 Two limits: a run that really stops inside the last second of a bin is taken as having reached the end of it, and a latency larger than the travel time can move an arrival back into a bin already written.
 
@@ -644,7 +650,7 @@ Only with `'active'` in `outputs`, and off by default until reviewed. The faults
 *   `EventId` (INT16): Event ID.
 *   `Parameter` (INT16): Parameter value.
 
-Rows with `EventId` 931 to 947 are state carried between runs, not controller events. Each number has one meaning:
+Rows with `EventId` 931 to 954 are state carried between runs, not controller events. Each number has one meaning:
 
 | `EventId` | Written by | Holds | `Parameter` |
 | --- | --- | --- | --- |
@@ -653,10 +659,15 @@ Rows with `EventId` 931 to 947 are state carried between runs, not controller ev
 | 937 | `unique_ped`, `full_ped` | Each input's last press, one row per input | Input |
 | 938 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped, at its projected time | Phase |
 | 939, 940, 941 | `arrival_on_green`, `platoon_ratio` | Green, yellow and red clearance begins not written yet. 939 also marks a phase green when results stopped | Phase |
-| 942 | Any of these four with `remove_incomplete` | A bin not written yet that passed `has_data` | 0 |
+| 942 | `arrival_on_green`, `platoon_ratio`, `unique_ped`, `full_ped` or `yellow_red` with `remove_incomplete` | A bin not written yet that passed `has_data` | 0 |
 | 943 | `unique_ped`, `full_ped` | One unique actuation, stamped with its bin, in a bin not written yet or the last 3 written | Input |
 | 944, 945 | `unique_ped`, `full_ped` | Each input's next bin to write, and its last activity | Input |
 | 946, 947 | `unique_ped`, `full_ped` | One press, or one ped service, stamped with its bin, in a bin not written yet | Input |
+| 948 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped that began while its detector held the spillback flag | Phase |
+| 949 | `arrival_on_green`, `platoon_ratio` | A detector holding the spillback flag, stamped when it last turned off, or when it turned on if it is on | Detector |
+| 950 | `arrival_on_green`, `platoon_ratio` | A detector on at the end of the data, stamped when it turned on | Detector |
+| 951, 952, 953 | `yellow_red` | Green, yellow and red clearance begins of a cycle not finished writing | Phase |
+| 954 | `yellow_red` | An actuation of a cycle not finished writing, already moved back by the latency | Phase |
 
 ## Release Notes
 
