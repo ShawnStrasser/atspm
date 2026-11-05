@@ -318,9 +318,8 @@ def test_no_unmatched_settings_saves_nothing():
     assert 'unmatched_events' not in process(presses(0), [aggregation()])
 
 
-def test_known_detectors_alone_adds_no_unmatched_events():
-    """known_detectors also makes a run incremental. Without timeline there was never an unmatched_events output."""
-    aggs = [aggregation(), {'name': 'actuations', 'params': {'known_detectors_df_or_path': None}}]
+def test_fill_in_missing_with_no_state_adds_no_unmatched_events():
+    aggs = [aggregation(), {'name': 'actuations', 'params': {'fill_in_missing': True}}]
     out = process(presses(0, 100), aggs)
     assert 'unmatched_events' not in out
     assert unique_total([out['ped']]) == 2
@@ -337,7 +336,7 @@ def test_known_detectors_with_timeline_still_carries():
     out1 = process(presses(895), aggs, settings={'df_or_path': None, 'max_days_old': 2})
     assert len(carried(out1['unmatched_events'])) == 1
     out2 = process(presses(905), aggs, carry=out1['unmatched_events'])
-    assert unique_total([out2['ped']]) == 0
+    assert unique_total([out1['ped'], out2['ped']]) == 1
 
 
 def test_split_failure_file_alone_works(tmp_path):
