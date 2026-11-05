@@ -801,6 +801,10 @@ class SignalDataProcessor:
                         v_print(f"First Run For {aggregation['name']}", self.verbose, 2)
                         params['unmatched'] = False
 
+                # A bin of split_failures waits for the run that reaches its end
+                if aggregation['name'] == 'split_failures':
+                    params['carry_bins'] = True
+
                 # Without a main unmatched file nothing can wait for a later run
                 if aggregation['name'] in OWN_CARRY_AGGREGATIONS:
                     params['carry_bins'] = 'df_or_path' in (self.unmatched_event_settings or {})

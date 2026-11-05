@@ -223,7 +223,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Arrival on Green** (`arrival_on_green`): Percentage of vehicles reaching the stop bar during green by phase, with each advance detector actuation projected to the stop bar. See [Arrival on Green](#arrival-on-green).
 - **Platoon Ratio** (`platoon_ratio`): HCM platoon ratio by phase and interval, `Rp = Percent_AOG / (g/C)`, with the green ratio estimated from phase green time within each bin and the HCM arrival type (1–6). Unlike arrival on green, it is comparable across phases with different splits. Requires `arrival_on_green`.
 - **Yellow and Red Actuations** (`yellow_red`): Distribution of detector actuations relative to the start of red, including red offset and signal state. A row belongs to the `bin_size` bin of its cycle's red begin. Incremental runs give the same rows as one big run: a bin is written once the last cycle with a red in it has finished, so with runs cut on the bin each one comes out a run later, and the events it waits for are kept in `unmatched_events` (synthetic `EventId` 951 to 954).
-- **Split Failures** (`split_failures`): Green and red occupancies by phase (and optionally detector/approach) and a count of cycles that meet split-failure thresholds; can be returned either per cycle or aggregated into time bins.
+- **Split Failures** (`split_failures`): Green and red occupancies by phase (and optionally detector/approach) and a count of cycles that meet split-failure thresholds; can be returned either per cycle or aggregated into time bins. Incremental runs give the same rows as one big run: a bin is written once, whole, by the first run that reaches the end of it, by the same rule as [Arrival on Green](#arrival-on-green), and `sf_unmatched` holds the events a later run needs. The exception is a lost event at a cut: a detector off lost over a cut, whose fill-in lands in a bin already written, and a green lost just after a cut, so the cycle before it was written as finished.
 - **Terminations** (`terminations`): Counts of GapOut, MaxOut, and ForceOff terminations by phase.
 - **Splits** (`splits`): MAXTIME-specific split events (cycle length/split services) aggregated by interval.
 - **Coordination** (`coordination`): Raw events for Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME). Includes both `Raw_TimeStamp` and binned `TimeStamp`.
@@ -614,6 +614,7 @@ Only with `'findings': True`, for looking into a detector. The findings of the r
 
 #### sf_unmatched
 (Split Failures Unmatched)
+The events a later run works out `split_failures` from: each detector's last event, and the events of a phase's unfinished cycle from its green on, with `Detector` 0 on the phase events.
 *   `TimeStamp` (DATETIME): Timestamp of the event.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `EventId` (INT16): Event ID.

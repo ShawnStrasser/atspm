@@ -1,22 +1,61 @@
 --Aggregate split failures
 --Written in SQL for DuckDB. This is a jinja2 template, with variables inside curly braces.
+--
+--A later run works everything out again from the events an earlier run saved (sf_unmatched), which are the same events
+--it had itself, so it reaches the same answer as one big run:
+--    each detector's last event, for whether it is on when the next run starts
+--    the detector and phase events of a phase's unfinished cycle, from its green on, with the phase events as Detector 0
+{% set detector_events %}
+    -- detector_with_phase
+    -- Join Phase Number to each Detector Event
+    -- Rename parameter as Detector to avoid cofusion
+    SELECT r.TimeStamp,
+        r.DeviceId,
+        r.EventId,
+        r.Parameter as Detector,
+        CAST(c.Phase AS UTINYINT) AS Phase
+    FROM {{from_table}} r
+    JOIN detector_config c ON
+        r.DeviceId = c.DeviceId
+        AND r.Parameter = c.Parameter
+    WHERE
+        r.EventId IN(81,82)
+        and c.Function = 'Presence'
+    {%- if unmatched %}
+    UNION ALL
+    SELECT TimeStamp, DeviceId, EventId, Detector, CAST(Phase AS UTINYINT) AS Phase
+    FROM sf_unmatched_previous
+    WHERE EventId IN (81,82) AND Detector <> 0 --a file saved by atspm 2 has the combined state as Detector 0
+    {%- endif %}
+{% endset %}
+{% set phase_events %}
+    SELECT r.TimeStamp as TimeStamp,
+        r.DeviceId as DeviceId,
+        r.EventId as EventId,
+        0 as Detector,
+        r.Parameter AS Phase
+    FROM {{from_table}} r
+    -- Join is for efficiency, to filter out phases that are not in the detector_config table
+    JOIN (SELECT
+            DISTINCT DeviceId, Phase
+            FROM detector_config
+            WHERE Function = 'Presence'
+            ) c
+    ON r.DeviceId = c.DeviceId
+       AND c.Phase = r.Parameter
+    WHERE r.EventId IN (1,8,10)
+    {%- if unmatched %}
+    UNION ALL
+    SELECT TimeStamp, DeviceId, EventId, 0 as Detector, Phase
+    FROM sf_unmatched_previous
+    WHERE EventId IN (1,8,10) AND Detector = 0 --a file saved by atspm 2 has a copy per detector here when by lane
+    {%- endif %}
+{% endset %}
 CREATE TABLE sf_intermediate AS
-WITH step1 as (
--- detector_with_phase
--- Join Phase Number to each Detector Event
--- Rename parameter as Detector to avoid cofusion
-SELECT r.TimeStamp,
-    r.DeviceId, 
-    r.EventId, 
-    r.Parameter as Detector, 
-    CAST(c.Phase AS UTINYINT) AS Phase
-FROM {{from_table}} r
-JOIN detector_config c ON 
-    r.DeviceId = c.DeviceId 
-    AND r.Parameter = c.Parameter
-WHERE 
-    r.EventId IN(81,82)
-    and c.Function = 'Presence'
+WITH {% if incremental_run %}{% include 'results_end.sql' %},
+
+{% endif %}step1 as (
+{{detector_events}}
 ),
 
 
@@ -29,6 +68,7 @@ Sometimes detector on events (82) occur in rapic succession without an off event
     add an OFF event with timestamp matching the next ON event.
 If for two-in-a-row ON events more than 2000 milliseconds apart, an OFF event is added half-way between them
 For two-in-a-row OFF events, an ON event is added half-way between them regardless of the gap size
+
 */
 WITH lagged as (
         -- Off sorts before on in the same tenth, as in with_cycle below. The sort is per phase too: a detector on two
@@ -46,7 +86,7 @@ WITH lagged as (
             and PrevEventId = 82
     ),
     interpolate_OFFs as (
-        SELECT
+                SELECT
             "TimeStamp" - INTERVAL (PrevDiff / 2) MILLISECOND as TimeStamp,
             DeviceId,
             81 as EventId,
@@ -58,7 +98,7 @@ WITH lagged as (
             and PrevEventId = 82
     ),
     interpolate_ONs AS (
-        SELECT "TimeStamp" - INTERVAL (PrevDiff / 2) MILLISECOND as TimeStamp,
+                SELECT "TimeStamp" - INTERVAL (PrevDiff / 2) MILLISECOND as TimeStamp,
             DeviceId,
             82 AS EventId,
             Detector,
@@ -135,22 +175,8 @@ step3 AS (
 
     -- phase_with_detector_ByApproach
     -- Combined phase and detector data without duplicating phase data (no need since detector/phases are combined already)
-    phase AS (
-        SELECT r.TimeStamp as TimeStamp, 
-            r.DeviceId as DeviceId,
-            r.EventId as EventId,
-            0 as Detector,
-            r.Parameter AS Phase 
-        FROM {{from_table}} r
-        -- Join is for efficiency, to filter out phases that are not in the detector_config table
-        JOIN (SELECT
-                DISTINCT DeviceId, Phase
-                FROM detector_config
-                WHERE Function = 'Presence'
-                ) c 
-        ON r.DeviceId = c.DeviceId 
-           AND c.Phase = r.Parameter
-        WHERE r.EventId IN (1,8,10)
+        phase AS (
+        {{phase_events}}
     )
     SELECT * FROM phase
     UNION ALL
@@ -172,22 +198,8 @@ step3 AS (
             Detector,
             Phase FROM step2
     ),
-    phase AS (
-        SELECT r.TimeStamp as TimeStamp, 
-            r.DeviceId as DeviceId,
-            r.EventId as EventId,
-            0 as Detector,
-            r.Parameter AS Phase 
-        FROM {{from_table}} r
-        -- Join is for efficiency, to filter out phases that are not in the detector_config table
-        JOIN (SELECT
-                DISTINCT DeviceId, Phase
-                FROM detector_config
-                WHERE Function = 'Presence'
-                ) c 
-        ON r.DeviceId = c.DeviceId 
-           AND c.Phase = r.Parameter
-        WHERE r.EventId IN (1,8,10)
+        phase AS (
+        {{phase_events}}
     ), 
     duplicated_phase AS (
         SELECT TimeStamp, 
@@ -210,14 +222,7 @@ step3 AS (
 {% endif %}
 
 
---Union previous unmatched data with current data
-{% if unmatched %}
-step3b AS (
-    SELECT * FROM step3
-    UNION ALL
-    SELECT * FROM sf_unmatched_previous
-),
-{% endif %}
+
 
 step4 AS (
     -- with_barrier
@@ -229,20 +234,25 @@ step4 AS (
             11 as EventId,
             Detector,
             Phase
-        FROM 
-            {% if unmatched %} step3b {% else %} step3 {% endif %}
-        WHERE 
+        FROM
+            step3
+        WHERE
             EventId = 10
             --and ensure that the timestamp plus red_time is less than the max timestamp
             and "TimeStamp" + INTERVAL '{{red_time}}' SECOND < (
                 --This is to ensure the red barrier will not be added past the cutoff time for data being processed
+                {%- if incremental_run %}
+                --A cycle finished in a bin this run has not reached the end of waits for the next run, as in results_end.sql
+                SELECT TimeStamp FROM results_end
+                {%- else %}
                 --The max timestamp gets rounded down to the nearest bin_size interval and then that interval is added to it to get the max time to get the cutoff time
                 SELECT TIME_BUCKET(interval '{{bin_size}} minutes', MaxTime) + INTERVAL '{{bin_size}} minutes' as MaxTime
                 FROM
                     (SELECT MAX(TimeStamp) MaxTime FROM {{from_table}}) q
+                {%- endif %}
                 )
     )
-    SELECT * FROM {% if unmatched %} step3b {% else %} step3 {% endif %}
+    SELECT * FROM step3
     UNION ALL
     SELECT * FROM red_time_barrier  
 ),
@@ -284,43 +294,41 @@ SELECT * FROM step5 --step5
 --Now to save data from incomplete cycles for the next run
 {% if incremental_run %}
 CREATE TABLE sf_unmatched AS
-WITH max_cycle AS (
-    SELECT DeviceId, Detector, Phase, MAX(Cycle_Number) Cycle_Number
+WITH {% include 'results_end.sql' %},
+
+cycles AS (
+    SELECT DeviceId, Phase, MIN(TimeStamp) AS Green,
+        COUNT(*) FILTER (WHERE EventId = 11) AS Barriers,
+        COUNT(*) FILTER (WHERE EventId = 10 AND TimeStamp + INTERVAL '{{red_time}}' SECOND >= (SELECT TimeStamp FROM results_end)) AS Reds_Waiting,
+        Cycle_Number = MAX(Cycle_Number) OVER (PARTITION BY DeviceId, Detector, Phase) AS Is_Last
     FROM sf_intermediate
-    GROUP BY ALL
-),
-incomplete_cycles as (
-    SELECT DeviceId, Detector, Phase, Cycle_Number
-    FROM sf_intermediate
-    NATURAL JOIN max_cycle
     WHERE Cycle_Number > 0 --0 cycle means it didn't start with a green event
-    GROUP BY ALL
-    HAVING 
-        COUNT(CASE WHEN EventId = 1 THEN EventId END) = 1 --ensure cycle started on green
-        and COUNT(CASE WHEN EventId = 11 THEN EventId END) = 0 --ensure cycle is not complete (no red barrier yet)
+    GROUP BY DeviceId, Detector, Phase, Cycle_Number
 ),
-detector_states as (
-    SELECT TimeStamp, DeviceId, Detector, Phase, Cycle_Number, Detector_State,
-        -- First and last by the same sort as with_cycle, so the state saved is the one it worked out at that point
-        ROW_NUMBER() OVER (PARTITION BY DeviceId, Detector, Phase, Cycle_Number ORDER BY TimeStamp, EventId) as row_num,
-        ROW_NUMBER() OVER (PARTITION BY DeviceId, Detector, Phase, Cycle_Number ORDER BY TimeStamp DESC, EventId DESC) as row_num_desc
-    FROM sf_intermediate
-    NATURAL JOIN max_cycle
+unfinished AS (
+    SELECT DeviceId, Phase, MIN(Green) AS Green
+    FROM cycles
+    WHERE Barriers = 0 AND (Is_Last OR Reds_Waiting > 0) --no red barrier yet, and one may still come
+    GROUP BY DeviceId, Phase
 ),
-final_detector_states as (
-    SELECT 
-        TimeStamp - INTERVAL 1 MILLISECOND as TimeStamp,--subtract a millisec to have it be before the phase event
-        DeviceId,
-        CASE WHEN Detector_State THEN 82 ELSE 81 END as EventId,
-        Detector, Phase
-    FROM detector_states
-    WHERE row_num = 1 OR row_num_desc = 1
+detector_rows AS (
+    {{detector_events}}
+),
+phase_rows AS (
+    {{phase_events}}
 )
-SELECT TimeStamp, DeviceId, EventId, Detector, Phase--, Cycle_Number, Signal_State, Detector_State
-FROM sf_intermediate
-NATURAL JOIN incomplete_cycles
+SELECT d.TimeStamp, d.DeviceId, d.EventId, d.Detector, d.Phase
+FROM detector_rows d
+LEFT JOIN unfinished u ON d.DeviceId = u.DeviceId AND d.Phase = u.Phase
+-- Green sorts before the detector events of the same tenth, so those belong to the cycle
+QUALIFY d.TimeStamp >= u.Green
+    OR ROW_NUMBER() OVER (PARTITION BY d.DeviceId, d.Detector, d.Phase, COALESCE(d.TimeStamp >= u.Green, FALSE)
+                          ORDER BY d.TimeStamp DESC, d.EventId DESC) = 1
 UNION ALL
-SELECT * FROM final_detector_states
+SELECT p.TimeStamp, p.DeviceId, p.EventId, p.Detector, p.Phase
+FROM phase_rows p
+JOIN unfinished u ON p.DeviceId = u.DeviceId AND p.Phase = u.Phase
+WHERE p.TimeStamp >= u.Green
 ;
 {% endif %}
 
@@ -345,15 +353,15 @@ WITH step6 AS (
 valid_cycles AS (
     -- Generate VALID CYCLES to remove cycles with missing data for current run, and save incomplete cycle data for next run
     -- Remove cycles with missing data, and Sum the detector on/off time over each phase state
-    SELECT DeviceId,
+        SELECT DeviceId,
         Detector,
-        Phase, 
-        Cycle_Number
+        Phase,
+                Cycle_Number
     FROM step6
     WHERE Cycle_Number > 0 --0 cycle means it didn't start with a green event
     GROUP BY DeviceId, Detector, Phase, Cycle_Number
-    HAVING 
-        COUNT(CASE WHEN EventId = 8 THEN EventId END) = 1 --ensure 1 yellow change event in cycle
+    HAVING
+                COUNT(CASE WHEN EventId = 8 THEN EventId END) = 1 --ensure 1 yellow change event in cycle
         and COUNT(CASE WHEN EventId = 11 THEN EventId END) = 1 --ensure 1 red barrier
         --(cycles are deliniated by begin green, so they already are guaranteed to only have 1 green event)
         and COUNT(CASE WHEN Detector_State IS NULL THEN 1 END) = 0 --ensure no missing detector states
@@ -372,7 +380,7 @@ step7 AS (
         CAST(SUM(TimeDiff) AS INT) AS TotalTimeDiff
     FROM step6
     NATURAL JOIN valid_cycles
-    WHERE Signal_State IN (1,10) OR EventId=11 --only green and red states are used for split failures, but also keep the red barrier to set max timestamp consistently
+        WHERE (Signal_State IN (1,10) OR EventId=11) --only green and red states are used for split failures, but also keep the red barrier to set max timestamp consistently
     GROUP BY ALL --DeviceId, Detector, Phase, Cycle_Number, Signal_State, Detector_State  
 ),
 

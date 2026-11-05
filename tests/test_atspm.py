@@ -86,6 +86,15 @@ def round_specific_columns(df, columns_to_round, tenths=2):
           df[col] = (df[col] / (0.1 * tenths)).round() * (0.1 * tenths)
   return df
 
+def compare_split_failures_across_runs(combined, expected):
+  """Exact, but for two rows that a run cannot know: a detector whose off was lost over a cut, and a green lost after one.
+  They wait for a ruling on tests/precalculated/split_failures.parquet."""
+  waiting = [('2024-05-13 15:30:00', 452, 4), ('2024-05-13 16:30:00', 454, 8)]
+  def without(df):
+    keys = list(zip(df.TimeStamp.astype(str).str.slice(0, 19), df.DeviceId, df.Phase))
+    return df[[k not in waiting for k in keys]].reset_index(drop=True)
+  compare_dataframes(without(combined), without(expected))
+
 def compare_dataframes_with_tolerance(df1, df2, tolerance):
   """
   Compare two dataframes, ignoring row order, applying rounding to specific columns,
@@ -223,9 +232,8 @@ def test_incremental_aggregation(incremental_processor_output, aggregation):
   
   precalc_df = pd.read_parquet(precalc_file)
 
-  # due to how split_failures imputes missing actuations there are some differences in incremental runs
   if agg_name == 'split_failures':
-    compare_dataframes_with_tolerance(combined_df, precalc_df, tolerance=0.04)
+    compare_split_failures_across_runs(combined_df, precalc_df)
   # timeline has known edge cases where invalid signal state events span chunk boundaries
   # Phase Wait events processed before the invalid state is known may have IsValid differences
   elif agg_name == 'timeline':
@@ -375,9 +383,8 @@ def test_incremental_aggregation_with_dataframes(incremental_processor_output_wi
   combined_df = pd.concat(incremental_results).drop_duplicates().reset_index(drop=True)
   precalc_df = pd.read_parquet(precalc_file)
 
-  # due to how split_failures imputes missing actuations there are some differences in incremental runs
   if agg_name == 'split_failures':
-    compare_dataframes_with_tolerance(combined_df, precalc_df, tolerance=0.04)
+    compare_split_failures_across_runs(combined_df, precalc_df)
   # timeline has known edge cases where invalid signal state events span chunk boundaries
   # Phase Wait events processed before the invalid state is known may have IsValid differences
   elif agg_name == 'timeline':
