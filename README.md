@@ -101,7 +101,8 @@ params = {
     'unmatched_event_settings': {
         'df_or_path': 'unmatched.csv',           # Track unmatched timeline events
         'split_fail_df_or_path': 'sf_unmatched.csv', # Track unmatched split failures
-        'max_days_old': 7                        # Max age for tracking unmatched events
+        'max_days_old': 7,                       # Max age for tracking unmatched events
+        'first_run': True                        # First run only: these files are not there yet. Without it a missing file raises
     },
 
     # --- Performance Measures (Aggregations) ---

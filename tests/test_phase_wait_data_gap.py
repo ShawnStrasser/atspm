@@ -461,7 +461,7 @@ from src.atspm import SignalDataProcessor
 raw, config, state, out = sys.argv[1:]
 SignalDataProcessor(raw_data=raw, detector_config=config, bin_size=15, verbose=0, controller_type="maxtime",
     output_dir=out, output_format="parquet", output_to_separate_folders=False,
-    unmatched_event_settings={"df_or_path": state, "max_days_old": 14},
+    unmatched_event_settings={"df_or_path": state, "max_days_old": 14, "first_run": True},
     aggregations=[
         {"name": "has_data", "params": {"no_data_min": 15, "min_data_points": 1}},
         {"name": "timeline", "params": {"maxtime": True, "min_duration": 0.1, "cushion_time": 60}},

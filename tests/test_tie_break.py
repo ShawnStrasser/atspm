@@ -106,7 +106,7 @@ def test_saved_events_are_taken_by_the_same_sort(order, tmp_path):
     # the off is part of the cycle, whichever order the rows came in.
     config = pd.DataFrame({'DeviceId': ['A'], 'Phase': [2], 'Parameter': [5], 'Function': ['Presence']})
     rows = [(0, 82, 5), (10, 1, 2), (10, 81, 5)]
-    settings = {'df_or_path': str(tmp_path / 'none.parquet'), 'split_fail_df_or_path': str(tmp_path / 'none_sf.parquet'), 'max_days_old': 14}
+    settings = {'df_or_path': str(tmp_path / 'none.parquet'), 'split_fail_df_or_path': str(tmp_path / 'none_sf.parquet'), 'max_days_old': 14, 'first_run': True}
     df = run(rows, order, [SPLIT_FAILURES], 'sf_unmatched', config=config, unmatched_event_settings=settings)
     saved = df.sort_values(['TimeStamp', 'EventId'])
     assert saved.EventId.tolist() == [82, 1, 81]

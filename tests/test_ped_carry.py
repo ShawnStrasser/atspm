@@ -258,7 +258,7 @@ def test_carry_saved_to_a_file_without_timeline(tmp_path):
         SignalDataProcessor(
             raw_data=events, bin_size=15, verbose=0, output_dir=str(tmp_path), output_to_separate_folders=False,
             output_format='parquet', output_file_prefix=f'{i}_',
-            unmatched_event_settings={'df_or_path': path, 'max_days_old': 14},
+            unmatched_event_settings={'df_or_path': path, 'max_days_old': 14, 'first_run': True},
             aggregations=[aggregation()],
         ).run()
         counts.append(int(pd.read_parquet(tmp_path / f'{i}_ped.parquet')['Unique_Actuations'].sum()))
@@ -298,7 +298,7 @@ def test_old_carry_file_loads_and_counts_first_press(tmp_path, volumes, has_isva
         old = old.drop(columns='IsValid')
     path = tmp_path / 'old.parquet'
     old.to_parquet(path)
-    out = process(reach_bin_end(presses(0, 5, 40)), [aggregation(volumes)], settings={'df_or_path': str(path), 'max_days_old': 14})
+    out = process(reach_bin_end(presses(0, 5, 40)), [aggregation(volumes)], settings={'df_or_path': str(path), 'max_days_old': 14, 'first_run': True})
     assert unique_total([out['ped']]) == 2
     assert len(carried(out['unmatched_events'])) == 1
 
@@ -336,7 +336,7 @@ def test_known_detectors_with_timeline_still_carries():
 
 def test_split_failure_file_alone_works(tmp_path):
     """A main unmatched file was not asked for, so there is nothing to read the last press from."""
-    settings = {'split_fail_df_or_path': str(tmp_path / 'sf.parquet'), 'max_days_old': 14}
+    settings = {'split_fail_df_or_path': str(tmp_path / 'sf.parquet'), 'max_days_old': 14, 'first_run': True}
     out = process(presses(0, 100), [aggregation()], settings=settings)
     assert unique_total([out['ped']]) == 2
     assert 'unmatched_events' not in out

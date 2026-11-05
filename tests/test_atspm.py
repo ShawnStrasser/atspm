@@ -215,6 +215,7 @@ def incremental_processor_output():
           'output_dir': f'{output_dir}',
           'output_file_prefix': f"{i}_",
           'unmatched_event_settings': {
+            'first_run': True,
             'df_or_path': f"{output_dir}/unmatched.parquet", # for timeline, arrival_on_green & yellow_red
             'split_fail_df_or_path': f"{output_dir}/sf_unmatched.parquet", # just for split_failures
             'max_days_old': 14}, # remove unmatched events older than 14 days
@@ -596,6 +597,7 @@ def phase_wait_incremental_output():
       'output_format': 'parquet',
       'output_to_separate_folders': False,
       'unmatched_event_settings': {
+        'first_run': True,
         'df_or_path': f"{output_dir}/unmatched.parquet",
         'max_days_old': 14
       },

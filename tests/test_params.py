@@ -91,3 +91,62 @@ def test_has_data_can_be_listed_last_with_remove_incomplete():
     listed = [{'name': 'actuations', 'params': {}}, HAS_DATA]
     assert run(raw, listed, tables=['actuations'], remove_incomplete=True)['actuations'].Total.sum() == 10
     assert run(raw, listed[::-1], tables=['actuations'], remove_incomplete=True)['actuations'].Total.sum() == 10
+
+
+STATE_SETTINGS = {'max_days_old': 2}
+RAW = events([(1000, 'A', 1, 2), (1030, 'A', 7, 2)])
+
+
+@pytest.mark.parametrize('settings', [
+    {'df_or_path': 'no_such_folder/state.parquet'},
+    {'split_fail_df_or_path': 'no_such_folder/sf.parquet'},
+    {'df_or_path': 'az://container/state.parquet'},
+])
+def test_missing_state_file_raises(settings):
+    with pytest.raises(FileNotFoundError, match='does not exist'):
+        SignalDataProcessor(raw_data=RAW, bin_size=15, verbose=0, aggregations=[HAS_DATA, TIMELINE],
+                            unmatched_event_settings={**settings, **STATE_SETTINGS})
+
+
+def test_missing_known_detectors_file_raises():
+    with pytest.raises(FileNotFoundError, match='known_detectors_df_or_path'):
+        SignalDataProcessor(raw_data=RAW, bin_size=15, verbose=0, aggregations=[
+            {'name': 'actuations', 'params': {'fill_in_missing': True, 'known_detectors_df_or_path': 'no_such_folder/known.parquet'}}])
+
+
+@pytest.mark.parametrize('first', ['', None])
+def test_blank_state_says_first_run(first, capsys):
+    with SignalDataProcessor(raw_data=RAW, detector_config=EMPTY_CONFIG, bin_size=15, verbose=1, aggregations=[HAS_DATA, TIMELINE],
+                             unmatched_event_settings={'df_or_path': first, **STATE_SETTINGS}) as p:
+        p.load()
+        p.aggregate()
+        assert p.conn.sql('SELECT count(*) FROM unmatched_events').fetchall()[0][0] > 0
+    assert 'First run' in capsys.readouterr().out
+
+
+def test_first_run_setting_lets_a_file_be_written(tmp_path):
+    path, out = str(tmp_path / 'state.parquet'), str(tmp_path / 'out')
+    kwargs = dict(detector_config=EMPTY_CONFIG, bin_size=15, verbose=0, aggregations=[HAS_DATA, TIMELINE], output_dir=out, output_format='parquet',
+                  output_to_separate_folders=False)
+    SignalDataProcessor(raw_data=RAW, unmatched_event_settings={'df_or_path': path, 'first_run': True, **STATE_SETTINGS}, **kwargs).run()
+    assert os.path.exists(path)
+    # The file is read from then on, whether or not the setting is still there
+    later = events([(2000, 'A', 1, 2), (2030, 'A', 7, 2)])
+    SignalDataProcessor(raw_data=later, unmatched_event_settings={'df_or_path': path, **STATE_SETTINGS}, **kwargs).run()
+    assert os.path.exists(path)
+
+
+def test_empty_frame_of_state_is_read_as_state():
+    empty = pd.DataFrame(columns=['TimeStamp', 'DeviceId', 'EventId', 'Parameter', 'IsValid'])
+    out = run(RAW, [HAS_DATA, TIMELINE], tables=['unmatched_events'], unmatched_event_settings={'df_or_path': empty, **STATE_SETTINGS})
+    assert len(out['unmatched_events'])
+
+
+def test_split_failure_state_loads_when_the_main_state_is_a_first_run(tmp_path):
+    sf = tmp_path / 'sf.parquet'
+    pd.DataFrame({'TimeStamp': [T0], 'DeviceId': ['A'], 'EventId': [82], 'Detector': [5], 'Phase': [2]}).to_parquet(sf)
+    config = pd.DataFrame({'DeviceId': ['A'], 'Phase': [2], 'Parameter': [5], 'Function': ['Presence']})
+    sf_params = {'red_time': 5, 'red_occupancy_threshold': 0.8, 'green_occupancy_threshold': 0.8, 'by_approach': True, 'by_cycle': False}
+    out = run(RAW, [{'name': 'split_failures', 'params': sf_params}], tables=['sf_unmatched'], config=config,
+              unmatched_event_settings={'df_or_path': None, 'split_fail_df_or_path': str(sf), **STATE_SETTINGS})
+    assert (out['sf_unmatched'].EventId == 82).any()

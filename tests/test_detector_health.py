@@ -201,7 +201,7 @@ def _incremental_outputs(folder, extra):
     aggregations[1]['params'].update(known_detectors_df_or_path=known, known_detectors_max_days_old=2)
     SignalDataProcessor(raw_data=chunk, detector_config=CONFIG, bin_size=15, verbose=0, output_dir=str(folder),
                         output_format='parquet', output_to_separate_folders=False, output_file_prefix=f'{i}_',
-                        unmatched_event_settings={'df_or_path': unmatched, 'max_days_old': 14},
+                        unmatched_event_settings={'df_or_path': unmatched, 'max_days_old': 14, 'first_run': True},
                         aggregations=aggregations).run()
     # each run reads its state back, so a difference here reaches the next run's outputs as well
     assert os.path.exists(unmatched) and os.path.exists(known)

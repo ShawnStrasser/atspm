@@ -112,7 +112,7 @@ def test_real_data_with_every_run_saved_to_a_file(real_events, tmp_path):
             raw_data=chunk, bin_size=15, verbose=0,
             output_dir=str(tmp_path), output_to_separate_folders=False, output_format='parquet',
             output_file_prefix=f'{i}_', aggregations=VOLUMES,
-            unmatched_event_settings={'df_or_path': str(tmp_path / 'carry.parquet'), 'max_days_old': 14},
+            unmatched_event_settings={'df_or_path': str(tmp_path / 'carry.parquet'), 'max_days_old': 14, 'first_run': True},
         ).run()
         frames.append(pd.read_parquet(tmp_path / f'{i}_ped.parquet'))
     batch = process(events, VOLUMES, carry='first')['ped']
@@ -288,7 +288,7 @@ class TestEdgeCases:
         path = tmp_path / 'old.parquet'
         old.to_parquet(path)
         events = pd.concat([events_at(at(1, 0, 5), at(1, 20)), events_at(at(2, 5), device='B'), end_marker(at(2, 59, 59.9))])
-        out = process(events, VOLUMES, settings={'df_or_path': str(path), 'max_days_old': 14})
+        out = process(events, VOLUMES, settings={'df_or_path': str(path), 'max_days_old': 14, 'first_run': True})
         a = out['ped'].query("DeviceId == 'A'").sort_values('TimeStamp').reset_index(drop=True)
         assert a.TimeStamp.min() == at(1, 0)  # its first activity, though that press repeats the carried one
         np.testing.assert_allclose(a.Estimated_Volumes[:2], [INTERCEPT, volume(1, 1)], rtol=1e-6)

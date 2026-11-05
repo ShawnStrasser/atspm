@@ -216,12 +216,15 @@ def load_data(conn,
         # check if unmatched_events is provided and that the file exists
         if use_unmatched:
             max_days_old = unmatched_events['max_days_old']
-            unmatched_events.pop('max_days_old')
             # Iterate over the strings/dataframes in unmatched_events dictionary
             for key, value in unmatched_events.items():
+                if key in ('max_days_old', 'first_run'):
+                    continue
+                if value is None:
+                    continue
                 if isinstance(value, str):
                     source_path = _strip_wrapping_quotes(value)
-                    # Skip this file if it doesn't exist (file not created yet on first run)
+                    # Nothing to read on a first run. SignalDataProcessor has raised on any other missing file.
                     if not os.path.exists(source_path):
                         v_print(f"Skipping {key} - file does not exist yet: {source_path}", verbose, 2)
                         continue

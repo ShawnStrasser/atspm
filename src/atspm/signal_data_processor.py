@@ -42,7 +42,7 @@ OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, 'ped', 'yellow_red')
 SETTINGS = {'raw_data', 'detector_config', 'bin_size', 'output_dir', 'output_to_separate_folders', 'output_format',
             'output_file_prefix', 'remove_incomplete', 'drop_fall_back_hour', 'unmatched_event_settings', 'to_sql', 'verbose',
             'aggregations', 'controller_type'}
-STATE_SETTINGS = {'df_or_path', 'split_fail_df_or_path', 'max_days_old'}
+STATE_SETTINGS = {'df_or_path', 'split_fail_df_or_path', 'max_days_old', 'first_run'}
 AGGREGATION_PARAMS = {
     'has_data': {'no_data_min', 'min_data_points'},
     'actuations': {'fill_in_missing', 'known_detectors_df_or_path', 'known_detectors_max_days_old'},
@@ -74,6 +74,21 @@ def _check_names(settings):
         unknown = [] if known is None else sorted(set(agg.get('params', {})) - known)
         if unknown:
             raise ValueError(f"{agg['name']}: unknown parameters {unknown}; it takes {sorted(known)}")
+
+
+def _state_given(name, value, first_run, verbose):
+    """Whether there is earlier state to read. '' or None says this is a first run, and so does first_run for a file that does
+    not exist yet. Any other missing file raises: carrying on would read as a first run, and the rows would be quietly wrong."""
+    if value is None or (isinstance(value, str) and value == ''):
+        v_print(f"First run: no earlier {name}.", verbose)
+        return False
+    if isinstance(value, str) and not os.path.exists(value):
+        if first_run:
+            v_print(f"First run: {name} file '{value}' does not exist yet.", verbose)
+            return False
+        raise FileNotFoundError(f"{name} file '{value}' does not exist. For a first run, add 'first_run': True to "
+                                "unmatched_event_settings, or pass '' or None.")
+    return True
 
 
 def _spillback_params(params):
@@ -229,6 +244,7 @@ class SignalDataProcessor:
         - df_or_path: str, path to save/load unmatched events
         - split_fail_df_or_path: str, path to save/load unmatched split failure events
         - max_days_old: int, maximum age of unmatched events to consider
+        - first_run: bool, these files are not there yet. Without it a missing file raises. '' or None in place of a path also says first run
     to_sql : bool
         If True, returns SQL strings instead of executing queries.
     verbose : int
@@ -336,26 +352,17 @@ class SignalDataProcessor:
             self.incremental_run = True
             self.unmatched_found = True
             self.sf_unmatched_found = True  # Separate flag for split_failures
+            first_run = self.unmatched_event_settings.get('first_run', False)
             for key, value in self.unmatched_event_settings.items():
-                if key == 'max_days_old':
+                if key in ('max_days_old', 'first_run'):
                     continue
-                if isinstance(value, str):
-                    if os.path.exists(value) and value != '':
+                if _state_given(key, value, first_run, self.verbose):
+                    if isinstance(value, str):
                         self.unmatched_event_settings[key] = f"'{value}'"
-                    else:
-                        v_print(f"Warning, {key} file '{value}' does not exist or is blank. This is expected only for the first run.", self.verbose)
-                        # Set the appropriate flag based on which file is missing
-                        if key == 'split_fail_df_or_path':
-                            self.sf_unmatched_found = False
-                        else:
-                            self.unmatched_found = False
-                elif value is None:
-                    v_print(f"Warning, {key} file is None. This is expected only for the first run.", self.verbose)
-                    # Set the appropriate flag based on which file is missing
-                    if key == 'split_fail_df_or_path':
-                        self.sf_unmatched_found = False
-                    else:
-                        self.unmatched_found = False
+                elif key == 'split_fail_df_or_path':
+                    self.sf_unmatched_found = False
+                else:
+                    self.unmatched_found = False
 
         # Check for known_detectors parameters in actuations aggregation
         # If found, extract them and create known_detectors_settings
@@ -376,19 +383,12 @@ class SignalDataProcessor:
                     # Set incremental_run and known_detectors_found flags
                     if not self.incremental_run:
                         self.incremental_run = True
-                    self.known_detectors_found = True
-                    
                     # Format the df_or_path for DuckDB
                     value = self.known_detectors_settings['df_or_path']
-                    if isinstance(value, str):
-                        if os.path.exists(value) and value != '':
-                            self.known_detectors_settings['df_or_path'] = f"'{value}'"
-                        else:
-                            v_print(f"Warning, df_or_path file '{value}' does not exist or is blank. This is expected only for the first run.", self.verbose)
-                            self.known_detectors_found = False
-                    elif value is None or (isinstance(value, str) and value == ''):
-                        v_print(f"Warning, df_or_path file is None or empty. This is expected only for the first run.", self.verbose)
-                        self.known_detectors_found = False
+                    self.known_detectors_found = _state_given('known_detectors_df_or_path', value,
+                                                              (self.unmatched_event_settings or {}).get('first_run', False), self.verbose)
+                    if self.known_detectors_found and isinstance(value, str):
+                        self.known_detectors_settings['df_or_path'] = f"'{value}'"
                     break
 
         # Check the detector_health parameters now rather than after the other aggregations have run. A copy leaves
@@ -432,7 +432,7 @@ class SignalDataProcessor:
                     self.raw_data,
                     self.detector_config,
                     self.unmatched_event_settings,
-                    self.unmatched_found,
+                    self.unmatched_found or self.sf_unmatched_found,
                     self.known_detectors_settings,
                     self.known_detectors_found,
                     self.drop_fall_back_hour)
