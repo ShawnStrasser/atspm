@@ -556,10 +556,23 @@ Only with `'findings': True`, for looking into a detector. The findings of the r
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `Detector` (INT16): Detector number (if `by_approach=False`).
 *   `Phase` (INT16): Phase number.
-*   `Green_Time` (FLOAT): Average Green time.
-*   `Green_Occupancy` (FLOAT): Average Green occupancy (0.0 - 1.0).
-*   `Red_Occupancy` (FLOAT): Average Red occupancy (0.0 - 1.0).
-*   `Split_Failure` (INT16): Count of split failures.
+*   `Green_Time` (FLOAT): Average green time, in seconds per cycle.
+*   `Green_Occupancy` (FLOAT): Average green occupancy (0.0 - 1.0).
+*   `Red_Occupancy` (FLOAT): Average red occupancy (0.0 - 1.0).
+*   `Split_Failure` (INT16): Cycles that failed.
+*   `Cycles` (INT16): Cycles finished in this bin, the count behind the three averages and `Split_Failure`. Left out with `by_cycle=True` (default False), where each row is one cycle.
+
+`Cycles` lets a longer period roll up exactly from this table alone:
+
+```sql
+SELECT DeviceId, Phase,
+       SUM(Split_Failure) / SUM(Cycles) AS Share_Failed,
+       SUM(Green_Time * Cycles) / SUM(Cycles) AS Green_Time,
+       SUM(Green_Occupancy * Cycles) / SUM(Cycles) AS Green_Occupancy,
+       SUM(Red_Occupancy * Cycles) / SUM(Cycles) AS Red_Occupancy
+FROM split_failures
+GROUP BY DeviceId, Phase
+```
 
 #### terminations
 *   `TimeStamp` (DATETIME): Bin start time.

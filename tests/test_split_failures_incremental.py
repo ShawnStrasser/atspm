@@ -100,6 +100,46 @@ def test_file_saved_by_atspm_2_is_read():
     assert at(out, 1039).Green_Occupancy.iloc[0] == 0
 
 
+# ---- Cycles: how many cycles a bin's averages and failures are made of
+
+ON_AND_OFF = [(50, 82, 5), (60, 81, 5), (310, 82, 5), (345, 81, 5), (880, 82, 6), (1000, 81, 6), (1205, 82, 5), (1300, 81, 5)]
+
+
+def test_cycles_is_the_cycles_finished_in_the_bin():
+    # A cycle belongs to the bin of its red barrier, 39 s after its green: greens at 100 s to 800 s, then 900 s to 1700 s
+    out = one_run(CYCLES + REACHED + ON_AND_OFF, by_cycle=False)
+    assert out.Cycles.tolist() == [8, 9]
+    assert list(out.columns)[-1] == 'Cycles' and out.Cycles.dtype == 'int16'
+
+
+def test_a_cycle_left_out_is_not_counted():
+    # No yellow in the cycle of 300 s, so it is thrown out of the averages too
+    rows = [r for r in CYCLES if r != (330, 8, 2)] + REACHED + ON_AND_OFF
+    out, cycles = one_run(rows, by_cycle=False), one_run(rows, by_cycle=True)
+    assert out.Cycles.tolist() == [7, 9]
+    assert out.Cycles.sum() == len(cycles)
+
+
+def test_cycles_rolls_the_table_up_exactly():
+    """The averages and the share of failures of a longer period, from the binned rows alone, equal the rows of each cycle."""
+    rows = CYCLES + REACHED + ON_AND_OFF + [(1405, 82, 5), (1450, 81, 5), (1509, 82, 6), (1550, 81, 6)]
+    out, cycles = one_run(rows, by_cycle=False), one_run(rows, by_cycle=True)
+    for column in ('Green_Time', 'Green_Occupancy', 'Red_Occupancy'):
+        assert (out[column].astype(float) * out.Cycles).sum() / out.Cycles.sum() == pytest.approx(cycles[column].astype(float).mean(), rel=1e-6)
+    assert out.Split_Failure.sum() / out.Cycles.sum() == cycles.Split_Failure.mean()
+    assert 0 < cycles.Green_Occupancy.mean() < 1
+
+
+def test_a_row_per_cycle_has_no_cycles_column():
+    assert 'Cycles' not in one_run(CYCLES + REACHED + ON_AND_OFF, by_cycle=True).columns
+
+
+@pytest.mark.parametrize('cuts', [ENDS, [400, 915, 1250, 1801], [900, 915, 930, 937, 1801]])
+def test_cycles_is_the_same_wherever_runs_are_cut(cuts):
+    one = same(CYCLES + REACHED + ON_AND_OFF, cuts, by_cycle=False)  # every column, Cycles too
+    assert one.Cycles.sum() == 17
+
+
 def test_real_events_cut_at_every_quarter_hour_and_inside_bins():
     import duckdb
     data = duckdb.sql("SELECT * FROM 'tests/hires_test_data.parquet'").df()

@@ -416,7 +416,9 @@ SELECT
     SUM(CASE WHEN 
         Red_Occupancy>={{red_occupancy_threshold}}
         AND Green_Occupancy>={{green_occupancy_threshold}}
-        THEN 1 ELSE 0 END)::int16 AS Split_Failure
+        THEN 1 ELSE 0 END)::int16 AS Split_Failure,
+    --How many cycles finished in this bin, so the averages and the share of failures roll up exactly from this table
+    COUNT(*)::int16 AS Cycles
 FROM step8
 GROUP BY ALL
 ;
