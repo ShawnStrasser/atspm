@@ -8,13 +8,15 @@
 --
 -- An earlier run's state comes back here: 949 the flag was on, stamped when the detector last turned off or, if it was
 -- on, when it turned on. 950 the detector was on, stamped when it turned on. Both with the detector as Parameter.
+-- approach_delay keeps its own, in detector_state, along with when the flag began.
 detector_stream AS (
     -- Step orders events of one moment: state from an earlier run, then off, then on. A vehicle's on is a new arrival.
     SELECT r.TimeStamp,
         r.DeviceId,
         r.Parameter::INT16 AS Parameter,
         (CASE r.EventId WHEN 81 THEN 1 ELSE 2 END)::UTINYINT AS Step,
-        r.EventId = 82 AS Is_New
+        r.EventId = 82 AS Is_New{% if approach_delay %},
+        NULL::TIMESTAMP AS Flag_Began{% endif %}
     FROM {{from_table}} r
     SEMI JOIN (SELECT DISTINCT DeviceId, Parameter
                FROM detector_config
@@ -22,7 +24,20 @@ detector_stream AS (
         ON r.DeviceId = c.DeviceId
        AND r.Parameter = c.Parameter
     WHERE r.EventId IN (81, 82)
-    {%- if unmatched %}
+    {%- if unmatched and approach_delay %}
+    UNION ALL
+    SELECT s.TimeStamp,
+        s.DeviceId,
+        s.Detector,
+        (CASE s.Kind WHEN 1 THEN 0 ELSE 2 END)::UTINYINT,
+        FALSE,
+        CASE WHEN s.Kind = 1 THEN b.TimeStamp END
+    FROM (SELECT * FROM detector_state WHERE Kind IN (0, 1)) s
+    ASOF LEFT JOIN (SELECT * FROM detector_state WHERE Kind = 2) b
+        ON s.DeviceId = b.DeviceId
+       AND s.Detector = b.Detector
+       AND s.TimeStamp >= b.TimeStamp
+    {%- elif unmatched %}
     UNION ALL
     SELECT TimeStamp,
         DeviceId,
@@ -38,7 +53,7 @@ detector_stream AS (
 -- one more such actuation. With its off lost, an actuation is not known to be long, and ended as far as is known when
 -- it began. With nothing after it, it is still on.
 detector_actuations AS (
-    SELECT TimeStamp, DeviceId, Parameter, Step, Is_New,
+    SELECT TimeStamp, DeviceId, Parameter, Step, Is_New,{% if approach_delay %} Flag_Began,{% endif %}
         Next_Step IS NULL AND Step = 2 AS Still_On,
         CASE WHEN Step = 2 AND Next_Step = 1 THEN Next_Time ELSE TimeStamp END AS End_Time,
         Step = 0 OR (Next_Step = 1 AND DATE_DIFF('millisecond', TimeStamp, Next_Time) > {{spillback_on_seconds}} * 1000) AS Held_Long
@@ -67,12 +82,17 @@ detector_groups AS (
     )
 ),
 
--- An actuation beginning after one that held long, in the same group, begins with the flag on
+-- An actuation beginning after one that held long, in the same group, begins with the flag on. For approach_delay, the flag
+-- began when the first of them turned on, or when an earlier run says.
 detector_flags AS (
     SELECT *,
         COALESCE(BOOL_OR(Held_Long) OVER (
             PARTITION BY DeviceId, Parameter, Group_Number ORDER BY TimeStamp, Step
             ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-        ), FALSE) AS Spillback
+        ), FALSE) AS Spillback{% if approach_delay %},
+        MIN(CASE WHEN Held_Long THEN COALESCE(Flag_Began, TimeStamp) END) OVER (
+            PARTITION BY DeviceId, Parameter, Group_Number ORDER BY TimeStamp, Step
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ) AS Flag_Start{% endif %}
     FROM detector_groups
 )

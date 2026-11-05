@@ -36,7 +36,7 @@ DEFAULT_SPILLBACK_GAP_SECONDS = 5
 DEFAULT_SECONDS_BETWEEN_ACTUATIONS = 15
 
 # Aggregations that keep what they have not written yet in the main unmatched file, each with its own rows.
-OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, 'ped', 'yellow_red')
+OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, 'ped', 'yellow_red', 'approach_delay')
 
 # Tables that write whatever bins a run has, with nothing kept for a later run. Cut inside a bin, a run writes that bin again.
 WRITE_BINS_AT_ONCE = ('actuations', 'terminations', 'splits', 'coordination_agg', 'phase_wait', 'ped_delay')
@@ -53,6 +53,7 @@ AGGREGATION_PARAMS = {
     'has_data': {'no_data_min', 'min_data_points'},
     'actuations': {'fill_in_missing', 'known_detectors_max_days_old'},
     'arrival_on_green': {'latency_offset_seconds', 'spillback_on_seconds', 'spillback_gap_seconds'},
+    'approach_delay': {'latency_offset_seconds', 'spillback_on_seconds', 'spillback_gap_seconds'},
     'platoon_ratio': set(),
     'yellow_red': {'latency_offset_seconds', 'min_red_offset'},
     'split_failures': {'red_time', 'red_occupancy_threshold', 'green_occupancy_threshold', 'by_approach', 'by_cycle'},
@@ -72,7 +73,8 @@ AGGREGATION_PARAMS = {
 STATE_TABLES = {**dict.fromkeys(range(931, 935), 'coordination_agg'), 935: 'timeline', 955: 'timeline',
                 **dict.fromkeys((937, 943, 944, 945, 946, 947), 'ped'),
                 **dict.fromkeys((938, 939, 940, 941, 948, 949, 950), 'arrival_on_green'),
-                **dict.fromkeys((951, 952, 953, 954), 'yellow_red'), 956: 'actuations', 936: None, 942: None}
+                **dict.fromkeys((951, 952, 953, 954), 'yellow_red'), 956: 'actuations',
+                **dict.fromkeys((957, 958, 959), 'approach_delay'), 936: None, 942: None}
 
 
 def _check_names(settings):
@@ -106,7 +108,7 @@ def _state_given(name, value, first_run, verbose):
 
 
 def _spillback_params(params):
-    """arrival_on_green params with both spillback settings, checked. A copy, leaving the caller's dict alone."""
+    """arrival_on_green or approach_delay params with both spillback settings, checked. A copy, leaving the caller's dict alone."""
     params = {**params}
     params.setdefault('spillback_on_seconds', DEFAULT_SPILLBACK_ON_SECONDS)
     params.setdefault('spillback_gap_seconds', DEFAULT_SPILLBACK_GAP_SECONDS)
@@ -236,7 +238,7 @@ class SignalDataProcessor:
         The raw data to be processed, either as a file path or a DataFrame.
     detector_config : str or DataFrame
         The detector configuration, either as a file path or a DataFrame. Columns: DeviceId, Phase, Parameter, Function,
-        and optionally DistanceFromStopBar (feet), MPH and LatencyCorrection (seconds), which arrival_on_green uses to project arrivals to the stop bar.
+        and optionally DistanceFromStopBar (feet), MPH and LatencyCorrection (seconds), which arrival_on_green and approach_delay use to project arrivals to the stop bar.
     bin_size : int
         The size of the time bins for aggregation, in minutes.
     output_dir : str
@@ -266,7 +268,7 @@ class SignalDataProcessor:
     aggregations : list of dict
         A list of dictionaries, each containing the name of an aggregation function and its parameters.
         A table is written when listed here, and no others.
-        Supported aggregations include: 'has_data', 'actuations', 'arrival_on_green',
+        Supported aggregations include: 'has_data', 'actuations', 'arrival_on_green', 'approach_delay',
         'coordination', 'coordination_agg', 'ped', 'split_failures', 'splits', 'terminations',
         'yellow_red', 'timeline', 'ped_delay', 'phase_wait', and potentially others.
 
@@ -386,7 +388,7 @@ class SignalDataProcessor:
         # the caller's list and dicts untouched.
         self.aggregations = [
             {**agg, 'params': detector_health_params(agg.get('params', {}))} if agg['name'] == 'detector_health'
-            else {**agg, 'params': _spillback_params(agg.get('params', {}))} if agg['name'] == 'arrival_on_green'
+            else {**agg, 'params': _spillback_params(agg.get('params', {}))} if agg['name'] in ('arrival_on_green', 'approach_delay')
             else agg
             for agg in self.aggregations
         ]
@@ -698,6 +700,26 @@ class SignalDataProcessor:
             unmatched=self._table_exists('unmatched_previous'),
         ))
 
+    def _save_approach_delay_carry(self):
+        """Saves what approach_delay has not written yet to unmatched_events (synthetic EventId 957 to 959).
+
+        See approach_delay_vehicles.sql. A run with no events changes nothing, and keeps them for the next run.
+        """
+        if self.conn.execute("SELECT COUNT(*) FROM raw_data").fetchall()[0][0] > 0:
+            params = next(agg for agg in self.aggregations if agg['name'] == 'approach_delay').get('params', {})
+            self._add_to_unmatched_events(render_query(
+                'approach_delay_carry',
+                **params,
+                bin_size=self.bin_size,
+                from_table='raw_data',
+                carry_bins=True,
+                unmatched=self._table_exists('unmatched_previous'),
+            ))
+        elif self._table_exists('unmatched_previous'):
+            self._add_to_unmatched_events(
+                "SELECT TimeStamp, DeviceId, EventId, Parameter, IsValid FROM unmatched_previous WHERE EventId BETWEEN 957 AND 959"
+            )
+
     def _save_complete_bins(self):
         """Saves the bins has_data passed from where results stopped onward, for a later run's remove_incomplete.
 
@@ -709,6 +731,7 @@ class SignalDataProcessor:
             carry_bins=True,
             unmatched=self._table_exists('unmatched_previous'),
             yellow_red_carried=any(agg['name'] == 'yellow_red' for agg in self.aggregations),
+            approach_delay_carried=any(agg['name'] == 'approach_delay' for agg in self.aggregations),
         ))
 
     def _ped_carried(self, params):
@@ -844,7 +867,7 @@ class SignalDataProcessor:
 
                 #######################
                 ### Unmatched Events ##
-                # If unmatched_event_settings is supplied, then change the from_table for timeline, split_failures, arrival_on_green, and yellow_red
+                # If unmatched_event_settings is supplied, then change the from_table for timeline, split_failures, arrival_on_green, approach_delay and yellow_red
                 # These are views that have the relateded unmatched events unioned to them
                 # coordination_agg and phase_wait also use unmatched events to store previous coordination state
                 # ped uses them to store each input's last press and what it has not written yet
@@ -960,6 +983,8 @@ class SignalDataProcessor:
             self._save_arrival_carry()
         if 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql and any(agg['name'] == 'yellow_red' for agg in self.aggregations):
             self._save_yellow_red_carry()
+        if 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql and any(agg['name'] == 'approach_delay' for agg in self.aggregations):
+            self._save_approach_delay_carry()
         if self.incremental_run and not self.to_sql and ped_params is not None:
             self._save_last_ped_presses()
             self._save_ped_carry(ped_params)

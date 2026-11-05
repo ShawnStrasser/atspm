@@ -269,7 +269,7 @@ def load_data(conn,
                     SELECT TimeStamp, DeviceId, EventId, Parameter FROM raw_data
                     UNION ALL
                     SELECT TimeStamp, DeviceId, EventId, Parameter FROM unmatched_previous
-                    WHERE EventId NOT BETWEEN 938 AND 954 AND EventId <> 956; -- only arrival_on_green, platoon_ratio, ped, yellow_red and actuations read these
+                    WHERE EventId NOT BETWEEN 938 AND 954 AND EventId NOT BETWEEN 956 AND 959; -- only arrival_on_green, platoon_ratio, ped, yellow_red, actuations and approach_delay read these
                     """
                 elif key == 'split_fail_df_or_path':
                     load_sql = f"""
