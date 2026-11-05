@@ -176,8 +176,11 @@ def test_each_run_writes_only_new_bins_and_past_rows_never_change(tmp_path):
   cuts = [START + pd.Timedelta(hours=1, minutes=5), START + pd.Timedelta(hours=2, minutes=5)]
   parts = _runs(RAW, cuts, store=str(tmp_path / 's.duckdb'), judge='hourly')
   assert len(parts) >= 2
+  # A bin first found late is released as a new row with a past TimeStamp, so a later run may reach back. Rows already
+  # written never change, which here means no run writes a bin, detector and label a second time.
+  assert not pd.concat(parts, ignore_index=True).duplicated(KEY).any()
   for earlier, later in zip(parts[:-1], parts[1:]):
-    assert earlier['TimeStamp'].max() < later['TimeStamp'].min()
+    assert later['TimeStamp'].max() > earlier['TimeStamp'].max()
 
 
 def test_a_second_run_of_the_same_events_writes_nothing_new(tmp_path):
