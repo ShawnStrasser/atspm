@@ -68,7 +68,8 @@ Sometimes detector on events (82) occur in rapic succession without an off event
     add an OFF event with timestamp matching the next ON event.
 If for two-in-a-row ON events more than 2000 milliseconds apart, an OFF event is added half-way between them
 For two-in-a-row OFF events, an ON event is added half-way between them regardless of the gap size
-
+Half-way stops at the start of the second event's bin: bins before it may be written already, by a run that had no way
+to know about the second event, so one big run must not use it there either.
 */
 WITH lagged as (
         -- Off sorts before on in the same tenth, as in with_cycle below. The sort is per phase too: a detector on two
@@ -87,7 +88,7 @@ WITH lagged as (
     ),
     interpolate_OFFs as (
                 SELECT
-            "TimeStamp" - INTERVAL (PrevDiff / 2) MILLISECOND as TimeStamp,
+            GREATEST("TimeStamp" - INTERVAL (PrevDiff / 2) MILLISECOND, time_bucket(INTERVAL '{{bin_size}} minutes', "TimeStamp")) as TimeStamp,
             DeviceId,
             81 as EventId,
             Detector,
@@ -98,7 +99,7 @@ WITH lagged as (
             and PrevEventId = 82
     ),
     interpolate_ONs AS (
-                SELECT "TimeStamp" - INTERVAL (PrevDiff / 2) MILLISECOND as TimeStamp,
+                SELECT GREATEST("TimeStamp" - INTERVAL (PrevDiff / 2) MILLISECOND, time_bucket(INTERVAL '{{bin_size}} minutes', "TimeStamp")) as TimeStamp,
             DeviceId,
             82 AS EventId,
             Detector,
@@ -356,13 +357,16 @@ valid_cycles AS (
         SELECT DeviceId,
         Detector,
         Phase,
-                Cycle_Number
+        Cycle_Number,
+        MIN(CASE WHEN EventId = 11 THEN TimeStamp END) AS Cycle_End
     FROM step6
     WHERE Cycle_Number > 0 --0 cycle means it didn't start with a green event
     GROUP BY DeviceId, Detector, Phase, Cycle_Number
     HAVING
-                COUNT(CASE WHEN EventId = 8 THEN EventId END) = 1 --ensure 1 yellow change event in cycle
-        and COUNT(CASE WHEN EventId = 11 THEN EventId END) = 1 --ensure 1 red barrier
+        -- A cycle is done at its first red barrier. What comes after it, before the next green, only happens when that
+        -- green's event was lost, and a run that stops there cannot know about it.
+        COUNT(CASE WHEN EventId = 8 AND Signal_State < 11 THEN EventId END) = 1 --ensure 1 yellow change event in cycle
+        and COUNT(CASE WHEN EventId = 11 THEN EventId END) >= 1 --ensure a red barrier
         --(cycles are deliniated by begin green, so they already are guaranteed to only have 1 green event)
         and COUNT(CASE WHEN Detector_State IS NULL THEN 1 END) = 0 --ensure no missing detector states
         --and COUNT(CASE WHEN TimeDIff IS NULL THEN 1 END) = 0 --ensure no missing time diffs
@@ -380,7 +384,7 @@ step7 AS (
         CAST(SUM(TimeDiff) AS INT) AS TotalTimeDiff
     FROM step6
     NATURAL JOIN valid_cycles
-        WHERE (Signal_State IN (1,10) OR EventId=11) --only green and red states are used for split failures, but also keep the red barrier to set max timestamp consistently
+        WHERE (Signal_State IN (1,10) OR EventId=11) AND TimeStamp <= Cycle_End --only green and red states are used for split failures, but also keep the red barrier to set max timestamp consistently
     GROUP BY ALL --DeviceId, Detector, Phase, Cycle_Number, Signal_State, Detector_State  
 ),
 

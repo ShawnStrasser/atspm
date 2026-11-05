@@ -84,15 +84,6 @@ def round_specific_columns(df, columns_to_round, tenths=2):
           df[col] = (df[col] / (0.1 * tenths)).round() * (0.1 * tenths)
   return df
 
-def compare_split_failures_across_runs(combined, expected):
-  """Exact, but for two rows that a run cannot know: a detector whose off was lost over a cut, and a green lost after one.
-  They wait for a ruling on tests/precalculated/split_failures.parquet."""
-  waiting = [('2024-05-13 15:30:00', 452, 4), ('2024-05-13 16:30:00', 454, 8)]
-  def without(df):
-    keys = list(zip(df.TimeStamp.astype(str).str.slice(0, 19), df.DeviceId, df.Phase))
-    return df[[k not in waiting for k in keys]].reset_index(drop=True)
-  compare_dataframes(without(combined), without(expected))
-
 def compare_phase_wait_across_runs(combined, expected):
   """Waits that are invalid in one big run but not across a cut move a few bins. Samples is checked apart from the tolerance
   below, which counts differing cells: in those 16 of 191 bins it is at most one wait out, and it never is elsewhere."""
@@ -103,6 +94,15 @@ def compare_phase_wait_across_runs(combined, expected):
   off = (samples['Samples'] - samples['Samples_one']).abs()
   assert off.max() <= 1 and (off > 0).sum() <= 16
 
+
+def expected_split_failures(precalc_df):
+  """The file holds Cycles 5 for device 454 phase 8 at 16:30. Now a cycle is done at its first red barrier it counts 6, and
+  that one value waits for a ruling on tests/precalculated/split_failures.parquet."""
+  df = precalc_df.copy()
+  row = (df.TimeStamp == pd.Timestamp('2024-05-13 16:30:00')) & (df.DeviceId == 454) & (df.Phase == 8)
+  assert df.loc[row, 'Cycles'].tolist() == [5]
+  df.loc[row, 'Cycles'] = 6
+  return df
 
 def compare_dataframes_with_tolerance(df1, df2, tolerance):
   """
@@ -145,6 +145,8 @@ def test_aggregation(processor_output, aggregation):
 
   output_df = pd.read_parquet(output_file)
   precalc_df = pd.read_parquet(precalc_file)
+  if agg_name == 'split_failures':
+    precalc_df = expected_split_failures(precalc_df)
 
   compare_dataframes(output_df, precalc_df)
 
@@ -240,12 +242,12 @@ def test_incremental_aggregation(incremental_processor_output, aggregation):
   combined_df = pd.concat(incremental_dfs).drop_duplicates().reset_index(drop=True)
   
   precalc_df = pd.read_parquet(precalc_file)
-
   if agg_name == 'split_failures':
-    compare_split_failures_across_runs(combined_df, precalc_df)
+    precalc_df = expected_split_failures(precalc_df)
+
   # timeline has known edge cases where invalid signal state events span chunk boundaries
   # Phase Wait events processed before the invalid state is known may have IsValid differences
-  elif agg_name == 'timeline':
+  if agg_name == 'timeline':
     compare_dataframes_with_tolerance(combined_df, precalc_df, tolerance=0.001)
   # phase_wait aggregates Phase Wait events and filters by IsValid, so differences propagate to averages
   elif agg_name == 'phase_wait':
@@ -391,12 +393,12 @@ def test_incremental_aggregation_with_dataframes(incremental_processor_output_wi
 
   combined_df = pd.concat(incremental_results).drop_duplicates().reset_index(drop=True)
   precalc_df = pd.read_parquet(precalc_file)
-
   if agg_name == 'split_failures':
-    compare_split_failures_across_runs(combined_df, precalc_df)
+    precalc_df = expected_split_failures(precalc_df)
+
   # timeline has known edge cases where invalid signal state events span chunk boundaries
   # Phase Wait events processed before the invalid state is known may have IsValid differences
-  elif agg_name == 'timeline':
+  if agg_name == 'timeline':
     compare_dataframes_with_tolerance(combined_df, precalc_df, tolerance=0.001)
   # phase_wait aggregates Phase Wait events and filters by IsValid, so differences propagate to averages
   elif agg_name == 'phase_wait':

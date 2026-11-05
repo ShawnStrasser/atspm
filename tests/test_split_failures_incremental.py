@@ -56,7 +56,6 @@ def same(rows, cuts, by_cycle=True):
 CYCLES = [(s, e, 2) for start in range(100, 1800, 100) for s, e in ((start, 1), (start + 30, 8), (start + 34, 10))]
 REACHED = [(899.9, 200, 1), (1799.9, 200, 1)]
 ENDS = [900, 1801]
-LOST_EVENT_CYCLES = 3
 
 
 def at(frame, seconds):
@@ -85,11 +84,29 @@ def test_cut_inside_a_bin_writes_each_bin_once():
         same(rows, [400, 915, 1250, 1801], by_cycle=by_cycle)
 
 
+def test_missing_off_stops_at_the_start_of_the_bin_of_the_next_on():
+    # On at 700 s, off lost, on at 950 s. Half-way is 825 s, but a run cut at 900 s has written the first bin with the
+    # detector on to its end. So it goes off at 900 s in one big run as well.
+    rows = CYCLES + REACHED + [(700, 82, 5), (950, 82, 5), (955, 81, 5)]
+    one = same(rows, ENDS)
+    assert at(one, 839).Green_Occupancy.iloc[0] == pytest.approx(1.0)
+    assert at(one, 939).Green_Occupancy.iloc[0] == 0
+
+
 def test_missing_off_half_way_inside_the_bin():
     # Half-way, at 1000 s, is inside the second bin, so it stands
     rows = CYCLES + REACHED + [(950, 82, 5), (1050, 82, 5), (1055, 81, 5)]
     one = same(rows, [1020, 1801])
     assert at(one, 1039).Green_Occupancy.iloc[0] == 0
+
+
+def test_lost_green_keeps_the_finished_cycle():
+    # The green at 900 s was lost, so the yellow and red from 930 s follow the cycle from 800 s. That cycle finished at
+    # 839 s, and a run stopping at 900 s could not have known.
+    rows = [r for r in CYCLES if r[0] != 900] + REACHED + [(500, 82, 5), (505, 81, 5)]
+    one = same(rows, ENDS)
+    assert len(at(one, 839)) == 1
+    assert len(at(one, 939)) == 0
 
 
 def test_file_saved_by_atspm_2_is_read():
@@ -168,6 +185,4 @@ def test_real_events_cut_at_every_quarter_hour_and_inside_bins():
             parts.append(part)
             last = end
         runs = pd.concat(parts).sort_values(keys).reset_index(drop=True)
-        # A missing off and a lost green at a cut can't be known by the run before it, see the changelog
-        lost = runs.merge(one, how='outer', on=keys, suffixes=('', '_one')).query('Green_Time != Green_Time_one or Green_Occupancy != Green_Occupancy_one or Red_Occupancy != Red_Occupancy_one')
-        assert len(lost) <= LOST_EVENT_CYCLES, lost
+        pd.testing.assert_frame_equal(one, runs, check_dtype=False)
