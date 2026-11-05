@@ -230,7 +230,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Coordination Aggregate** (`coordination_agg`): Binned coordination state per interval. Provides the active Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME) for every bin using fill-forward logic.
 - **Pedestrian** (`ped`): Pedestrian services, push-button presses, unique presses and estimated pedestrian volumes, all in one row per phase and interval. `return_volumes=False` (default True) leaves out `Estimated_Volumes` and the rows of quiet bins. A press is a unique actuation if it comes more than `seconds_between_actuations` (default 15) after the previous press on that input, or if no earlier press is known. See [Pedestrian counts and volumes](#pedestrian-counts-and-volumes).
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
-- **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
+- **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). A wait is left out when the device logged no call on any phase during it or in the 15 minutes before it ended, since the call state is then unknown. For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
 - **Detector Health** (`detector_health`): How much of each `bin_size` interval each vehicle detector and ped button was failing, and with what problem, from `atspm-detector`. Needs `pip install atspm[detector-health]`. See [Detector health](#detector-health).
 
 ### Arrival on Green
@@ -625,7 +625,7 @@ The events a later run works out `split_failures` from: each detector's last eve
 *   `EventId` (INT16): Event ID.
 *   `Parameter` (INT16): Parameter value.
 
-Rows with `EventId` 931 to 954 are state carried between runs, not controller events. Each number has one meaning:
+Rows with `EventId` 931 to 955 are state carried between runs, not controller events. Each number has one meaning:
 
 | `EventId` | Written by | Holds | `Parameter` |
 | --- | --- | --- | --- |
@@ -643,6 +643,7 @@ Rows with `EventId` 931 to 954 are state carried between runs, not controller ev
 | 950 | `arrival_on_green`, `platoon_ratio` | A detector on at the end of the data, stamped when it turned on | Detector |
 | 951, 952, 953 | `yellow_red` | Green, yellow and red clearance begins of a cycle not finished writing | Phase |
 | 954 | `yellow_red` | An actuation of a cycle not finished writing, already moved back by the latency | Phase |
+| 955 | `timeline` | The last phase call event of each device | 0 |
 
 ## Release Notes
 
