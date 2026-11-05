@@ -1,8 +1,8 @@
 # Synthetic EventIds that hold state between runs in unmatched_events, not interval starts
-# 931 to 934 coordination_agg, 935, 936 and 955 timeline, 937 and 943 to 947 ped,
+# 927 to 930 left_turn_gaps, 931 to 934 coordination_agg, 935, 936 and 955 timeline, 937 and 943 to 947 ped,
 # 938 to 941 and 948 to 950 arrival_on_green and platoon_ratio, 942 remove_incomplete, 951 to 954 yellow_red, 956 actuations,
 # 957 to 959 approach_delay
-STATE_EVENT_IDS = 'BETWEEN 931 AND 959'
+STATE_EVENT_IDS = 'BETWEEN 927 AND 959'
 
 # custom function for printing depending on verbose setting
 def v_print(msg, verbose=1, level=1):

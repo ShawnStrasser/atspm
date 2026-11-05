@@ -155,7 +155,7 @@ def test_the_range_covers_every_code_in_the_code():
     for path in paths:
         with open(path) as f:
             text = f.read()
-        codes |= {int(code) for code in re.findall(r'\b(9[3-9]\d)\b', text)}
+        codes |= {int(code) for code in re.findall(r'\b(9[2-9]\d)\b', text)}
         # Every filter of state rows goes through the one range
         assert not re.search(r'NOT BETWEEN 931 AND', text), path
     assert codes, 'no codes found'

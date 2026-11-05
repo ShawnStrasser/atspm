@@ -138,6 +138,10 @@ params = {
             }
         },
         {
+            'name': 'left_turn_gaps',
+            'params': {}                     # No settings. The dashboard picks the critical gap
+        },
+        {
             'name': 'split_failures', 
             'params': {
                 'red_time': 5,              # Min red time to consider a split failure
@@ -230,6 +234,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Arrival on Green** (`arrival_on_green`): Percentage of vehicles reaching the stop bar during green by phase, with each advance detector actuation projected to the stop bar. See [Arrival on Green](#arrival-on-green).
 - **Platoon Ratio** (`platoon_ratio`): HCM platoon ratio by phase and interval, `Rp = Percent_AOG / (g/C)`, with the green ratio estimated from phase green time within each bin and the HCM arrival type (1–6). Unlike arrival on green, it is comparable across phases with different splits. Requires `arrival_on_green`.
 - **Approach Delay** (`approach_delay`): Seconds vehicles wait by phase and interval, with `Delay_Seconds` measured by UDOT's method and `Queued_Delay_Seconds` estimated for queues over the advance detector. See [Approach Delay](#approach-delay).
+- **Left-Turn Gaps** (`left_turn_gaps`): Gaps in the traffic on each through phase by length, so a dashboard can pick any critical gap for the left turn across it. See [Left-Turn Gaps](#left-turn-gaps).
 - **Yellow and Red Actuations** (`yellow_red`): Distribution of detector actuations relative to the start of red, including red offset and signal state. A row belongs to the `bin_size` bin of its cycle's red begin. Incremental runs give the same rows as one big run: a bin is written once the last cycle with a red in it has finished, so with runs cut on the bin each one comes out a run later, and the events it waits for are kept in `unmatched_events` (synthetic `EventId` 951 to 954).
 - **Split Failures** (`split_failures`): Green and red occupancies by phase (and optionally detector/approach) and a count of cycles that meet split-failure thresholds; can be returned either per cycle or aggregated into time bins. Incremental runs give the same rows as one big run: a bin is written once, whole, by the first run that reaches the end of it, by the same rule as [Arrival on Green](#arrival-on-green), and `sf_unmatched` holds the events a later run needs. A missing detector off is filled in half way to the next on, but no earlier than the start of that on's bin, and a cycle is done at its first red barrier, so a run never needs an event it has not seen.
 - **Terminations** (`terminations`): Counts of GapOut, MaxOut, and ForceOff terminations by phase.
@@ -293,6 +298,47 @@ Seconds per vehicle, with both tables listed with the same `bin_size` and settin
 It holds at any roll-up, since the vehicles are in the same bins. `SUM(Delay_Seconds) / SUM(Total_Actuations)` is the measured part alone, and the top number over 3,600 is vehicle-hours. UDOT's average is written two ways, over arrivals on red and over all actuations, and this table has no count of arrivals on red. `approach_delay` runs without `arrival_on_green`.
 
 **Incremental runs** give the same rows as one big run wherever the runs are cut. A bin is written once and never changes, by the first run whose data reach 360 seconds past its end, across all signals, when none of its vehicles can still be waiting. With runs cut on a 15-minute bin that is one run after `arrival_on_green`, so the newest bin of `arrival_on_green` has no row here yet, and a chart should stop at the newest bin here. A run with no unmatched settings writes all it has. Sums of the bins not written yet, waiting vehicles, the signal events they need and the detectors holding the flag are kept in `unmatched_events` (synthetic `EventId` 957 to 959, and 942 with `remove_incomplete`).
+
+### Left-Turn Gaps
+
+`left_turn_gaps` gives the gaps in the traffic on each through phase, the ones a left turn across it can use, by length. A gap starts when the last occupied lane goes off (81) and ends when any lane comes on (82). It is cut to the phase's green and yellow, from green begin (1) to the next red clearance begin (10), or end of yellow (9) on a signal logging no 10, so a gap across two greens counts once in each. A phase uses its `Count` zones, or its `Presence` zones if it has none. Other zones and phases other than 2, 4, 6 and 8 have no rows. UDOT's Left Turn Gap Analysis measures off to off instead (UT-21.12, p.33), which counts time a car spends on the zone as gap. A bin's start time names its period, and a bin with no green or yellow has no row.
+
+The table is long, like `yellow_red`, so a dashboard picks the critical gap afterwards, with no rerun, and it can pick one for each approach. Use 5.3 seconds unless you have a reason not to. UDOT's capacity code uses 4.1 seconds up to 2 opposing lanes and 5.3 above, and UT-21.12 says to calculate it for each approach (p.73). Every second of green and yellow is in one row of its bin:
+
+| `Gap_Length` | `Seconds` hold |
+| --- | --- |
+| 0 | The road occupied, and gaps under 3 seconds |
+| 3.0 to 9.9 | Gaps of that length, up to the next 0.1 |
+| 10 | Gaps of 10 seconds or more |
+
+A gap's seconds split at bin edges and stay in the slice of its whole length. It counts in `Gaps` once, in the bin it ends in, so a row can have `Seconds` with `Gaps` of 0. The share of green and yellow in gaps of 5.3 seconds or more, at any roll-up:
+
+```sql
+SUM(Seconds) FILTER (WHERE Gap_Length >= 5.3) / SUM(Seconds)
+```
+
+In Power BI, with `Critical Gap` a table of its own for a slicer, with no relationship:
+
+```dax
+Gap Share =
+VAR Critical = SELECTEDVALUE ( 'Critical Gap'[Seconds], 5.3 )
+RETURN
+    DIVIDE (
+        CALCULATE ( SUM ( left_turn_gaps[Seconds] ), left_turn_gaps[Gap_Length] >= Critical ),
+        SUM ( left_turn_gaps[Seconds] )
+    )
+```
+
+Any critical gap from 3 to 10 seconds in steps of 0.1 reads exactly. With the same filter, `SUM(Gaps)` is the number of large gaps, the same `SUM(Seconds)` is what UT-21.12's capacity check calls the total duration of the acceptable gaps, and `SUM(Seconds) / SUM(Gaps)` is their average length over a whole period. Do not let a slicer filter `Gap_Length` directly, or the bottom of the share goes with it.
+
+What it can't tell you:
+
+- **All opposing green counts**, not only the time the left turn is permissive.
+- **Compare a phase with itself over time**, not across zones. Count and presence zones differ: on 112 phases with both, presence stays on 1.0 second longer per on-period, and on 142 phases its share at 7.4 seconds runs a median 6.5 points lower, from 31.0 lower to 19.8 higher (5th to 95th percentile, Oct 27 2026). Most count zones are fixed pulses, so a car sitting on one is not seen.
+- **Phases 2, 4, 6 and 8 are assumed to be through phases**, and `detector_config` has no lane type, so a zone in a left lane assigned to phase 2 counts.
+- **A lane is empty until its first on**, so a zone that has never logged reads as an empty road and a share of 100%.
+
+**Incremental runs** give the same rows as one big run wherever the runs are cut. A bin is written once and never changes, by the first run whose data for that signal reach 10 seconds past the end of the bin, when any gap across its end has ended or is in the top slice. With runs cut on a 15-minute bin that is one run after `arrival_on_green`, so a chart should stop at the newest bin here. A signal silent for a run writes nothing until it logs again. A run with no unmatched settings writes all it has, up to each signal's last event, and a gap still open there adds its seconds and no count. Sums of the bins not written yet, the lanes on and where the last stretch of each green began are kept in `unmatched_events` (synthetic `EventId` 927 to 930, and 942 with `remove_incomplete`).
 
 ### Pedestrian counts and volumes
 
@@ -498,6 +544,16 @@ The following tables are produced by the aggregation process, depending on the c
 
 A vehicle with no green within 360 seconds, or an estimate over 360 seconds, is in neither. See [Approach Delay](#approach-delay).
 
+#### left_turn_gaps
+*   `TimeStamp` (DATETIME): Bin start time.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Phase` (INT16): Through phase whose traffic makes the gaps.
+*   `Gap_Length` (DOUBLE): Lower edge of a 0.1 second slice of gap length, from 3.0 to 9.9. 10 is 10 seconds or more. 0 is the road occupied and gaps under 3 seconds.
+*   `Gaps` (INT32): Gaps of this length that ended in this bin.
+*   `Seconds` (FLOAT): Seconds of this bin in this slice. A phase's rows in a bin add up to its green and yellow in the bin.
+
+One row per bin, phase and slice with any time in it. See [Left-Turn Gaps](#left-turn-gaps).
+
 #### platoon_ratio
 *   `TimeStamp` (DATETIME): Bin start time.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
@@ -660,17 +716,21 @@ The events a later run works out `split_failures` from: each detector's last eve
 *   `EventId` (INT16): Event ID.
 *   `Parameter` (INT16): Parameter value.
 
-Rows with `EventId` 931 to 959 are state carried between runs, not controller events. Each number has one meaning. A run must list every table the file holds rows of, or it raises. It raises as well on input that does not start after the last event held for its device, and, with `actuations`, `terminations`, `splits`, `coordination_agg`, `phase_wait` or `ped_delay` listed, on a run cut inside a bin, as they would write that bin twice:
+Rows with `EventId` 927 to 959 are state carried between runs, not controller events. Each number has one meaning. A run must list every table the file holds rows of, or it raises. It raises as well on input that does not start after the last event held for its device, and, with `actuations`, `terminations`, `splits`, `coordination_agg`, `phase_wait` or `ped_delay` listed, on a run cut inside a bin, as they would write that bin twice:
 
 | `EventId` | Written by | Holds | `Parameter` |
 | --- | --- | --- | --- |
+| 927 | `left_turn_gaps` | A lane on at the end of the data, stamped with its signal's last event | Detector |
+| 928 | `left_turn_gaps` | A green or yellow not ended, stamped when its stretch of busy or empty road began | Phase |
+| 929 | `left_turn_gaps` | `Seconds` of a slice of a bin not written yet, stamped with its bin plus one microsecond for each millisecond | Phase + 100 times the tenths of `Gap_Length` |
+| 930 | `left_turn_gaps` | `Gaps` of a slice of a bin not written yet, stamped with its bin plus one microsecond for each | Phase + 100 times the tenths of `Gap_Length` |
 | 931 to 934 | `coordination_agg` | Pattern, cycle length, actual cycle length, actual offset | The value |
 | 935 | `timeline` | The last bin with data of each device | 0 |
 | 936 | Every run with a main unmatched file | The last event of each device | 0 |
 | 937 | `ped` | Each input's last press, one row per input | Input |
 | 938 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped, at its projected time | Phase |
 | 939, 940, 941 | `arrival_on_green`, `platoon_ratio` | Green, yellow and red clearance begins not written yet. 939 also marks a phase green when results stopped | Phase |
-| 942 | `arrival_on_green`, `platoon_ratio`, `ped`, `yellow_red` or `approach_delay` with `remove_incomplete` | A bin not written yet that passed `has_data` | 0 |
+| 942 | `arrival_on_green`, `platoon_ratio`, `ped`, `yellow_red`, `approach_delay` or `left_turn_gaps` with `remove_incomplete` | A bin not written yet that passed `has_data` | 0 |
 | 943 | `ped` | One unique actuation, stamped with its bin, in a bin not written yet or the last 3 written | Input |
 | 944, 945 | `ped` | Each input's next bin to write, and its last activity | Input |
 | 946, 947 | `ped` | One press, or one ped service, stamped with its bin, in a bin not written yet | Input |
