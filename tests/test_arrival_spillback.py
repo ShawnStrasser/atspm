@@ -422,7 +422,7 @@ def test_settings_off_carries_nothing_of_the_flag():
 
 
 def test_remove_incomplete_keeps_flagged_bins_across_runs():
-    has_data = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+    has_data = {'name': 'has_data', 'params': {}}
     events = queue_across_bins()
     aggregations = [has_data, AOG, PLATOON]
     big = process(events, aggregations=aggregations, carry='first', remove_incomplete=True)
@@ -516,7 +516,7 @@ def test_real_data_in_three_hour_windows_equals_one_big_run_and_a_run_with_no_fi
 
 def test_flag_off_gives_the_stored_values_of_udots_method():
     """What the flag changes is all that changes: with it off, the sample gives the values from before the flag existed."""
-    has_data = {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}}
+    has_data = {'name': 'has_data', 'params': {}}
     events = duckdb.query("SELECT * FROM 'tests/hires_test_data.parquet'").df()
     detectors = duckdb.query("SELECT * FROM 'tests/configs_test_data.parquet'").df()
     out = process(events, detectors, [has_data, AOG_OFF, PLATOON], remove_incomplete=True)

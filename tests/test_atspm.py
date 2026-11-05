@@ -33,7 +33,7 @@ TEST_PARAMS = {
   'verbose': 0,
   'controller_type': 'maxtime',  # Enable MAXTIME-specific measures (splits, coordination)
   'aggregations': [
-      {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+      {'name': 'has_data', 'params': {}},
       {'name': 'actuations', 'params': {}},
       {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
       {'name': 'coordination', 'params': {}},
@@ -95,6 +95,11 @@ def compare_phase_wait_across_runs(combined, expected):
   assert off.max() <= 1 and (off > 0).sum() <= 16
 
 
+def without_score(df, agg_name='has_data'):
+  """tests/precalculated/has_data.parquet holds no Score. Its bins are unchanged, and the Score column waits for a ruling on that file."""
+  return df.drop(columns='Score') if agg_name == 'has_data' else df
+
+
 def expected_split_failures(precalc_df):
   """The file holds Cycles 5 for device 454 phase 8 at 16:30. Now a cycle is done at its first red barrier it counts 6, and
   that one value waits for a ruling on tests/precalculated/split_failures.parquet."""
@@ -148,7 +153,7 @@ def test_aggregation(processor_output, aggregation):
   if agg_name == 'split_failures':
     precalc_df = expected_split_failures(precalc_df)
 
-  compare_dataframes(output_df, precalc_df)
+  compare_dataframes(without_score(output_df, agg_name), precalc_df)
 
 def test_all_files_generated():
   """Test that all expected files are generated"""
@@ -165,7 +170,7 @@ def test_context_manager():
     bin_size=TEST_PARAMS['bin_size'],
     verbose=0,
     aggregations=[
-      {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+      {'name': 'has_data', 'params': {}},
     ]
   ) as processor:
     processor.load()
@@ -181,7 +186,7 @@ def test_context_manager():
   assert os.path.exists(precalc_file), f"Precalculated file {precalc_file} not found"
   precalc_df = pd.read_parquet(precalc_file)
   
-  compare_dataframes(result_df, precalc_df)
+  compare_dataframes(without_score(result_df), precalc_df)
 
 @pytest.fixture(scope="module")
 def incremental_processor_output():
@@ -254,7 +259,7 @@ def test_incremental_aggregation(incremental_processor_output, aggregation):
   elif agg_name == 'phase_wait':
     compare_phase_wait_across_runs(combined_df, precalc_df)
   else:
-    compare_dataframes(combined_df, precalc_df)
+    compare_dataframes(without_score(combined_df, agg_name), precalc_df)
 
 # REPLICATING ODOT'S PRODUCTION ENVIRONMENT
 @pytest.fixture(scope="module")
@@ -399,7 +404,7 @@ def test_incremental_aggregation_with_dataframes(incremental_processor_output_wi
   elif agg_name == 'phase_wait':
     compare_phase_wait_across_runs(combined_df, precalc_df)
   else:
-    compare_dataframes(combined_df, precalc_df)
+    compare_dataframes(without_score(combined_df, agg_name), precalc_df)
 
 def test_oneshot_actuations_with_fill_in_missing(oneshot_processor_output_with_fill_in_missing):
   """Test actuations with fill_in_missing in oneshot mode"""
@@ -484,7 +489,7 @@ def test_sample_data_relations():
   """The docstring example: sample_data relations from DuckDB's default connection load and aggregate"""
   from src.atspm import sample_data
   with SignalDataProcessor(raw_data=sample_data.data, detector_config=sample_data.config, bin_size=15, verbose=0,
-                           aggregations=[{'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+                           aggregations=[{'name': 'has_data', 'params': {}},
                                          {'name': 'actuations', 'params': {}}]) as processor:
     processor.load()
     processor.aggregate()
@@ -519,7 +524,7 @@ def phase_wait_synthetic_output():
     'bin_size': 15,
     'verbose': 0,
     'aggregations': [
-      {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+      {'name': 'has_data', 'params': {}},
       {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
     ]
   }
@@ -596,7 +601,7 @@ def phase_wait_incremental_output():
         'max_days_old': 14
       },
       'aggregations': [
-        {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+        {'name': 'has_data', 'params': {}},
         {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
       ]
     }
@@ -666,7 +671,7 @@ def test_invalid_phase_call_creates_invalid_phase_wait():
     'bin_size': 15,
     'verbose': 0,
     'aggregations': [
-      {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+      {'name': 'has_data', 'params': {}},
       {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
     ]
   }
@@ -723,7 +728,7 @@ def test_empty_dataframe_input():
 
   # Use all the same aggregations as TEST_PARAMS
   all_aggregations = [
-    {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+    {'name': 'has_data', 'params': {}},
     {'name': 'actuations', 'params': {}},
     {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
     {'name': 'coordination', 'params': {}},
@@ -815,7 +820,7 @@ def test_phase_wait_preempt_overlap():
         'bin_size': 15,
         'verbose': 0,
         'aggregations': [
-            {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+            {'name': 'has_data', 'params': {}},
             {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
             {'name': 'phase_wait', 'params': {'preempt_recovery_seconds': 120, 'assumed_cycle_length': 180, 'skip_multiplier': 1.5}},
             {'name': 'coordination_agg', 'params': {}}
@@ -902,7 +907,7 @@ def test_phase_wait_tsp_relaxed_threshold():
         'bin_size': 15,
         'verbose': 0,
         'aggregations': [
-            {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+            {'name': 'has_data', 'params': {}},
             # The sparse synthetic waits have no events for minutes, which the event gap check would flag
             {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True,
                                             'max_event_gap_seconds': None}},
@@ -978,7 +983,7 @@ def test_phase_wait_tsp_multiplier_defaults_to_two():
         bin_size=15,
         verbose=0,
         aggregations=[
-            {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+            {'name': 'has_data', 'params': {}},
             {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
             # tsp_skip_multiplier deliberately omitted
             {'name': 'phase_wait', 'params': {'preempt_recovery_seconds': 120,
@@ -1049,7 +1054,7 @@ def test_phase_wait_invalid_event_propagation():
         'bin_size': 15,
         'verbose': 0,
         'aggregations': [
-            {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+            {'name': 'has_data', 'params': {}},
             {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'maxtime': True}},
         ]
     }

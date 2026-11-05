@@ -13,7 +13,7 @@ ends AS (SELECT TimeStamp AS Results_End FROM results_end)
 
 SELECT DISTINCT b.TimeStamp, b.DeviceId, 942::INT16 AS EventId, 0::INT16 AS Parameter, TRUE AS IsValid
 FROM (
-    SELECT TimeStamp, DeviceId FROM has_data
+    SELECT TimeStamp, DeviceId FROM has_data WHERE Score >= 0.5
     {%- if unmatched %}
     UNION ALL
     SELECT TimeStamp, DeviceId FROM unmatched_previous WHERE EventId = 942

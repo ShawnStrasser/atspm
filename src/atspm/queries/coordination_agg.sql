@@ -63,17 +63,22 @@ actual_offset_agg AS (
 -- Create time buckets based on all coordination events
 -- Using has_data table as source of all DeviceId/TimeStamp combinations
 time_buckets AS (
-    SELECT DISTINCT
-        TimeStamp,
-        DeviceId
-    FROM has_data
+    SELECT DISTINCT TimeStamp, DeviceId FROM (
+        SELECT TimeStamp, DeviceId FROM has_data WHERE Score >= 0.5
+        UNION ALL
+        -- This table writes all a run has, so a bin has_data has not finished yet is written now
+        SELECT TIME_BUCKET(INTERVAL '{{bin_size}} minutes', TimeStamp), DeviceId FROM {{from_table}}
+        WHERE EventId <= 218
+          AND TIME_BUCKET(INTERVAL '{{bin_size}} minutes', TimeStamp) > COALESCE((SELECT MAX(TimeStamp) FROM has_data), TIMESTAMP '1970-01-01')
+    )
+    WHERE TimeStamp >= (SELECT TIME_BUCKET(INTERVAL '{{bin_size}} minutes', MIN(TimeStamp)) FROM {{from_table}})
 ),
 
 {% if coord_state_found %}
 -- For incremental runs: extract previous state from synthetic events in unmatched_previous
 -- Synthetic EventIds: 931=Pattern, 932=CycleLength, 933=ActualCycleLength, 934=ActualOffset
 min_timestamp AS (
-    SELECT MIN(TimeStamp) - INTERVAL '1 second' AS SentinelTimeStamp FROM has_data
+    SELECT MIN(TimeStamp) - INTERVAL '1 second' AS SentinelTimeStamp FROM time_buckets
 ),
 
 previous_state_injected AS (

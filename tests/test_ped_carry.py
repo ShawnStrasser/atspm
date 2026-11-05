@@ -277,7 +277,7 @@ def test_carry_with_timeline_keeps_timeline_rows():
     events = pd.concat([presses(0), presses(1, event=1), presses(5)])
     aggs = [
         aggregation(),  # listed before timeline, which creates unmatched_events
-        {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+        {'name': 'has_data', 'params': {}},
         {'name': 'timeline', 'params': {'min_duration': 0, 'cushion_time': 0}},
     ]
     carry = process(events, aggs, carry='first')['unmatched_events']
@@ -329,7 +329,7 @@ def test_known_detectors_with_timeline_still_carries():
     """A first window with None for the path, and the next run reads unmatched_events."""
     aggs = [
         aggregation(),
-        {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+        {'name': 'has_data', 'params': {}},
         {'name': 'timeline', 'params': {'min_duration': 0, 'cushion_time': 0}},
         {'name': 'actuations', 'params': {'fill_in_missing': True}},
     ]
@@ -370,7 +370,7 @@ def test_other_aggregations_are_unchanged_by_the_carry():
     data = duckdb.sql("SELECT * FROM 'tests/hires_test_data.parquet'").df()
     config = duckdb.sql("SELECT * FROM 'tests/configs_test_data.parquet'").df()
     others = [
-        {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+        {'name': 'has_data', 'params': {}},
         {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
         {'name': 'yellow_red', 'params': {'latency_offset_seconds': 1.5, 'min_red_offset': -8}},
         {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time': 60, 'maxtime': True}},

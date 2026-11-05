@@ -3,7 +3,7 @@ Phase waits (and the other timeline intervals open alongside them) that straddle
 counted as phase skips or inflate Avg/MaxPhaseWait.
 
 Reported 2026-10-07 on device c9a6132b: the controller logged nothing from 13:53:45 to 14:05:15 while other
-signals kept reporting. With has_data at no_data_min=15, min_data_points=1 (the ATSPM_Report config) both the
+signals kept reporting. Both the
 13:45 and 14:00 bins have events, so the has_data gap check saw nothing. Phase Wait 4 ran 13:53:25.5 to
 14:06:40.1 (794.6 s), stayed IsValid=True, and phase_wait reported MaxPhaseWait=794.6 and TotalSkips=1.
 
@@ -117,7 +117,7 @@ def _process(raw, unmatched_df=None, max_event_gap_seconds="default", with_phase
         remove_incomplete=False,
         controller_type="maxtime",
         aggregations=[
-            {"name": "has_data", "params": {"no_data_min": 15, "min_data_points": 1}},
+            {"name": "has_data", "params": {}},
             {"name": "timeline", "params": timeline_params},
             *([{"name": "phase_wait", "params": {"preempt_recovery_seconds": 120, "assumed_cycle_length": 140,
                                                  "skip_multiplier": 1.5, "tsp_skip_multiplier": 2.0}}] if with_phase_wait else []),
@@ -294,7 +294,8 @@ TIME_OF_DAY_CASES = {
     "day_exactly_120": ("10:00:00", 120, True),
     "evening_shoulder_290": ("21:30:00", 290, True),
     "evening_shoulder_310": ("21:30:00", 310, False),
-    "night_890": ("02:00:00", 890, True),
+    # Across a bin edge, as has_data reads a silence over half of one bin as a lost bin
+    "night_890": ("02:07:35", 890, True),
     "night_910": ("02:00:00", 910, False),
     "morning_shoulder_290": ("05:30:00", 290, True),
     "morning_shoulder_310": ("05:30:00", 310, False),
@@ -463,7 +464,7 @@ SignalDataProcessor(raw_data=raw, detector_config=config, bin_size=15, verbose=0
     output_dir=out, output_format="parquet", output_to_separate_folders=False,
     unmatched_event_settings={"df_or_path": state, "max_days_old": 14, "first_run": True},
     aggregations=[
-        {"name": "has_data", "params": {"no_data_min": 15, "min_data_points": 1}},
+        {"name": "has_data", "params": {}},
         {"name": "timeline", "params": {"maxtime": True, "min_duration": 0.1, "cushion_time": 60}},
         {"name": "phase_wait", "params": {}},
         {"name": "arrival_on_green", "params": {"latency_offset_seconds": 0}},

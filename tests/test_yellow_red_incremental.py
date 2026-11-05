@@ -219,7 +219,7 @@ def test_the_carried_events_are_only_as_long_as_needed():
 
 def test_timeline_in_the_list_does_not_change_it():
     # timeline keeps its own open rows, some of them real codes, in the same file
-    has_data = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+    has_data = {'name': 'has_data', 'params': {}}
     timeline = {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time': 60}}
     events = steady(60)
     cuts = [T0 + pd.Timedelta(minutes=m) for m in (15, 37.4, 45)]
@@ -229,7 +229,7 @@ def test_timeline_in_the_list_does_not_change_it():
 
 
 def test_timeline_does_not_see_the_carried_events():
-    has_data = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+    has_data = {'name': 'has_data', 'params': {}}
     timeline = {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time': 60}}
     events = steady(60)
     cuts = [T0 + pd.Timedelta(minutes=m) for m in (15, 37.4, 45)]
@@ -248,7 +248,7 @@ def test_timeline_does_not_see_the_carried_events():
 
 def test_remove_incomplete_keeps_a_bin_written_in_a_later_run():
     # The bin of the red passed has_data in the first run, and the red only ends in the third
-    has_data = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+    has_data = {'name': 'has_data', 'params': {}}
     rows = [*cycle(100), at(200, 82, DETECTOR)]
     rows += [at(10 + 60 * i, 7, 8) for i in range(45)] + [at(899.9, 7, 8), at(1799.9, 7, 8)]
     rows += [at(2000, 1), at(2699.9, 7, 8)]

@@ -4,7 +4,7 @@ from .data_loader import load_data
 from .data_aggregator import aggregate_data, render_query
 from .data_saver import save_data
 from .detector_health import detector_health_params, run_detector_health
-from .utils import STATE_EVENT_IDS
+from .utils import COMPLETE_BINS, STATE_EVENT_IDS, WRITE_BINS_AT_ONCE
 from .utils import v_print
 import os
 
@@ -38,9 +38,6 @@ DEFAULT_SECONDS_BETWEEN_ACTUATIONS = 15
 # Aggregations that keep what they have not written yet in the main unmatched file, each with its own rows.
 OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, 'ped', 'yellow_red', 'approach_delay', 'left_turn_gaps')
 
-# Tables that write whatever bins a run has, with nothing kept for a later run. Cut inside a bin, a run writes that bin again.
-WRITE_BINS_AT_ONCE = ('actuations', 'terminations', 'splits', 'coordination_agg', 'phase_wait', 'ped_delay')
-
 # timeline's instant events (see timeline.sql)
 INSTANT_EVENT_CLASSES = ('Pattern Change', 'Cycle Length Change', 'Offset Change', 'Interval Advance', 'Clock Update', 'Power Failure', 'Power Restored')
 
@@ -50,7 +47,7 @@ SETTINGS = {'raw_data', 'detector_config', 'bin_size', 'output_dir', 'output_to_
             'aggregations', 'controller_type'}
 STATE_SETTINGS = {'df_or_path', 'split_fail_df_or_path', 'max_days_old', 'first_run'}
 AGGREGATION_PARAMS = {
-    'has_data': {'no_data_min', 'min_data_points'},
+    'has_data': set(),
     'actuations': {'fill_in_missing', 'known_detectors_max_days_old'},
     'arrival_on_green': {'latency_offset_seconds', 'spillback_on_seconds', 'spillback_gap_seconds'},
     'approach_delay': {'latency_offset_seconds', 'spillback_on_seconds', 'spillback_gap_seconds'},
@@ -75,7 +72,7 @@ STATE_TABLES = {**dict.fromkeys(range(927, 931), 'left_turn_gaps'), **dict.fromk
                 **dict.fromkeys((937, 943, 944, 945, 946, 947), 'ped'),
                 **dict.fromkeys((938, 939, 940, 941, 948, 949, 950), 'arrival_on_green'),
                 **dict.fromkeys((951, 952, 953, 954), 'yellow_red'), 956: 'actuations',
-                **dict.fromkeys((957, 958, 959), 'approach_delay'), 936: None, 942: None}
+                **dict.fromkeys((957, 958, 959), 'approach_delay'), **dict.fromkeys(range(970, 1000), 'has_data'), 936: None, 942: None}
 
 
 def _check_names(settings):
@@ -251,7 +248,7 @@ class SignalDataProcessor:
     output_file_prefix : str
         Prefix to be added to all output file names.
     remove_incomplete : bool
-        If True, removes periods with incomplete data based on the 'has_data' aggregation.
+        If True, removes bins the 'has_data' aggregation scores under 0.5, or has no row for.
     drop_fall_back_hour : bool
         If True (the default), events in 1:00-2:00 am on the first Sunday of November are dropped when raw_data is
         loaded, because the two passes through that hour when clocks fall back cannot be separated. Assumes US
@@ -296,7 +293,7 @@ class SignalDataProcessor:
         bin_size=15,
         verbose=1,
         aggregations=[
-            {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+            {'name': 'has_data', 'params': {}},
             {'name': 'actuations', 'params': {}},
         ]
     ) as processor:
@@ -352,15 +349,11 @@ class SignalDataProcessor:
             # Then sort by dependency order (e.g., has_data before timeline, timeline before phase_wait)
             self.aggregations = _sort_aggregations_by_dependency(self.aggregations, self.verbose)
 
-        # Check for valid bin_size and no_data_min combo
         if self.remove_incomplete:
             # raise error if 'has_data' aggregation is not in aggregations
             assert any(d['name'] == 'has_data' for d in self.aggregations), "Remove_incomplete requires 'has_data' aggregation!"
             # Every other aggregation is then joined to it, wherever it was listed
             self.aggregations.sort(key=lambda agg: agg['name'] != 'has_data')
-            # extract has_data parameters
-            no_data_min = next(x['params']['no_data_min'] for x in self.aggregations if x['name'] == 'has_data')
-            assert self.bin_size % no_data_min == 0, "bin_size / no_data_min must be a whole number"
 
         # Check format of unmatched_event_settings
         # Duckdb needs quotes if it is a file path, but not if it is a dataframe
@@ -519,23 +512,26 @@ class SignalDataProcessor:
         if has_previous:
             previous_markers = "SELECT DeviceId, MAX(TimeStamp) AS MarkerBin FROM unmatched_previous WHERE EventId = 935 GROUP BY DeviceId"
         else:
-            previous_markers = "SELECT DeviceId, TimeStamp AS MarkerBin FROM has_data WHERE FALSE"
+            previous_markers = f"SELECT DeviceId, TimeStamp AS MarkerBin FROM {COMPLETE_BINS} WHERE FALSE"
 
         # Bins known to have data, and per device where checking starts (FirstBin) and how far the
         # current data reaches (LastBin). Without a marker, checking starts at the first bin of this run.
         self.conn.execute(f"""
             CREATE OR REPLACE TEMP TABLE gap_markers AS {previous_markers};
             CREATE OR REPLACE TEMP TABLE gap_known_bins AS
-                SELECT DeviceId, TimeStamp FROM has_data
+                SELECT DeviceId, TimeStamp FROM {COMPLETE_BINS}
                 UNION
-                SELECT DeviceId, MarkerBin FROM gap_markers;
+                SELECT DeviceId, MarkerBin FROM gap_markers
+                UNION
+                -- Not finished yet, so nothing is known against them
+                SELECT s.DeviceId, UNNEST(GENERATE_SERIES(s.TimeStamp, s.TimeStamp + INTERVAL 1 DAY, {bin_interval})) FROM has_data_state s WHERE s.EventId = 974;
             CREATE OR REPLACE TEMP TABLE gap_bounds AS
                 SELECT d.DeviceId,
                        COALESCE(m.MarkerBin, (SELECT TIME_BUCKET({bin_interval}, MIN(TimeStamp)) FROM raw_data)) AS FirstBin,
                        h.LastBin
                 FROM (SELECT DISTINCT DeviceId FROM timeline UNION SELECT DISTINCT DeviceId FROM unmatched_events) d
                 LEFT JOIN gap_markers m USING (DeviceId)
-                LEFT JOIN (SELECT DeviceId, MAX(TimeStamp) AS LastBin FROM has_data GROUP BY DeviceId) h USING (DeviceId);
+                LEFT JOIN (SELECT DeviceId, MAX(TimeStamp) AS LastBin FROM {COMPLETE_BINS} GROUP BY DeviceId) h USING (DeviceId);
         """)
 
         # Completed intervals: check from the start bin (or FirstBin if later) through the end bin
@@ -600,13 +596,13 @@ class SignalDataProcessor:
         if self.incremental_run:
             # Save each device's last bin with data for the next run. A device with no data in this run
             # keeps its previous marker, so the gap is still measured from where its data stopped.
-            self.conn.execute("""
+            self.conn.execute(f"""
                 INSERT INTO unmatched_events
                 SELECT TimeStamp, DeviceId, 935 AS EventId, 0 AS Parameter, TRUE AS IsValid
                 FROM (
-                    SELECT DeviceId, MAX(TimeStamp) AS TimeStamp FROM has_data GROUP BY DeviceId
+                    SELECT DeviceId, MAX(TimeStamp) AS TimeStamp FROM {COMPLETE_BINS} GROUP BY DeviceId
                     UNION ALL
-                    SELECT DeviceId, MarkerBin FROM gap_markers WHERE DeviceId NOT IN (SELECT DeviceId FROM has_data)
+                    SELECT DeviceId, MarkerBin FROM gap_markers WHERE DeviceId NOT IN (SELECT DeviceId FROM {COMPLETE_BINS})
                 );
             """)
 
@@ -921,6 +917,11 @@ class SignalDataProcessor:
                 if aggregation['name'] in OWN_CARRY_AGGREGATIONS:
                     params['carry_bins'] = 'df_or_path' in (self.unmatched_event_settings or {})
 
+                # has_data keeps its rows in the main unmatched file, and a run with no such file writes all it has
+                if aggregation['name'] == 'has_data':
+                    params['carry_bins'] = 'df_or_path' in (self.unmatched_event_settings or {})
+                    params['unmatched'] = params['carry_bins'] and self.unmatched_found
+
                 if aggregation['name'] == 'ped':
                     params['ped_carried'] = self._ped_carried(params)
                     ped_params = params
@@ -1015,6 +1016,9 @@ class SignalDataProcessor:
             self._save_complete_bins()
         if self.incremental_run and not self.to_sql:
             self._save_last_events()
+        if self._table_exists('has_data_state'):
+            self._add_to_unmatched_events("SELECT * FROM has_data_state")
+            self.conn.execute("DROP TABLE has_data_state")
         if self.known_detector_days is not None and not self.to_sql:
             self._save_known_detectors()
 

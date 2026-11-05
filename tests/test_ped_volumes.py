@@ -335,25 +335,27 @@ class TestMaxDaysOld:
 ### remove_incomplete
 #########################################
 
-HAS_DATA = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+HAS_DATA = {'name': 'has_data', 'params': {}}
 
 
 @pytest.mark.parametrize('return_volumes', [True, False])
 def test_remove_incomplete_keeps_a_bin_written_after_its_run(return_volumes):
-    # One quiet signal: the first run stops well short of the end of the bin, which has_data passed
+    # One quiet signal: the first run stops well short of the end of the bin, so has_data and ped both write it in the next
     events = pd.concat([events_at(at(1, 1), at(1, 13)), events_at(at(1, 20), at(1, 50)), end_marker(at(1, 59, 59.9))])
     aggregations = [HAS_DATA, {'name': 'ped', 'params': {'return_volumes': return_volumes}}]
     big = process(events, aggregations, carry='first', remove_incomplete=True)['ped']
     first = process(events[events.TimeStamp < at(1, 14)], aggregations, carry='first', remove_incomplete=True)
     assert first['ped'].empty
-    assert (first['unmatched_events'].EventId == 942).sum() == 1
+    assert first['has_data'].empty
     second = process(events[events.TimeStamp >= at(1, 14)], aggregations, carry=first['unmatched_events'], remove_incomplete=True)
     pd.testing.assert_frame_equal(written([second['ped']]), written([big]))
     assert at(1) in set(second['ped'].TimeStamp)
 
 
 def test_remove_incomplete_leaves_out_a_bin_with_no_data():
-    events = pd.concat([events_at(at(1, 1)), events_at(at(2, 1)), end_marker(at(1, 14, 59)), end_marker(at(2, 14, 59.9))])
+    # A signal logging each minute, then nothing from 01:15 to 02:00
+    minutes = [events_at(at(hour, minute)) for hour in (1, 2) for minute in range(15)]
+    events = pd.concat([*minutes, end_marker(at(1, 14, 59)), end_marker(at(2, 14, 59.9))])
     out = process(events, [HAS_DATA, {'name': 'ped', 'params': {}}], remove_incomplete=True)['ped']
     assert sorted(out.query("DeviceId == 'A'").TimeStamp) == [at(1), at(2)]
 
@@ -378,7 +380,7 @@ def test_the_published_formula_on_real_data(real_events):
 
 def test_first_window_with_none_then_a_carry(real_events):
     """How ODOT's scheduled job starts: known detectors and timeline, with None in place of the state until it has one."""
-    has_data = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+    has_data = {'name': 'has_data', 'params': {}}
     timeline = {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60}}
     aggregations = [has_data, timeline, {'name': 'actuations', 'params': {'fill_in_missing': True}}, {'name': 'ped', 'params': {}}]
     events = real_events[real_events.TimeStamp < real_events.TimeStamp.min() + pd.Timedelta(hours=9)]

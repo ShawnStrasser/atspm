@@ -89,7 +89,7 @@ params = {
     'output_format': 'csv',                 # 'csv', 'parquet', or 'json'
     'output_file_prefix': 'run1_',          # Optional prefix for output files
     'output_to_separate_folders': True,     # Save each measure in its own subfolder
-    'remove_incomplete': True,              # Remove bins with insufficient data (requires 'has_data' agg)
+    'remove_incomplete': True,              # Remove bins has_data scores under 0.5 or has no row for (requires 'has_data' agg)
     'drop_fall_back_hour': True,            # Drop events in the hour US clocks repeat each November (default shown, see The fall clock change)
     'verbose': 1,                           # 0: Errors only, 1: Performance, 2: Debug
     'to_sql': False,                        # If True, returns SQL strings instead of executing
@@ -107,13 +107,7 @@ params = {
 
     # --- Performance Measures (Aggregations) ---
     'aggregations': [
-        {
-            'name': 'has_data', 
-            'params': {
-                'no_data_min': 5,           # Min minutes of data required per bin
-                'min_data_points': 3        # Min events required per sub-bin
-            }
-        },
+        {'name': 'has_data', 'params': {}},
         {
             'name': 'actuations', 
             'params': {
@@ -229,7 +223,7 @@ The data produced by `atspm` can be visualized using Power BI, Plotly, or other 
 
 All of the following tables include a `TimeStamp` column aligned to the start of each aggregation bin (for example, 15 minutes):
 
-- **Has Data** (`has_data`): Marks intervals where each controller produced sufficient data (proxy for controller online/communications health). Also used to filter incomplete periods for other measures.
+- **Has Data** (`has_data`): Scores how complete each controller's events are in each bin, from what the events themselves prove was lost. Also used to filter incomplete periods for other measures.
 - **Actuations** (`actuations`): Detector actuations per detector and interval (with optional zero-filling of missing intervals).
 - **Arrival on Green** (`arrival_on_green`): Percentage of vehicles reaching the stop bar during green by phase, with each advance detector actuation projected to the stop bar. See [Arrival on Green](#arrival-on-green).
 - **Platoon Ratio** (`platoon_ratio`): HCM platoon ratio by phase and interval, `Rp = Percent_AOG / (g/C)`, with the green ratio estimated from phase green time within each bin and the HCM arrival type (1–6). Unlike arrival on green, it is comparable across phases with different splits. Requires `arrival_on_green`.
@@ -614,8 +608,16 @@ Written by `detector_health` when its `findings` param is True (default False), 
 *   `Detail` (TEXT): The evidence.
 
 #### has_data
-*   `TimeStamp` (DATETIME): Bin start time where data exists.
+At most one row per signal and bin. No row reads as Score 0, so a lost bin has none. A bin with no evidence of loss reads 1, however quiet it was.
+*   `TimeStamp` (DATETIME): Bin start time.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Score` (FLOAT): Above 0 and up to 1. The smaller of two shares:
+    *   Order: each phase logs green, yellow and red in a fixed order, so a step that skips a state it has logged today proves those events were lost. Phase events seen / (seen + proved missing).
+    *   Stops: all events, phase calls (43, 44) and detector events (82) are three streams. One silent for over 4 times its usual longest gap (the median of the longest gap in each of its last 4 bins with events) has stopped, and what it was logging counts as missing. All events seen / (seen + stopped missing).
+
+It reads `EventId` 218 and below. A flash status (173 with `Parameter` other than 2) ends order checks across it and clears what the streams remember, as a signal in flash can be silent. `remove_incomplete`, `timeline`'s `IsValid` and `coordination_agg` read a bin as having data at Score 0.5 or more.
+
+With a main unmatched file a bin is written by the first run whose data reaches its end, so a run cut anywhere gives the same rows, written once. A run with no such file writes all it has. A signal is known from its first event until it has logged nothing for `max_days_old`.
 
 #### ped
 *   `TimeStamp` (DATETIME): Bin start time.
@@ -730,7 +732,7 @@ Rows with `EventId` 927 to 959 are state carried between runs, not controller ev
 | 937 | `ped` | Each input's last press, one row per input | Input |
 | 938 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped, at its projected time | Phase |
 | 939, 940, 941 | `arrival_on_green`, `platoon_ratio` | Green, yellow and red clearance begins not written yet. 939 also marks a phase green when results stopped | Phase |
-| 942 | `arrival_on_green`, `platoon_ratio`, `ped`, `yellow_red`, `approach_delay` or `left_turn_gaps` with `remove_incomplete` | A bin not written yet that passed `has_data` | 0 |
+| 942 | `arrival_on_green`, `platoon_ratio`, `ped`, `yellow_red`, `approach_delay` or `left_turn_gaps` with `remove_incomplete` | A bin not written yet that `has_data` passed | 0 |
 | 943 | `ped` | One unique actuation, stamped with its bin, in a bin not written yet or the last 3 written | Input |
 | 944, 945 | `ped` | Each input's next bin to write, and its last activity | Input |
 | 946, 947 | `ped` | One press, or one ped service, stamped with its bin, in a bin not written yet | Input |
@@ -744,6 +746,12 @@ Rows with `EventId` 927 to 959 are state carried between runs, not controller ev
 | 957 | `approach_delay` | A sum of a bin not written yet, stamped with its bin plus one microsecond for each unit. A sum too big for its bin takes more rows | Phase for `Delay_Seconds` in milliseconds, phase + 1000 for `Queued_Delay_Seconds` in half milliseconds |
 | 958 | `approach_delay` | A vehicle still waiting, at its arrival, or a green, yellow or red begin a vehicle may need | Phase for a vehicle, phase + 1000 times 1, 8 or 10 for an event |
 | 959 | `approach_delay` | A detector on at the end of the data, one holding the flag, when a flag began, or the on of a vehicle under the flag not at every stop bar of its detector yet | Detector, detector + 1000, + 2000 or + 3000 |
+| 970, 971, 972 | `has_data` | The last event of all events, phase calls and detector events | Events in the stream's last bin that was not half quiet |
+| 974 | `has_data` | The first bin not written, one per signal | 0 |
+| 979 | `has_data` | Each phase's last event | Phase * 512 + states seen today * 8 + position (7 = do not judge) |
+| 980 to 982, 984 to 990, 992, 994 to 996 | `has_data` | Counts of a bin part way through, stamped with that bin | The count |
+| 991 | `has_data` | A flash status in a bin part way through | 0 |
+| 997, 998, 999 | `has_data` | The stream's last 4 finished bins with events | Longest gap, seconds |
 
 ## Release Notes
 

@@ -1,5 +1,6 @@
 import os
 from jinja2 import Environment, FileSystemLoader
+from .utils import COMPLETE_BINS, WRITE_BINS_AT_ONCE
 
 # Cache the Jinja2 environment at module level to avoid recreating it for every query
 # This improves performance and reduces memory churn from repeated Environment instantiation
@@ -20,19 +21,34 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
     if aggregation_name not in ['has_data', 'unmatched_events', 'timeline', 'split_failures'] and kwargs['remove_incomplete']:
         # Add natural join with has_data table
         # Note: newline before closing paren ensures SQL comments in inner query don't break the wrapper
-        complete_bins = 'has_data'
+        complete_bins = COMPLETE_BINS
         # These can write a bin that an earlier run saw in has_data, see complete_bins_carry.sql
         if aggregation_name in ['arrival_on_green', 'platoon_ratio', 'ped', 'yellow_red', 'approach_delay', 'left_turn_gaps'] and kwargs.get('unmatched', False):
-            complete_bins = ("(SELECT TimeStamp, DeviceId FROM has_data "
+            complete_bins = (f"(SELECT TimeStamp, DeviceId FROM {COMPLETE_BINS} "
                              "UNION SELECT TimeStamp, DeviceId FROM unmatched_previous WHERE EventId = 942)")
+        # These write all a run has, with no later run to wait for, so a bin has_data has not finished yet stays
+        if aggregation_name in WRITE_BINS_AT_ONCE and not to_sql:
+            bin_interval = f"INTERVAL '{kwargs['bin_size']} minutes'"
+            complete_bins = (f"(SELECT TimeStamp, DeviceId FROM {COMPLETE_BINS} "
+                             f"UNION SELECT DISTINCT TIME_BUCKET({bin_interval}, r.TimeStamp), r.DeviceId FROM raw_data r "
+                             "JOIN has_data_state s ON s.DeviceId = r.DeviceId AND s.EventId = 974 "
+                             f"WHERE TIME_BUCKET({bin_interval}, r.TimeStamp) >= s.TimeStamp)")
         query = f"SELECT * FROM ({query}\n) main_query NATURAL JOIN {complete_bins} "
 
     # Split failures are different to allow for saving incomplete cycle data
     if aggregation_name == 'split_failures':
         if kwargs['remove_incomplete']:
-            query += " CREATE TABLE split_failures AS SELECT * FROM sf_final NATURAL JOIN has_data; "
+            query += f" CREATE TABLE split_failures AS SELECT * FROM sf_final NATURAL JOIN {COMPLETE_BINS}; "
         else:
             query += " CREATE TABLE split_failures AS SELECT * FROM sf_final; "
+    elif aggregation_name == 'has_data' and to_sql:
+        query = f"CREATE TABLE has_data AS SELECT TimeStamp, DeviceId, Score FROM ({query}\n) WHERE Kind = 'score'; "
+    elif aggregation_name == 'has_data':
+        # One query gives the scores and what the next run needs, which is added to unmatched_events after the other tables
+        query = (f"CREATE TEMP TABLE has_data_all AS {query}\n; "
+                 "CREATE TABLE has_data AS SELECT TimeStamp, DeviceId, Score FROM has_data_all WHERE Kind = 'score'; "
+                 "CREATE TEMP TABLE has_data_state AS SELECT TimeStamp, DeviceId, EventId::INT16 AS EventId, Parameter::INT16 AS Parameter, TRUE AS IsValid "
+                 "FROM has_data_all WHERE Kind = 'state'; DROP TABLE has_data_all; ")
     else:
         query = f"CREATE TABLE {aggregation_name} AS {query}; "
 

@@ -25,7 +25,7 @@ def _build_processor(raw_data, unmatched_df, live=None):
         remove_incomplete=False,
         unmatched_event_settings={"df_or_path": unmatched_df, "max_days_old": 14},
         aggregations=[
-            {"name": "has_data", "params": {"no_data_min": 15, "min_data_points": 1}},
+            {"name": "has_data", "params": {}},
             {"name": "timeline", "params": timeline_params},
         ],
     )
@@ -52,7 +52,7 @@ def test_timeline_live_keeps_incomplete_and_uses_bin_endtime():
 
     assert len(unmatched1) > 0, "Expected unmatched events to be captured for incremental processing"
     # EventIds 935, 936 and 955 are per-device markers (last bin with data, last event, last phase call), not incomplete timeline events
-    incomplete1 = unmatched1[~unmatched1["EventId"].isin([935, 936, 955])]
+    incomplete1 = unmatched1[~unmatched1["EventId"].isin([935, 936, 955, *range(970, 1000)])]
     assert len(timeline1) == len(incomplete1), "Expected live mode to keep incomplete timeline events"
     assert timeline1["EndTime"].nunique() == 1, "All incomplete live rows should use one common EndTime"
     assert timeline1["EndTime"].iloc[0] == expected_end

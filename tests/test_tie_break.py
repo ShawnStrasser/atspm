@@ -8,7 +8,7 @@ from src.atspm import SignalDataProcessor
 T0 = pd.Timestamp('2026-09-01 08:00:00')
 NO_DETECTORS = pd.DataFrame(columns=['DeviceId', 'Phase', 'Parameter', 'Function'])
 TIMELINE = {'name': 'timeline', 'params': {'min_duration': 0, 'cushion_time': 60, 'max_event_gap_seconds': None}}
-HAS_DATA = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+HAS_DATA = {'name': 'has_data', 'params': {}}
 
 
 def events(rows, order):

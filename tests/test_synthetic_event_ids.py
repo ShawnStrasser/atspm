@@ -12,7 +12,7 @@ from src.atspm.utils import STATE_EVENT_IDS
 T0 = pd.Timestamp('2026-09-01 08:00:00')
 PHASE, DETECTOR, PED_INPUT = 2, 3, 4
 CONFIG = pd.DataFrame({'DeviceId': ['A'], 'Phase': [PHASE], 'Parameter': [DETECTOR], 'Function': ['Advance']})
-HAS_DATA = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+HAS_DATA = {'name': 'has_data', 'params': {}}
 TIMELINE = {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60}}
 ARRIVALS = [{'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}}, {'name': 'platoon_ratio', 'params': {}}]
 PED = [{'name': 'ped', 'params': {}}]
@@ -66,8 +66,8 @@ def test_each_family_writes_only_its_own_codes():
     frame = events(60)
     assert set(run(frame, ARRIVALS)['unmatched_events'].EventId) <= ARRIVAL_CODES | SPILLBACK_CODES | {936}
     assert set(run(frame, PED)['unmatched_events'].EventId) <= PED_CODES | {936}
-    # 942 only with remove_incomplete, where it is the same for both families and written once a bin
-    both = run(frame.iloc[:-30], [HAS_DATA, *ARRIVALS, *PED], remove_incomplete=True)['unmatched_events']
+    # 942 only with remove_incomplete, for a table that writes a bin later than has_data, written once a bin
+    both = run(frame, [HAS_DATA, *ARRIVALS, *PED, {'name': 'approach_delay', 'params': {}}], remove_incomplete=True)['unmatched_events']
     assert (both.EventId == 942).any()
     assert not both[both.EventId == 942].duplicated().any()
 

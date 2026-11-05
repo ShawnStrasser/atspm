@@ -24,7 +24,7 @@ def test_overlap_red_requires_overlap_off_terminal_event():
         bin_size=15,
         verbose=0,
         aggregations=[
-            {"name": "has_data", "params": {"no_data_min": 15, "min_data_points": 1}},
+            {"name": "has_data", "params": {}},
             {"name": "timeline", "params": {"maxtime": True, "min_duration": 0, "cushion_time": 60}},
         ],
     ) as processor:
@@ -89,7 +89,7 @@ def test_phase_yellow_red_duration_sanity_check():
         bin_size=15,
         verbose=0,
         aggregations=[
-            {"name": "has_data", "params": {"no_data_min": 15, "min_data_points": 1}},
+            {"name": "has_data", "params": {}},
             {"name": "timeline", "params": {"maxtime": True, "min_duration": 0, "cushion_time": 60}},
         ],
     ) as processor:

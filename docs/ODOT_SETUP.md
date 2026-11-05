@@ -40,7 +40,7 @@ params = {
     'verbose': 1,
     # Performance Measure Settings
     'aggregations': [
-        {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}}, # remove bins with less than 10 rows every 3 minutes
+        {'name': 'has_data', 'params': {}}, # remove_incomplete drops bins it scores under 0.5
         {'name': 'actuations', 'params': {
             'fill_in_missing': True,
             'known_detectors_max_days_old': 2

@@ -23,7 +23,7 @@ TEST_PARAMS = {
     'verbose': 1,
     'controller_type': 'maxtime',  # Enable MAXTIME-specific measures
     'aggregations': [
-        {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+        {'name': 'has_data', 'params': {}},
         {'name': 'actuations', 'params': {}},
         {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
         {'name': 'platoon_ratio', 'params': {}},  # Requires arrival_on_green

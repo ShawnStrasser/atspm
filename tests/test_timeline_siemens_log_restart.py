@@ -24,7 +24,7 @@ def _build_processor(raw_data, controller_type="siemens", unmatched_df=None):
         remove_incomplete=False,
         controller_type=controller_type,
         aggregations=[
-            {"name": "has_data", "params": {"no_data_min": 15, "min_data_points": 1}},
+            {"name": "has_data", "params": {}},
             {"name": "timeline", "params": {"min_duration": 0, "cushion_time": 60}},
         ],
         **kwargs,

@@ -7,7 +7,7 @@ from src.atspm import SignalDataProcessor
 
 SUNDAY = pd.Timestamp('2026-11-01')  # the first Sunday of November 2026
 CONFIG = pd.DataFrame({'DeviceId': ['A', 'A'], 'Phase': [2, 2], 'Parameter': [3, 4], 'Function': ['Advance', 'Yellow_Red']})
-HAS_DATA = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+HAS_DATA = {'name': 'has_data', 'params': {}}
 ALL_AGGREGATIONS = [
     HAS_DATA,
     {'name': 'actuations', 'params': {}},

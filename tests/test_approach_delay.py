@@ -19,7 +19,7 @@ PHASE, DETECTOR = 2, 3
 LIMIT, BIN = 360, 900
 DELAY = {'name': 'approach_delay', 'params': {}}
 AOG = {'name': 'arrival_on_green', 'params': {}}
-HAS_DATA = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+HAS_DATA = {'name': 'has_data', 'params': {}}
 KEYS = ['TimeStamp', 'DeviceId', 'Phase']
 COLUMNS = ['TimeStamp', 'DeviceId', 'Phase', 'Delay_Seconds', 'Queued_Delay_Seconds']
 OWN_CODES = {957, 958, 959}
@@ -466,12 +466,12 @@ def test_a_sum_bigger_than_one_state_row_holds():
 
 
 def test_remove_incomplete_drops_a_bin_with_no_data_across_runs():
-    has_data = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 2}}
+    has_data = {'name': 'has_data', 'params': {}}
     aggregations = [has_data, DELAY]
-    # The second bin has one event, so has_data fails it, and a vehicle projected into it has no row
+    # The signal logs each minute, then nothing through the second bin, so has_data has no row for it, and a vehicle projected into it has no row
     detectors = config((PHASE, DETECTOR), DistanceFromStopBar=20 * 35 * 1.467)
     events = frame(at(0, 10, PHASE), *signal((60, 100, 104)), *actuation(30, 31), *actuation(890, 890.1),
-                   *[at(t, 10, 15) for t in range(1800, 3000, 100)])
+                   *[at(t, 10, 15) for t in (*range(0, 900, 60), *range(1800, 3000, 100))])
     big = process(events, detectors, aggregations, remove_incomplete=True)
     assert list(sort(big['approach_delay']).TimeStamp) == [T0]
     for cuts in ([900, 1800], [450, 1000, 1900, 2500]):

@@ -18,7 +18,7 @@ BIN = 900
 GAPS = {'name': 'left_turn_gaps', 'params': {}}
 AOG = {'name': 'arrival_on_green', 'params': {}}
 DELAY = {'name': 'approach_delay', 'params': {}}
-HAS_DATA = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+HAS_DATA = {'name': 'has_data', 'params': {}}
 KEYS = ['TimeStamp', 'DeviceId', 'Phase', 'Gap_Length']
 OWN_CODES = {927, 928, 929, 930}
 
@@ -481,8 +481,9 @@ def test_a_lane_stuck_on_past_max_days_old_stays_on_while_its_device_logs():
 
 
 def test_remove_incomplete_drops_a_bin_with_no_data_across_runs():
-    """A green across a bin with no events: has_data has no row for it. The bin after is written a run after has_data saw it."""
-    events = frame(*car(-9, -8), at(0, 1, PHASE), *car(10, 11), at(2 * BIN + 30, 10, PHASE), *end_at(2 * BIN + 800), *end_at(3 * BIN + 20))
+    """A green across a bin with no events, on a signal that logs each minute: has_data has no row for it."""
+    minutes = [row for t in (*range(-BIN, BIN, 60), *range(2 * BIN + 60, 3 * BIN, 60)) for row in end_at(t)]
+    events = frame(*car(-9, -8), at(0, 1, PHASE), *car(10, 11), at(2 * BIN + 30, 10, PHASE), *minutes, *end_at(3 * BIN + 20))
     outputs = cut_runs(events, [BIN, 2 * BIN, 3 * BIN], aggregations=[HAS_DATA, GAPS], remove_incomplete=True)
     table = written(outputs)
     assert set(table.TimeStamp) == {T0, T0 + pd.Timedelta(seconds=2 * BIN)}

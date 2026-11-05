@@ -182,7 +182,7 @@ def test_a4_no_store_or_temp_table_stays_behind():
 # ---- A5: every other aggregation is unaffected
 
 OTHERS = [
-  {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
+  {'name': 'has_data', 'params': {}},
   {'name': 'actuations', 'params': {'fill_in_missing': True}},
   {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
   {'name': 'yellow_red', 'params': {'latency_offset_seconds': 1.5, 'min_red_offset': -8}},

@@ -6,7 +6,7 @@ from src.atspm import SignalDataProcessor
 
 T0 = pd.Timestamp('2026-10-27 15:00:00')
 WAIT = {'name': 'phase_wait', 'params': {'preempt_recovery_seconds': 120, 'assumed_cycle_length': 140, 'skip_multiplier': 1.5}}
-HAS_DATA = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+HAS_DATA = {'name': 'has_data', 'params': {}}
 TIMELINE = {'name': 'timeline', 'params': {'min_duration': 0.0, 'cushion_time': 60, 'max_event_gap_seconds': None}}
 
 

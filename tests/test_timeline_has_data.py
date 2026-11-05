@@ -23,10 +23,8 @@ def create_synthetic_data():
     - LARGE GAP - No data for ~12 hours
     - 22:14:58 - Green Start for a Phase Wait that started at 09:53:50
     
-    With 15-minute bins and no_data_min=15, min_data_points=1:
-    - Only bins 09:45 and 22:00 will have has_data
-    - All bins in between are missing
-    - The Phase Wait event from 09:53:50 to 22:14:58 spans many missing bins
+    This signal has no history, so has_data reads its quiet bins as 1. The silence check still fails the
+    Phase Wait event from 09:53:50 to 22:14:58.
     """
     data = """DeviceId,TimeStamp,EventId,Parameter
 test,2026-01-07 09:53:00.400,1,8
@@ -63,7 +61,7 @@ class TestTimelineHasDataIntegration:
             verbose=0,
             remove_incomplete=False,
             aggregations=[
-                {'name': 'has_data', 'params': {'no_data_min': 900, 'min_data_points': 1}},
+                {'name': 'has_data', 'params': {}},
                 # The 12-hour silence would also be caught by the event gap check, which this test is not about
                 {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60, 'max_event_gap_seconds': None}},
             ]
@@ -99,7 +97,7 @@ class TestTimelineHasDataIntegration:
             remove_incomplete=False,  # We're not removing, just marking invalid
             aggregations=[
                 # Simple has_data: 15 minute bins, at least 1 data point per bin
-                {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+                {'name': 'has_data', 'params': {}},
                 {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60}},
             ]
         ) as processor:
@@ -119,13 +117,11 @@ class TestTimelineHasDataIntegration:
             
             print(f"\nTimeline Phase Wait result:\n{result}")
         
-        # Verify has_data only has 2 bins (09:45 and 22:00)
-        assert len(has_data_result) == 2, f"Expected 2 has_data bins, got {len(has_data_result)}"
         
         # Verify the Phase Wait event exists and is marked as INVALID
         assert len(result) == 1, f"Expected 1 Phase Wait event, got {len(result)}"
         assert result.iloc[0]['IsValid'] == False, \
-            f"Phase Wait event should be INVALID because it spans many missing data periods. Got IsValid={result.iloc[0]['IsValid']}"
+            f"Phase Wait event should be INVALID because it spans a silence. Got IsValid={result.iloc[0]['IsValid']}"
 
 
 if __name__ == '__main__':

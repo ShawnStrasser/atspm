@@ -319,7 +319,7 @@ def test_older_unmatched_file_still_loads():
     # A file written before these markers, as timeline left it
     old = pd.DataFrame({'TimeStamp': [T0], 'DeviceId': 'A', 'EventId': [1], 'Parameter': [2], 'IsValid': [True]})
     events = frame(at(100, 82, 3), at(200, 8, 2), at(899.9, 1, 7))
-    aggregations = [{'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+    aggregations = [{'name': 'has_data', 'params': {}},
                     {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60}}, *TWO_TABLES]
     assert process(events, config((2, 3)), aggregations, carry=old)['arrival_on_green'].Percent_AOG.tolist() == [0.0]  # the old green is not read
 
@@ -351,7 +351,7 @@ def test_real_data_with_old_config_at_bin_cuts_equals_one_big_run_and_a_run_with
 
 def test_remove_incomplete_keeps_a_bin_written_after_its_run():
     # One quiet signal: the first run stops well short of the end of the bin, which has_data passed
-    has_data = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+    has_data = {'name': 'has_data', 'params': {}}
     events = frame(at(10, 1, 2), at(100, 82, 3), at(200, 8, 2), at(910, 1, 2), at(1000, 82, 3), at(1100, 8, 2), at(1799.9, 1, 7))
     aggregations = [has_data, AOG, PLATOON]
     big = process(events, config((2, 3)), aggregations, carry='first', remove_incomplete=True)
@@ -364,7 +364,7 @@ def test_remove_incomplete_keeps_a_bin_written_after_its_run():
 def test_other_measures_are_the_same_with_the_carry_in_the_file():
     """timeline, yellow_red and the rest read raw_data_all, which must not hand them 938 to 942."""
     events, detectors = real_events(), real_config()
-    has_data = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+    has_data = {'name': 'has_data', 'params': {}}
     others = [has_data, {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time': 60}},
               {'name': 'yellow_red', 'params': {'latency_offset_seconds': 1.5, 'min_red_offset': -8}}]
     edges = [events.TimeStamp.min().floor('15min') + pd.Timedelta(hours=h) for h in range(0, 7)]
