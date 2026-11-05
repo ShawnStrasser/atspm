@@ -129,7 +129,7 @@ def test_a_finished_cycle_in_a_bin_with_data_to_its_end_is_written_by_that_run()
     run1 = process(events, carry='first')
     assert run1['yellow_red'].TimeStamp.tolist() == [T0]
     # Only the open green is left waiting
-    assert set(run1['unmatched_events'].EventId) == {951}
+    assert set(run1['unmatched_events'].EventId) - {936} == {951}
 
 
 def test_a_late_actuation_shifted_by_latency_stays_in_its_cycle():

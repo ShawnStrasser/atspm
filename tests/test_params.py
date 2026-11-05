@@ -150,3 +150,38 @@ def test_split_failure_state_loads_when_the_main_state_is_a_first_run(tmp_path):
     out = run(RAW, [{'name': 'split_failures', 'params': sf_params}], tables=['sf_unmatched'], config=config,
               unmatched_event_settings={'df_or_path': None, 'split_fail_df_or_path': str(sf), **STATE_SETTINGS})
     assert (out['sf_unmatched'].EventId == 82).any()
+
+
+STATE_ACTUATIONS = [{'name': 'actuations', 'params': {}}]
+
+
+def run_on(path, raw, aggregations=None, **settings):
+    """One run, saving to a state file: what a worker does."""
+    p = SignalDataProcessor(raw_data=raw, detector_config=EMPTY_CONFIG, bin_size=15, verbose=0, aggregations=aggregations or [HAS_DATA, TIMELINE],
+                            unmatched_event_settings={'df_or_path': str(path), 'max_days_old': 14, 'first_run': True, **settings})
+    with p:
+        p.load()
+        p.aggregate()
+        p.conn.execute(f"COPY unmatched_events TO '{path}'")
+        return p.conn.sql('SELECT * FROM unmatched_events').df()
+
+
+@pytest.mark.parametrize('aggregations', [[HAS_DATA, TIMELINE], STATE_ACTUATIONS], ids=['timeline', 'without_timeline'])
+def test_input_older_than_the_state_raises(tmp_path, aggregations):
+    path = tmp_path / 'state.parquet'
+    window = events([(0, 'A', 1, 2), (30, 'A', 7, 2), (60, 'A', 82, 5)])
+    run_on(path, window, aggregations)
+    for again in (window, events([(30, 'A', 1, 2)]), events([(-600, 'A', 1, 2)])):
+        with pytest.raises(ValueError, match='older than the state'):
+            run_on(path, again, aggregations)
+    # The next window follows on, and a device with no events held yet is new
+    run_on(path, events([(900, 'A', 1, 2), (-600, 'B', 1, 2)]), aggregations)
+
+
+def test_input_older_than_the_split_failure_state_raises(tmp_path):
+    sf = tmp_path / 'sf.parquet'
+    pd.DataFrame({'TimeStamp': [T0 + pd.Timedelta(seconds=30)], 'DeviceId': ['A'], 'EventId': [82], 'Detector': [5], 'Phase': [2]}).to_parquet(sf)
+    settings = {'split_fail_df_or_path': str(sf), 'max_days_old': 14}
+    with pytest.raises(ValueError, match='older than the state'):
+        SignalDataProcessor(raw_data=events([(0, 'A', 1, 2)]), detector_config=EMPTY_CONFIG, bin_size=15, verbose=0, aggregations=[],
+                            unmatched_event_settings=settings).load()

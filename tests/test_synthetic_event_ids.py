@@ -64,8 +64,8 @@ def cut_at_minutes(frame, aggregations, minutes, **kwargs):
 
 def test_each_family_writes_only_its_own_codes():
     frame = events(60)
-    assert set(run(frame, ARRIVALS)['unmatched_events'].EventId) <= ARRIVAL_CODES | SPILLBACK_CODES
-    assert set(run(frame, PED)['unmatched_events'].EventId) <= PED_CODES
+    assert set(run(frame, ARRIVALS)['unmatched_events'].EventId) <= ARRIVAL_CODES | SPILLBACK_CODES | {936}
+    assert set(run(frame, PED)['unmatched_events'].EventId) <= PED_CODES | {936}
     # 942 only with remove_incomplete, where it is the same for both families and written once a bin
     both = run(frame.iloc[:-30], [HAS_DATA, *ARRIVALS, *PED], remove_incomplete=True)['unmatched_events']
     assert (both.EventId == 942).any()
@@ -133,7 +133,8 @@ def test_other_measures_do_not_see_the_state_rows():
     """timeline and yellow_red read raw_data_all, the state rows must not be in it."""
     frame = events(60)
     carry = run(frame, [HAS_DATA, TIMELINE, *ARRIVALS, *PED])['unmatched_events']
-    with SignalDataProcessor(raw_data=frame, detector_config=CONFIG, bin_size=15, verbose=0, aggregations=[HAS_DATA],
+    later = frame.assign(TimeStamp=frame.TimeStamp + pd.Timedelta(hours=1))
+    with SignalDataProcessor(raw_data=later, detector_config=CONFIG, bin_size=15, verbose=0, aggregations=[HAS_DATA],
                              unmatched_event_settings={'df_or_path': carry, 'max_days_old': 14}) as p:
         p.load()
         seen = {row[0] for row in p.conn.execute("SELECT DISTINCT EventId FROM raw_data_all").fetchall()}

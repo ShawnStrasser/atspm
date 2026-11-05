@@ -630,7 +630,8 @@ Rows with `EventId` 931 to 955 are state carried between runs, not controller ev
 | `EventId` | Written by | Holds | `Parameter` |
 | --- | --- | --- | --- |
 | 931 to 934 | `coordination_agg` | Pattern, cycle length, actual cycle length, actual offset | The value |
-| 935, 936 | `timeline` | The last bin with data and the last event of each device | 0 |
+| 935 | `timeline` | The last bin with data of each device | 0 |
+| 936 | Every run with a main unmatched file | The last event of each device | 0 |
 | 937 | `ped` | Each input's last press, one row per input | Input |
 | 938 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped, at its projected time | Phase |
 | 939, 940, 941 | `arrival_on_green`, `platoon_ratio` | Green, yellow and red clearance begins not written yet. 939 also marks a phase green when results stopped | Phase |

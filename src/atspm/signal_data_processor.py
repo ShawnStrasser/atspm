@@ -459,7 +459,30 @@ class SignalDataProcessor:
             v_print('Make sure detector_config column names are: DeviceId, Phase, Parameter, Function (and optionally DistanceFromStopBar, MPH, LatencyCorrection)', self.verbose)
             v_print('*'*50, self.verbose)
             raise e
-        
+        self._check_input_follows_state()
+
+    def _check_input_follows_state(self):
+        """Raises if a device's input does not start after the last event the state holds for it. That input was run already,
+        so its rows would be written again. Runs that follow on never get here: a run's events all come before the next one's."""
+        held = []
+        if self._table_exists('unmatched_previous'):
+            held.append("SELECT DeviceId, TimeStamp FROM unmatched_previous WHERE EventId = 936")
+        if self._table_exists('sf_unmatched_previous'):
+            held.append("SELECT DeviceId, TimeStamp FROM sf_unmatched_previous")
+        if not held or not self._table_exists('raw_data'):
+            return
+        older = self.conn.execute(f"""
+            SELECT DeviceId, First_Event, Last_Held, COUNT(*) OVER ()
+            FROM (SELECT DeviceId, MIN(TimeStamp) AS First_Event FROM raw_data GROUP BY DeviceId)
+            JOIN (SELECT DeviceId, MAX(TimeStamp) AS Last_Held FROM ({' UNION ALL '.join(held)}) GROUP BY DeviceId) USING (DeviceId)
+            WHERE First_Event <= Last_Held
+            ORDER BY DeviceId LIMIT 1
+        """).fetchall()
+        if older:
+            device, first, last, devices = older[0]
+            raise ValueError(f"raw_data is older than the state: device {device} starts at {first}, and the state holds an event of it "
+                             f"at {last} ({devices} devices like this). That input has been run already. To run it again, start from the state saved before it.")
+
     def _invalidate_timeline_data_gaps(self):
         """Marks timeline rows and unmatched events invalid when they span a bin missing from has_data.
 
@@ -570,13 +593,12 @@ class SignalDataProcessor:
         self.conn.execute("DROP TABLE gap_markers; DROP TABLE gap_known_bins; DROP TABLE gap_bounds;")
 
     def _invalidate_unmatched_event_gaps(self):
-        """Marks unmatched events invalid when a device silence follows them, and saves each device's last event.
+        """Marks unmatched events invalid when a device silence follows them.
 
         timeline.sql already invalidates completed intervals that overlap a silence (event_gaps.sql). An event
         still unmatched at a silence will overlap it once matched, so it is marked invalid now and the next
-        run inherits that through unmatched_previous.IsValid. Incremental runs save each device's last event
-        time (synthetic EventId 936) so the next run measures a silence that crosses runs from it. A device
-        with no data in this run keeps its previous marker.
+        run inherits that through unmatched_previous.IsValid. The next run measures a silence that crosses
+        runs from each device's last event (synthetic EventId 936).
         """
         has_previous = self.conn.execute(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_previous'"
@@ -594,16 +616,14 @@ class SignalDataProcessor:
             DROP TABLE event_gaps;
         """)
 
-        if self.incremental_run:
-            previous_markers = (
-                "UNION ALL SELECT DeviceId, TimeStamp FROM unmatched_previous WHERE EventId = 936" if has_previous else ""
-            )
-            self.conn.execute(f"""
-                INSERT INTO unmatched_events
-                SELECT MAX(TimeStamp), DeviceId, 936 AS EventId, 0 AS Parameter, TRUE AS IsValid
-                FROM (SELECT DeviceId, TimeStamp FROM raw_data {previous_markers})
-                GROUP BY DeviceId;
-            """)
+    def _save_last_events(self):
+        """Saves each device's last event (synthetic EventId 936). A device with no data in this run keeps its previous one."""
+        previous = "UNION ALL SELECT DeviceId, TimeStamp FROM unmatched_previous WHERE EventId = 936" if self._table_exists('unmatched_previous') else ""
+        self._add_to_unmatched_events(f"""
+            SELECT MAX(TimeStamp) AS TimeStamp, DeviceId, 936::INT16 AS EventId, 0::INT16 AS Parameter, TRUE AS IsValid
+            FROM (SELECT DeviceId, TimeStamp FROM raw_data {previous})
+            GROUP BY DeviceId
+        """)
 
     def _save_last_phase_calls(self):
         """Saves each device's last phase call event (synthetic EventId 955), so the next run knows whether calls were
@@ -920,6 +940,8 @@ class SignalDataProcessor:
         if self.remove_incomplete and 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql \
                 and any(agg['name'] in OWN_CARRY_AGGREGATIONS for agg in self.aggregations):
             self._save_complete_bins()
+        if self.incremental_run and not self.to_sql:
+            self._save_last_events()
 
         # Print out runtimes
         v_print(f"\n\nTotal aggregation runtime: {sum(self.runtimes.values()):.2f} seconds.", self.verbose)

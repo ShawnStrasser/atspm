@@ -43,6 +43,11 @@ def process(events, aggregations, carry=None, settings=None, **kwargs):
         return {t: p.conn.execute(f"SELECT * FROM {t}").df() for t in tables if t not in ('raw_data', 'raw_data_all', 'unmatched_previous')}
 
 
+def no_last_event(out):
+    """The carry without the last event of each device, for a late press: with it, a run raises on input older than the state."""
+    return out['unmatched_events'].query('EventId != 936')
+
+
 def reach_bin_end(events):
     """The events plus another signal's event in the last second of their last bin, so a run reaches the end of it."""
     last = events.TimeStamp.max().floor('15min') + pd.Timedelta(minutes=15, milliseconds=-100)
@@ -187,20 +192,22 @@ class TestCounting:
     def test_same_press_seen_again_is_not_counted_twice(self, volumes):
         """A press carried and also in the next run, from a window that overlaps the one before."""
         out1 = process(presses(0, 100), [aggregation(volumes)], carry='first')
-        out2 = process(reach_bin_end(presses(100, 300)), [aggregation(volumes)], carry=out1['unmatched_events'])
+        with pytest.raises(ValueError, match='older than the state'):
+            process(reach_bin_end(presses(100, 300)), [aggregation(volumes)], carry=out1['unmatched_events'])
+        out2 = process(reach_bin_end(presses(100, 300)), [aggregation(volumes)], carry=no_last_event(out1))
         assert unique_total([out2['ped']]) == 3
 
     def test_press_older_than_the_carried_one_is_judged_on_its_own(self, volumes):
         """A late press has nothing known before it, and its bin waits to be written like the rest of the input's.
         The next one is still within the limit of the carried press."""
         out1 = process(presses(1000), [aggregation(volumes)], carry='first')
-        out2 = process(reach_bin_end(presses(950, 1005)), [aggregation(volumes)], carry=out1['unmatched_events'])
+        out2 = process(reach_bin_end(presses(950, 1005)), [aggregation(volumes)], carry=no_last_event(out1))
         assert unique_total([out2['ped']]) == 2
 
     def test_press_older_than_a_bin_already_written_is_not_written(self, volumes):
         """A row is never written twice, so a late press in a bin already written has nowhere to go."""
         out1 = process(reach_bin_end(presses(1000)), [aggregation(volumes)], carry='first')
-        out2 = process(reach_bin_end(presses(500, 2000)), [aggregation(volumes)], carry=out1['unmatched_events'])
+        out2 = process(reach_bin_end(presses(500, 2000)), [aggregation(volumes)], carry=no_last_event(out1))
         assert out2['ped'].query('Unique_Actuations > 0').TimeStamp.tolist() == [(T0 + pd.Timedelta(seconds=2000)).floor('15min')]
 
 

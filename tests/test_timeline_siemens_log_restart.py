@@ -135,7 +135,7 @@ def test_siemens_log_restart_across_incremental_runs():
 
     chunk3 = _build_raw_df(
         [
-            ("2026-10-04 23:00:08.0", 1, 9, 2),
+            ("2026-10-04 23:00:11.0", 1, 9, 2),
             ("2026-10-04 23:00:14.0", 1, 9, 4),
         ]
     )
