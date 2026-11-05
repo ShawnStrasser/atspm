@@ -61,14 +61,9 @@ def test_a_wait_left_out_for_a_preempt_is_not_a_sample():
     assert out.AvgPhaseWait.tolist() == pytest.approx([10])
 
 
-def test_a_bin_written_by_two_runs_rolls_up_to_one_big_run():
-    """phase_wait writes the waits that ended in a run, so a run cut inside a bin gives that bin two rows. Samples adds them up."""
+def test_a_run_cut_inside_a_bin_raises():
+    """phase_wait writes the waits that ended in a run, so a run cut inside a bin would give that bin two rows."""
     groups = [wait(2, 100, 110), wait(2, 200, 220), wait(2, 400, 460), wait(2, 500, 505)]
-    whole, _, _ = run(events(*groups))
-    first, kept, _ = run(events(*groups[:2]), carry='')
-    second, _, _ = run(events(*groups[2:]), carry=kept)
-    both = pd.concat([first, second])
-    assert len(both) == 2 and len(whole) == 1
-    assert both.Samples.sum() == whole.Samples.iloc[0] == 4
-    rolled = (both.AvgPhaseWait * both.Samples).sum() / both.Samples.sum()
-    assert rolled == pytest.approx(whole.AvgPhaseWait.iloc[0])
+    _, kept, _ = run(events(*groups[:2]), carry='')
+    with pytest.raises(ValueError, match='cut on the bin'):
+        run(events(*groups[2:]), carry=kept)

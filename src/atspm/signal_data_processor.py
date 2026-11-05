@@ -38,6 +38,9 @@ DEFAULT_SECONDS_BETWEEN_ACTUATIONS = 15
 # Aggregations that keep what they have not written yet in the main unmatched file, each with its own rows.
 OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, 'ped', 'yellow_red')
 
+# Tables that write whatever bins a run has, with nothing kept for a later run. Cut inside a bin, a run writes that bin again.
+WRITE_BINS_AT_ONCE = ('actuations', 'terminations', 'splits', 'coordination_agg', 'phase_wait', 'ped_delay')
+
 # Every setting a run takes. A misspelled name would otherwise do nothing, with no message. detector_health checks its own.
 SETTINGS = {'raw_data', 'detector_config', 'bin_size', 'output_dir', 'output_to_separate_folders', 'output_format',
             'output_file_prefix', 'remove_incomplete', 'drop_fall_back_hour', 'unmatched_event_settings', 'to_sql', 'verbose',
@@ -484,7 +487,8 @@ class SignalDataProcessor:
 
     def _check_input_follows_state(self):
         """Raises if a device's input does not start after the last event the state holds for it. That input was run already,
-        so its rows would be written again. Runs that follow on never get here: a run's events all come before the next one's."""
+        so its rows would be written again. Runs that follow on never get here: a run's events all come before the next one's.
+        Also raises on a cut inside a bin, if a listed table would write that bin again."""
         held = []
         if self._table_exists('unmatched_previous'):
             held.append("SELECT DeviceId, TimeStamp FROM unmatched_previous WHERE EventId = 936")
@@ -492,17 +496,28 @@ class SignalDataProcessor:
             held.append("SELECT DeviceId, TimeStamp FROM sf_unmatched_previous")
         if not held or not self._table_exists('raw_data'):
             return
-        older = self.conn.execute(f"""
-            SELECT DeviceId, First_Event, Last_Held, COUNT(*) OVER ()
-            FROM (SELECT DeviceId, MIN(TimeStamp) AS First_Event FROM raw_data GROUP BY DeviceId)
-            JOIN (SELECT DeviceId, MAX(TimeStamp) AS Last_Held FROM ({' UNION ALL '.join(held)}) GROUP BY DeviceId) USING (DeviceId)
-            WHERE First_Event <= Last_Held
-            ORDER BY DeviceId LIMIT 1
-        """).fetchall()
+        def first_device(condition):
+            return self.conn.execute(f"""
+                SELECT DeviceId, First_Event, Last_Held, COUNT(*) OVER ()
+                FROM (SELECT DeviceId, MIN(TimeStamp) AS First_Event FROM raw_data GROUP BY DeviceId)
+                JOIN (SELECT DeviceId, MAX(TimeStamp) AS Last_Held FROM ({' UNION ALL '.join(held)}) GROUP BY DeviceId) USING (DeviceId)
+                WHERE {condition}
+                ORDER BY DeviceId LIMIT 1
+            """).fetchall()
+
+        older = first_device("First_Event <= Last_Held")
         if older:
             device, first, last, devices = older[0]
             raise ValueError(f"raw_data is older than the state: device {device} starts at {first}, and the state holds an event of it "
                              f"at {last} ({devices} devices like this). That input has been run already. To run it again, start from the state saved before it.")
+        written_twice = [agg['name'] for agg in self.aggregations if agg['name'] in WRITE_BINS_AT_ONCE]
+        if written_twice:
+            bin_interval = f"INTERVAL '{self.bin_size} minutes'"
+            inside = first_device(f"TIME_BUCKET({bin_interval}, First_Event) = TIME_BUCKET({bin_interval}, Last_Held)")
+            if inside:
+                device, first, last, devices = inside[0]
+                raise ValueError(f"Runs must be cut on the bin for {written_twice}, which would write this bin twice: device {device} starts at {first}, "
+                                 f"in the same {self.bin_size}-minute bin as its last event in the state, at {last} ({devices} devices like this).")
 
     def _invalidate_timeline_data_gaps(self):
         """Marks timeline rows and unmatched events invalid when they span a bin missing from has_data.

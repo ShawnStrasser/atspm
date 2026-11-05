@@ -334,10 +334,10 @@ def test_known_detectors_with_timeline_still_carries():
         {'name': 'timeline', 'params': {'min_duration': 0, 'cushion_time': 0}},
         {'name': 'actuations', 'params': {'known_detectors_df_or_path': None}},
     ]
-    out1 = process(presses(0), aggs)
+    out1 = process(presses(895), aggs)
     assert len(carried(out1['unmatched_events'])) == 1
     aggs[3] = {'name': 'actuations', 'params': {'known_detectors_df_or_path': out1['known_detectors']}}
-    out2 = process(presses(5), aggs, carry=out1['unmatched_events'])
+    out2 = process(presses(905), aggs, carry=out1['unmatched_events'])
     assert unique_total([out2['ped']]) == 0
 
 

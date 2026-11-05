@@ -238,3 +238,20 @@ def test_a_signal_with_data_takes_its_new_pattern_not_the_kept_one(tmp_path):
     coordination_run(path, events([(1000, 'A', 131, 5)]))
     state = pd.read_parquet(path).query('EventId == 931')
     assert state.Parameter.tolist() == [5]
+
+
+@pytest.mark.parametrize('table', ['actuations', 'terminations', 'splits', 'ped_delay'])
+def test_a_cut_inside_a_bin_raises_for_a_table_that_would_write_it_twice(tmp_path, table):
+    path = tmp_path / 'state.parquet'
+    listed = [HAS_DATA, TIMELINE, {'name': table, 'params': {}}]
+    run_on(path, events([(0, 'A', 82, 5), (400, 'A', 82, 5)]), listed)
+    with pytest.raises(ValueError, match='cut on the bin'):
+        run_on(path, events([(500, 'A', 82, 5)]), listed)
+    run_on(path, events([(900, 'A', 82, 5), (500, 'B', 82, 5)]), listed)  # on the bin, and a device new to this run is fine anywhere
+
+
+def test_a_cut_inside_a_bin_is_fine_for_the_tables_that_hold_it(tmp_path):
+    path = tmp_path / 'state.parquet'
+    listed = [HAS_DATA, TIMELINE, {'name': 'ped', 'params': {}}]
+    run_on(path, events([(0, 'A', 90, 5), (400, 'A', 90, 5)]), listed)
+    run_on(path, events([(500, 'A', 90, 5)]), listed)

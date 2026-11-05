@@ -625,7 +625,7 @@ The events a later run works out `split_failures` from: each detector's last eve
 *   `EventId` (INT16): Event ID.
 *   `Parameter` (INT16): Parameter value.
 
-Rows with `EventId` 931 to 955 are state carried between runs, not controller events. Each number has one meaning. A run must list every table the file holds rows of, or it raises:
+Rows with `EventId` 931 to 955 are state carried between runs, not controller events. Each number has one meaning. A run must list every table the file holds rows of, or it raises. It raises as well on input that does not start after the last event held for its device, and, with `actuations`, `terminations`, `splits`, `coordination_agg`, `phase_wait` or `ped_delay` listed, on a run cut inside a bin, as they would write that bin twice:
 
 | `EventId` | Written by | Holds | `Parameter` |
 | --- | --- | --- | --- |

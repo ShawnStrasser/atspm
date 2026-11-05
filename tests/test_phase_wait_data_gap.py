@@ -101,7 +101,7 @@ def _dataset(case):
     return _build_raw_df(events)
 
 
-def _process(raw, unmatched_df=None, max_event_gap_seconds="default"):
+def _process(raw, unmatched_df=None, max_event_gap_seconds="default", with_phase_wait=True):
     kwargs = {}
     timeline_params = {"maxtime": True, "min_duration": 0.1, "cushion_time": 60}
     if max_event_gap_seconds != "default":
@@ -119,8 +119,8 @@ def _process(raw, unmatched_df=None, max_event_gap_seconds="default"):
         aggregations=[
             {"name": "has_data", "params": {"no_data_min": 15, "min_data_points": 1}},
             {"name": "timeline", "params": timeline_params},
-            {"name": "phase_wait", "params": {"preempt_recovery_seconds": 120, "assumed_cycle_length": 140,
-                                              "skip_multiplier": 1.5, "tsp_skip_multiplier": 2.0}},
+            *([{"name": "phase_wait", "params": {"preempt_recovery_seconds": 120, "assumed_cycle_length": 140,
+                                                 "skip_multiplier": 1.5, "tsp_skip_multiplier": 2.0}}] if with_phase_wait else []),
         ],
         **kwargs,
     )
@@ -128,7 +128,7 @@ def _process(raw, unmatched_df=None, max_event_gap_seconds="default"):
         processor.load()
         processor.aggregate()
         timeline = processor.conn.query("SELECT * FROM timeline").df()
-        phase_wait = processor.conn.query("SELECT * FROM phase_wait").df()
+        phase_wait = processor.conn.query("SELECT * FROM phase_wait").df() if with_phase_wait else None
         unmatched = None
         if unmatched_df is not None:
             unmatched = processor.conn.query("SELECT * FROM unmatched_events").df()
@@ -274,17 +274,17 @@ def _silence_dataset(silence_start, seconds):
 
 def _run_split(raw, cuts, max_event_gap_seconds="default"):
     """Process in runs split at the given times, handing unmatched events from each run to the next.
-    A run with no data at all is skipped, as a scheduler would when there is nothing to process."""
+    A run with no data at all is skipped, as a scheduler would when there is nothing to process.
+    Timeline only, as phase_wait must be cut on the bin."""
     edges = [raw["TimeStamp"].min()] + [_ts(c) if isinstance(c, str) else c for c in cuts] + [raw["TimeStamp"].max() + pd.Timedelta(seconds=1)]
-    timelines, phase_waits = [], []
+    timelines = []
     unmatched = EMPTY_UNMATCHED
     for lo, hi in zip(edges, edges[1:]):
         chunk = raw[(raw["TimeStamp"] >= lo) & (raw["TimeStamp"] < hi)]
         if len(chunk):
-            timeline, phase_wait, unmatched = _process(chunk, unmatched, max_event_gap_seconds)
+            timeline, _, unmatched = _process(chunk, unmatched, max_event_gap_seconds, with_phase_wait=False)
             timelines.append(timeline)
-            phase_waits.append(phase_wait)
-    return pd.concat(timelines, ignore_index=True), pd.concat(phase_waits, ignore_index=True)
+    return pd.concat(timelines, ignore_index=True), None
 
 
 # (silence start, seconds, expected IsValid of the green across it)
