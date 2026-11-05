@@ -228,7 +228,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Coordination Aggregate** (`coordination_agg`): Binned coordination state per interval. Provides the active Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME) for every bin using fill-forward logic.
 - **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations. A press is a unique actuation if it comes more than `seconds_between_actuations` (default 15) after the previous press on that input, or if no earlier press is known. See [Pedestrian counts and volumes](#pedestrian-counts-and-volumes).
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
-- **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
+- **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). A wait is left out when the device logged no call on any phase during it or in the 15 minutes before it ended, since the call state is then unknown. For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
 - **Detector Health** (`detector_health`): Which vehicle detectors and ped buttons are failing, when, and on what evidence, from `atspm-detector`. Needs `pip install atspm[detector-health]`. See [Detector health](#detector-health).
 
 ### Arrival on Green
@@ -644,12 +644,12 @@ Only with `'active'` in `outputs`, and off by default until reviewed. The faults
 *   `EventId` (INT16): Event ID.
 *   `Parameter` (INT16): Parameter value.
 
-Rows with `EventId` 931 to 947 are state carried between runs, not controller events. Each number has one meaning:
+Rows with `EventId` 931 to 948 are state carried between runs, not controller events. Each number has one meaning:
 
 | `EventId` | Written by | Holds | `Parameter` |
 | --- | --- | --- | --- |
 | 931 to 934 | `coordination_agg` | Pattern, cycle length, actual cycle length, actual offset | The value |
-| 935, 936 | `timeline` | The last bin with data and the last event of each device | 0 |
+| 935, 936, 948 | `timeline` | The last bin with data, the last event and the last phase call event of each device | 0 |
 | 937 | `unique_ped`, `full_ped` | Each input's last press, one row per input | Input |
 | 938 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped, at its projected time | Phase |
 | 939, 940, 941 | `arrival_on_green`, `platoon_ratio` | Green, yellow and red clearance begins not written yet. 939 also marks a phase green when results stopped | Phase |

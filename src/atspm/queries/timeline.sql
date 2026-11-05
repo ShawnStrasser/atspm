@@ -196,6 +196,11 @@ InvalidWindow AS
 -- 4. 43→1 creates Phase Wait (and call state becomes active)
 -- 5. 7→1 creates Phase Wait ONLY if call is still active (no 44 since last 43)
 -- 6. Phase Wait validity is inherited from the Phase Call validity (43 must eventually be followed by 44)
+-- 7. A Phase Wait is invalid when the device logged no call on any phase during it or in the 15 minutes before it ended.
+--    The call state was then not being logged, so "no 44 since the last 43" means nothing. A controller can come back
+--    from an outage logging greens but no calls for days, and a phase its timing plan leaves out overnight then "waits"
+--    for hours. Other phases' calls are the test, since a phase with its own call held on, by a stuck detector say, logs
+--    no 43 or 44 of its own for as long as that lasts.
 {% if unmatched %}
 -- Incremental mode: Include 43, 44, 1, 7 from raw_data, and 902/903/904 from unmatched_previous
 PhaseWait_Source AS (
@@ -269,14 +274,20 @@ InvalidEvents AS (
     UNION ALL
     SELECT DeviceID, TimeStamp AS StartTime, EndTime FROM Red WHERE IsValid = FALSE AND EndTime IS NOT NULL
 ),
+-- Every call event of each device. Incremental runs add the device's last one from earlier runs (synthetic EventId 948).
+PhaseWait_DeviceCalls AS (
+    SELECT DeviceID, TimeStamp FROM {{from_table}} WHERE EventId IN (43, 44{% if unmatched %}, 948{% endif %})
+),
 PhaseWait_WithValidity AS (
     SELECT 
         pw.TimeStamp, pw.DeviceID, pw.EventID, pw.Parameter, pw.EndTime,
         -- Phase Wait is invalid if: (1) underlying Phase Call is invalid, or
-        -- (2) any invalid event overlaps with this Phase Wait period
+        -- (2) any invalid event overlaps with this Phase Wait period, or
+        -- (3) the device was not logging calls (rule 7)
         -- Using proper overlap detection: ranges overlap if Start1 < End2 AND Start2 < End1
         CASE 
             WHEN COALESCE(pc.IsValid, TRUE) = FALSE THEN FALSE
+            WHEN COALESCE(dc.TimeStamp >= LEAST(pw.TimeStamp, pw.EndTime - INTERVAL 15 MINUTE), FALSE) = FALSE THEN FALSE
             WHEN EXISTS (
                 SELECT 1 FROM InvalidEvents ie 
                 WHERE ie.DeviceID = pw.DeviceID
@@ -291,6 +302,10 @@ PhaseWait_WithValidity AS (
         AND pw.Parameter = pc.Parameter
         AND pw.TimeStamp >= pc.TimeStamp 
         AND pw.TimeStamp < pc.EndTime
+    -- The device's latest call at or before the end of the wait
+    ASOF LEFT JOIN PhaseWait_DeviceCalls dc
+        ON pw.DeviceID = dc.DeviceID
+        AND pw.EndTime >= dc.TimeStamp
 ),
 -- Unmatched events for incremental processing
 PhaseWait_UnmatchedCall AS (

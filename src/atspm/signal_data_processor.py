@@ -566,6 +566,17 @@ class SignalDataProcessor:
                 GROUP BY DeviceId;
             """)
 
+    def _save_last_phase_calls(self):
+        """Saves each device's last phase call event (synthetic EventId 948), so the next run knows whether calls were
+        being logged during a Phase Wait that started before it. A device with none in this run keeps its previous one."""
+        previous = "UNION ALL SELECT DeviceId, TimeStamp FROM unmatched_previous WHERE EventId = 948" if self._table_exists('unmatched_previous') else ""
+        self.conn.execute(f"""
+            INSERT INTO unmatched_events
+            SELECT MAX(TimeStamp), DeviceId, 948 AS EventId, 0 AS Parameter, TRUE AS IsValid
+            FROM (SELECT DeviceId, TimeStamp FROM raw_data WHERE EventId IN (43, 44) {previous})
+            GROUP BY DeviceId;
+        """)
+
     def _table_exists(self, name):
         return self.conn.execute(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [name]
@@ -798,6 +809,9 @@ class SignalDataProcessor:
                     if has_data_exists:
                         v_print("Marking timeline events with missing has_data as invalid", self.verbose, 2)
                         self._invalidate_timeline_data_gaps()
+
+                    if self.incremental_run:
+                        self._save_last_phase_calls()
 
                     # timeline.sql invalidates completed intervals that overlap a controller clock update (181)
                     # window of 5 seconds either side. An unmatched event starting before a window ends will

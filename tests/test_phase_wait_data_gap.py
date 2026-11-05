@@ -374,3 +374,72 @@ def test_invalid_max_event_gap_seconds(value):
     raw = _dataset(GAP_CASES["inside_one_bin"])
     with pytest.raises(ValueError):
         _process(raw, max_event_gap_seconds=value)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# A device that is not logging calls has no call state. Device 10075 on 2026-10-30: back from an outage it logged greens
+# but no calls or detectors for five days. Calls open before the outage stayed "active" all that time, so a phase its
+# timing plan left out overnight "waited" 10 hours and counted as a skip, every night.
+# ---------------------------------------------------------------------------------------------------------
+
+def _left_out_phase(other_phase_calls):
+    """Phase 1 called once at 09:59 and never dropped, served at 10:00 and 20:00. Phase 2 cycles throughout, and if asked its
+    calls are logged too; otherwise the last call the device logs is phase 1's, and phase 2 logs one at 09:58."""
+    times = pd.date_range(_ts("09:58:00"), _ts("20:30:00"), freq="30s", inclusive="left")
+    events = [(t, 1, 1 if i % 2 == 0 else 7, 2) for i, t in enumerate(times)]
+    calls = times[::4] if other_phase_calls else times[:1]
+    events += [(t, 1, 43, 2) for t in calls]
+    events += [(t + pd.Timedelta(seconds=10), 1, 44, 2) for t in calls]
+    events += [(_ts("09:58:00"), 1, 316, CYCLE), (_ts("09:59:00"), 1, 43, 1)]
+    for green in ("10:00:00", "20:00:00"):
+        events += [(_ts(green), 1, 1, 1), (_ts(green) + pd.Timedelta(seconds=10), 1, 7, 1)]
+    return _build_raw_df(events)
+
+
+def _waits(timeline, phase, valid):
+    rows = timeline[(timeline["EventClass"] == "Phase Wait") & (timeline["EventValue"] == phase) & (timeline["IsValid"] == valid)]
+    return sorted(rows["StartTime"].tolist())
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_wait_with_no_calls_logged_is_invalid(runner):
+    timeline, phase_wait = RUNNERS[runner](_left_out_phase(other_phase_calls=False))
+
+    assert _waits(timeline, 1, True) == [_ts("09:59:00")]
+    assert _waits(timeline, 1, False) == [_ts("10:00:10")]
+    rows = phase_wait[phase_wait["Phase"] == 1]
+    assert rows["MaxPhaseWait"].max() < 1.5 * CYCLE
+    assert int(rows["TotalSkips"].sum()) == 0
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_held_call_with_other_calls_logged_stays_valid(runner):
+    """A call held on for hours, by a stuck detector say, logs no 43 or 44 of its own. Other phases' calls show the device
+    is logging calls, so the wait is real, and so is the skip."""
+    timeline, phase_wait = RUNNERS[runner](_left_out_phase(other_phase_calls=True))
+
+    assert _waits(timeline, 1, True) == [_ts("09:59:00"), _ts("10:00:10")]
+    assert int(phase_wait.loc[phase_wait["Phase"] == 1, "TotalSkips"].sum()) == 1
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_short_wait_soon_after_the_last_call_stays_valid(runner):
+    """Within 15 minutes of the last call logged, a quiet spell is ordinary."""
+    raw = _left_out_phase(other_phase_calls=False)
+    raw = raw[~((raw["EventId"].isin([1, 7])) & (raw["Parameter"] == 1) & (raw["TimeStamp"] >= _ts("20:00:00")))]
+    extra = [(_ts("10:05:00"), 1, 1, 1), (_ts("10:05:10"), 1, 7, 1), (_ts("10:20:00"), 1, 1, 1), (_ts("10:20:10"), 1, 7, 1)]
+    timeline, _ = RUNNERS[runner](_build_raw_df(raw.values.tolist() + extra))
+
+    # the last call was at 09:59; 10:00:10 to 10:05 ends within 15 minutes of it, 10:05:10 to 10:20 does not
+    assert _waits(timeline, 1, True) == [_ts("09:59:00"), _ts("10:00:10")]
+    assert _waits(timeline, 1, False) == [_ts("10:05:10")]
+
+
+@pytest.mark.parametrize("calls", [False, True])
+def test_call_check_incremental_matches_single_pass(calls):
+    raw = _left_out_phase(other_phase_calls=calls)
+    cols = ["DeviceId", "StartTime", "EndTime", "EventClass", "EventValue", "IsValid"]
+    single = _run_single_pass(raw)[0][cols]
+    incremental = _run_incremental(raw)[0][cols]
+    single, incremental = (t[t["EventClass"] == "Phase Wait"].sort_values(cols).reset_index(drop=True) for t in (single, incremental))
+    pd.testing.assert_frame_equal(single, incremental, check_dtype=False)
