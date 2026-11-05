@@ -4,6 +4,7 @@ import os
 import shutil
 from src.atspm import SignalDataProcessor
 import duckdb
+import jinja2
 import tomllib
 from src.atspm import __version__
 from pandas.api.types import is_integer_dtype, is_float_dtype
@@ -35,7 +36,6 @@ TEST_PARAMS = {
       {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
       {'name': 'actuations', 'params': {}},
       {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
-      {'name': 'communications', 'params': {'event_codes': '400,503,502'}},
       {'name': 'coordination', 'params': {}},
       {'name': 'ped', 'params': {'seconds_between_actuations': 15, 'return_volumes':True}},
       {'name': 'split_failures', 'params': {'red_time': 5, 'red_occupancy_threshold': 0.80, 'green_occupancy_threshold': 0.80, 'by_approach': True, 'by_cycle': False}},
@@ -452,6 +452,13 @@ def test_ped_precalculated_file_equals_the_raw_events_on_bins_with_activity():
                                 check_dtype=False)
 
 
+def test_communications_is_no_longer_a_table():
+  """It averaged MaxView's vendor codes, and MaxView is retired. It fails like any name that is no table."""
+  with pytest.raises(jinja2.TemplateNotFound):
+    SignalDataProcessor(raw_data=TEST_PARAMS['raw_data'], bin_size=15, verbose=0,
+                        aggregations=[{'name': 'communications', 'params': {'event_codes': '400,503,502'}}]).run()
+
+
 def test_ped_delay_output(processor_output):
   """Test pedestrian delay aggregation output"""
   output_file = os.path.join(TEST_PARAMS['output_dir'], f"{TEST_PARAMS['output_file_prefix']}ped_delay.parquet")
@@ -710,7 +717,6 @@ def test_empty_dataframe_input():
     {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}},
     {'name': 'actuations', 'params': {}},
     {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
-    {'name': 'communications', 'params': {'event_codes': '400,503,502'}},
     {'name': 'coordination', 'params': {}},
     {'name': 'ped', 'params': {'seconds_between_actuations': 15, 'return_volumes': True}},
     {'name': 'split_failures', 'params': {'red_time': 5, 'red_occupancy_threshold': 0.80, 'green_occupancy_threshold': 0.80, 'by_approach': True, 'by_cycle': False}},

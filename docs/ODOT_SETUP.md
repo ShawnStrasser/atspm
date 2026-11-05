@@ -83,7 +83,6 @@ The following tables will be produced (see the [README Output Schemas section](.
 | has_data           | Data completeness by time bin      |
 | actuations         | Detector actuations by bin         |
 | arrival_on_green   | Arrival on green metrics           |
-| communications     | Communication event summary        |
 | coordination       | MAXTIME coordination data          |
 | ped                | Pedestrian counts and volumes      |
 | split_failures     | Split failure detection            |

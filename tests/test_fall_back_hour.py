@@ -13,7 +13,6 @@ ALL_AGGREGATIONS = [
     {'name': 'actuations', 'params': {}},
     {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
     {'name': 'platoon_ratio', 'params': {}},
-    {'name': 'communications', 'params': {'event_codes': '400,503,502'}},
     {'name': 'coordination', 'params': {}},
     {'name': 'ped', 'params': {}},
     {'name': 'split_failures', 'params': {'red_time': 5, 'red_occupancy_threshold': 0.80, 'green_occupancy_threshold': 0.80, 'by_approach': True, 'by_cycle': False}},

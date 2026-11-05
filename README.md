@@ -481,12 +481,6 @@ GROUP BY DeviceId, Phase
 
 `Green_Actuations` and `Green_Seconds` are output for exactly this purpose.
 
-#### communications
-*   `TimeStamp` (DATETIME): Bin start time.
-*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
-*   `EventId` (INT16): Event ID being tracked (e.g., 400).
-*   `Average` (FLOAT): Average value of the parameter.
-
 #### coordination
 *   `TimeStamp` (DATETIME): Bin start time.
 *   `Raw_TimeStamp` (DATETIME): Exact timestamp of the event.

@@ -27,7 +27,6 @@ TEST_PARAMS = {
         {'name': 'actuations', 'params': {}},
         {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
         {'name': 'platoon_ratio', 'params': {}},  # Requires arrival_on_green
-        {'name': 'communications', 'params': {'event_codes': '400,503,502'}},
         {'name': 'coordination', 'params': {}},
         {'name': 'ped', 'params': {'seconds_between_actuations': 15, 'return_volumes':True}},
         {'name': 'split_failures', 'params': {'red_time': 5, 'red_occupancy_threshold': 0.80, 'green_occupancy_threshold': 0.80, 'by_approach': True, 'by_cycle': False}},
