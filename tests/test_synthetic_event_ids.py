@@ -66,6 +66,7 @@ def test_each_family_writes_only_its_own_codes():
     frame = events(60)
     assert set(run(frame, ARRIVALS)['unmatched_events'].EventId) <= ARRIVAL_CODES | SPILLBACK_CODES | {936}
     assert set(run(frame, PED)['unmatched_events'].EventId) <= PED_CODES | {936}
+    assert set(run(frame, [{'name': 'arrival_pattern', 'params': {}}])['unmatched_events'].EventId) <= {960, 961, 962, 963, 936}
     # 942 only with remove_incomplete, for a table that writes a bin later than has_data, written once a bin
     both = run(frame, [HAS_DATA, *ARRIVALS, *PED, {'name': 'approach_delay', 'params': {}}], remove_incomplete=True)['unmatched_events']
     assert (both.EventId == 942).any()

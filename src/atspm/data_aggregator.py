@@ -23,7 +23,7 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
         # Note: newline before closing paren ensures SQL comments in inner query don't break the wrapper
         complete_bins = COMPLETE_BINS
         # These can write a bin that an earlier run saw in has_data, see complete_bins_carry.sql
-        if aggregation_name in ['arrival_on_green', 'platoon_ratio', 'ped', 'yellow_red', 'approach_delay', 'left_turn_gaps'] and kwargs.get('unmatched', False):
+        if aggregation_name in ['arrival_on_green', 'platoon_ratio', 'ped', 'yellow_red', 'arrival_pattern', 'approach_delay', 'left_turn_gaps'] and kwargs.get('unmatched', False):
             complete_bins = (f"(SELECT TimeStamp, DeviceId FROM {COMPLETE_BINS} "
                              "UNION SELECT TimeStamp, DeviceId FROM unmatched_previous WHERE EventId = 942)")
         # These write all a run has, with no later run to wait for, so a bin has_data has not finished yet stays

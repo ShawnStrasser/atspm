@@ -1,5 +1,5 @@
 --Bins from where results stopped onward that has_data passed, for remove_incomplete, as synthetic EventId 942 in
---unmatched_events. has_data only sees the current run, and a later run writes these bins. yellow_red can write a bin
+--unmatched_events. has_data only sees the current run, and a later run writes these bins. yellow_red and arrival_pattern can write a bin
 --from before results stopped, once the last cycle with a red in it has finished, so a device keeps its bins from its
 --first red not written yet. approach_delay writes a bin once data reach 360 seconds past its end, so it keeps those too,
 --and left_turn_gaps once its device's data reach 10 seconds past the end.
@@ -19,11 +19,11 @@ FROM (
     SELECT TimeStamp, DeviceId FROM unmatched_previous WHERE EventId = 942
     {%- endif %}
 ) b, ends
-{%- if yellow_red_carried %}
+{%- if red_cycles_carried %}
 LEFT JOIN (
     SELECT DeviceId, MIN(time_bucket(INTERVAL '{{bin_size}} minutes', TimeStamp)) AS First_Held
     FROM unmatched_events
-    WHERE EventId = 953
+    WHERE EventId IN (953, 962)
     GROUP BY DeviceId
 ) h ON b.DeviceId = h.DeviceId
 {%- endif %}
@@ -41,7 +41,7 @@ LEFT JOIN (
 ) d ON b.DeviceId = d.DeviceId
 {%- endif %}
 WHERE Results_End IS NULL OR b.TimeStamp >= Results_End
-{%- if yellow_red_carried %}
+{%- if red_cycles_carried %}
    OR b.TimeStamp >= h.First_Held
 {%- endif %}
 {%- if approach_delay_carried %}

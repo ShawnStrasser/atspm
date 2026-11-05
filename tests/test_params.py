@@ -60,7 +60,8 @@ def test_the_list_of_names_matches_the_queries():
         return found
 
     set_by_processor = {'bin_size', 'from_table', 'unmatched', 'incremental_run', 'carry_bins', 'controller_type', 'remove_incomplete',
-                        'known_detectors_found', 'ped_carried', 'coord_state_found', 'event_gap_schedule', 'yellow_red_carried',
+                        'known_detectors_found', 'ped_carried', 'coord_state_found', 'event_gap_schedule', 'red_cycles_carried',
+                        'arrival_pattern', 'red_offset',  # these two the arrival_pattern and yellow_red templates set for what they include
                         'approach_delay', 'max_wait_seconds'}  # these two the approach_delay templates set for what they include
     for name, known in AGGREGATION_PARAMS.items():
         read = names(f'{name}.sql', set()) - set_by_processor

@@ -1,20 +1,42 @@
--- Included by yellow_red.sql and yellow_red_carry.sql. A list of CTEs, not a query.
+-- Included by red_offsets.sql and yellow_red_carry.sql, for yellow_red or arrival_pattern. A list of CTEs, not a query.
 --
 -- A cycle runs from one green begin to the next. Each actuation belongs to its cycle and its row to the bin of the
 -- cycle's red begin, so a bin is only known once the last cycle with a red in it has finished. The cycles an earlier
 -- run could not finish come back here (951 green, 952 yellow, 953 red clearance, 954 actuation, already moved back by
--- the latency, all with the phase as Parameter).
+-- the latency, all with the phase as Parameter). arrival_pattern reads advance detectors, each on event moved forward
+-- to its arrival at the stop bar, and keeps its own rows: 960 green, 961 yellow, 962 red clearance, 963 arrival.
+{%- set first_code = 960 if arrival_pattern else 951 %}
+{%- set detector_function = 'Advance' if arrival_pattern else 'Yellow_Red' %}
+{%- if arrival_pattern %}
+{% include 'advance_detectors.sql' %},
+{%- endif %}
 {%- if carry_bins %}
 {% include 'results_end.sql' %},
 
--- The on events still to come are later than this once moved back by the latency, so a cycle ending by then is whole.
+-- The on events still to come are later than this once moved by the latency or the trip, so a cycle ending by then is whole.
 known_events AS (
+    {%- if arrival_pattern %}
+    SELECT MAX(TimeStamp) + to_milliseconds(LEAST((SELECT MIN(Offset_Milliseconds) FROM advance_detectors), 0)) AS Known_Until
+    {%- else %}
     SELECT MAX(TimeStamp) - INTERVAL (GREATEST({{latency_offset_seconds}}, 0) * 1000) MILLISECOND AS Known_Until
+    {%- endif %}
     FROM {{from_table}}
 ),
 {%- endif %}
 
 cycle_events AS (
+    {%- if arrival_pattern %}
+    -- Vehicles at their arrival at the stop bar, with the phase of each
+    SELECT d.TimeStamp + to_milliseconds(c.Offset_Milliseconds) AS TimeStamp,
+        d.DeviceId,
+        d.EventId::INT16 AS EventId,
+        c.Phase
+    FROM {{from_table}} d
+    JOIN advance_detectors c
+        ON d.DeviceId = c.DeviceId
+       AND d.Parameter = c.Parameter
+    WHERE d.EventId = 82
+    {%- else %}
     -- Detector on events moved back by the latency, with the phase of each
     SELECT TimeStamp - INTERVAL ({{latency_offset_seconds}} * 1000) MILLISECOND AS TimeStamp,
         DeviceId,
@@ -23,10 +45,11 @@ cycle_events AS (
     FROM {{from_table}}
     NATURAL JOIN detector_config
     WHERE EventId = 82 AND Function = 'Yellow_Red'
+    {%- endif %}
 
     UNION ALL
 
-    -- Green begin, yellow begin and red clearance begin. The join leaves out phases with no yellow_red detector.
+    -- Green begin, yellow begin and red clearance begin. The join leaves out phases with no such detector.
     SELECT r.TimeStamp,
         r.DeviceId,
         r.EventId::INT16 AS EventId,
@@ -34,7 +57,7 @@ cycle_events AS (
     FROM {{from_table}} r
     JOIN (SELECT DISTINCT DeviceId, Phase
           FROM detector_config
-          WHERE Function = 'Yellow_Red') c
+          WHERE Function = '{{detector_function}}') c
         ON r.DeviceId = c.DeviceId
        AND c.Phase = r.Parameter
     WHERE r.EventId IN (1, 8, 10)
@@ -44,10 +67,10 @@ cycle_events AS (
 
     SELECT TimeStamp,
         DeviceId,
-        (CASE EventId WHEN 951 THEN 1 WHEN 952 THEN 8 WHEN 953 THEN 10 ELSE 82 END)::INT16 AS EventId,
+        (CASE EventId WHEN {{first_code}} THEN 1 WHEN {{first_code + 1}} THEN 8 WHEN {{first_code + 2}} THEN 10 ELSE 82 END)::INT16 AS EventId,
         Parameter::INT16 AS Phase
     FROM unmatched_previous
-    WHERE EventId IN (951, 952, 953, 954)
+    WHERE EventId BETWEEN {{first_code}} AND {{first_code + 3}}
     {%- endif %}
 ),
 

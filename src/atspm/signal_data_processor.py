@@ -35,8 +35,12 @@ DEFAULT_SPILLBACK_GAP_SECONDS = 5
 # The default time lapse before a new unique ped actuation is counted.
 DEFAULT_SECONDS_BETWEEN_ACTUATIONS = 15
 
+# arrival_pattern's Red_Offset is rounded to this. Advance detectors are far busier than yellow_red ones: on 150 ODOT signals
+# over one day, 1,445 rows per phase-day at 5 seconds and 3,963 at half a second.
+DEFAULT_OFFSET_SLICE_SECONDS = 5
+
 # Aggregations that keep what they have not written yet in the main unmatched file, each with its own rows.
-OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, 'ped', 'yellow_red', 'approach_delay', 'left_turn_gaps')
+OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, 'ped', 'yellow_red', 'arrival_pattern', 'approach_delay', 'left_turn_gaps')
 
 # timeline's instant events (see timeline.sql)
 INSTANT_EVENT_CLASSES = ('Pattern Change', 'Cycle Length Change', 'Offset Change', 'Interval Advance', 'Clock Update', 'Power Failure', 'Power Restored')
@@ -54,6 +58,7 @@ AGGREGATION_PARAMS = {
     'left_turn_gaps': set(),
     'platoon_ratio': set(),
     'yellow_red': {'latency_offset_seconds', 'min_red_offset'},
+    'arrival_pattern': {'latency_offset_seconds', 'offset_slice_seconds'},
     'split_failures': {'red_time', 'red_occupancy_threshold', 'green_occupancy_threshold', 'by_approach', 'by_cycle'},
     'terminations': set(),
     'splits': set(),
@@ -72,7 +77,7 @@ STATE_TABLES = {**dict.fromkeys(range(927, 931), 'left_turn_gaps'), **dict.fromk
                 **dict.fromkeys((937, 943, 944, 945, 946, 947), 'ped'),
                 **dict.fromkeys((938, 939, 940, 941, 948, 949, 950), 'arrival_on_green'),
                 **dict.fromkeys((951, 952, 953, 954), 'yellow_red'), 956: 'actuations',
-                **dict.fromkeys((957, 958, 959), 'approach_delay'), **dict.fromkeys(range(970, 1000), 'has_data'), 936: None, 942: None}
+                **dict.fromkeys((957, 958, 959), 'approach_delay'), **dict.fromkeys((960, 961, 962, 963), 'arrival_pattern'), **dict.fromkeys(range(970, 1000), 'has_data'), 936: None, 942: None}
 
 
 def _check_names(settings):
@@ -116,6 +121,15 @@ def _spillback_params(params):
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
             raise ValueError(f"{name} must be a positive number of seconds" + (", or None to turn the flag off" if name == 'spillback_on_seconds' else ""))
+    return params
+
+
+def _arrival_pattern_params(params):
+    """arrival_pattern params with the slice size, checked. A copy, leaving the caller's dict alone."""
+    params = {**params}
+    value = params.setdefault('offset_slice_seconds', DEFAULT_OFFSET_SLICE_SECONDS)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
+        raise ValueError("offset_slice_seconds must be a positive number of seconds")
     return params
 
 
@@ -236,7 +250,7 @@ class SignalDataProcessor:
         The raw data to be processed, either as a file path or a DataFrame.
     detector_config : str or DataFrame
         The detector configuration, either as a file path or a DataFrame. Columns: DeviceId, Phase, Parameter, Function,
-        and optionally DistanceFromStopBar (feet), MPH and LatencyCorrection (seconds), which arrival_on_green and approach_delay use to project arrivals to the stop bar.
+        and optionally DistanceFromStopBar (feet), MPH and LatencyCorrection (seconds), which arrival_on_green, approach_delay and arrival_pattern use to project arrivals to the stop bar.
     bin_size : int
         The size of the time bins for aggregation, in minutes.
     output_dir : str
@@ -268,7 +282,7 @@ class SignalDataProcessor:
         A table is written when listed here, and no others.
         Supported aggregations include: 'has_data', 'actuations', 'arrival_on_green', 'approach_delay', 'left_turn_gaps',
         'coordination', 'coordination_agg', 'ped', 'split_failures', 'splits', 'terminations',
-        'yellow_red', 'timeline', 'ped_delay', 'phase_wait', and potentially others.
+        'yellow_red', 'arrival_pattern', 'timeline', 'ped_delay', 'phase_wait', and potentially others.
 
     Methods
     -------
@@ -383,6 +397,7 @@ class SignalDataProcessor:
         self.aggregations = [
             {**agg, 'params': detector_health_params(agg.get('params', {}))} if agg['name'] == 'detector_health'
             else {**agg, 'params': _spillback_params(agg.get('params', {}))} if agg['name'] in ('arrival_on_green', 'approach_delay')
+            else {**agg, 'params': _arrival_pattern_params(agg.get('params', {}))} if agg['name'] == 'arrival_pattern'
             else agg
             for agg in self.aggregations
         ]
@@ -682,14 +697,14 @@ class SignalDataProcessor:
         )
         self._add_to_unmatched_events(carry)
 
-    def _save_yellow_red_carry(self):
-        """Saves the cycles yellow_red has not finished writing to unmatched_events.
+    def _save_red_cycles_carry(self, name):
+        """Saves the cycles yellow_red or arrival_pattern has not finished writing to unmatched_events.
 
         See yellow_red_carry.sql.
         """
-        params = next(agg for agg in self.aggregations if agg['name'] == 'yellow_red').get('params', {})
+        params = next(agg for agg in self.aggregations if agg['name'] == name).get('params', {})
         self._add_to_unmatched_events(render_query(
-            'yellow_red_carry',
+            f'{name}_carry',
             **params,
             bin_size=self.bin_size,
             from_table='raw_data',
@@ -745,7 +760,7 @@ class SignalDataProcessor:
             bin_size=self.bin_size,
             carry_bins=True,
             unmatched=self._table_exists('unmatched_previous'),
-            yellow_red_carried=any(agg['name'] == 'yellow_red' for agg in self.aggregations),
+            red_cycles_carried=any(agg['name'] in ('yellow_red', 'arrival_pattern') for agg in self.aggregations),
             approach_delay_carried=any(agg['name'] == 'approach_delay' for agg in self.aggregations),
             left_turn_gaps_carried=any(agg['name'] == 'left_turn_gaps' for agg in self.aggregations),
         ))
@@ -1003,7 +1018,9 @@ class SignalDataProcessor:
         if 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql and any(agg['name'] == 'arrival_on_green' for agg in self.aggregations):
             self._save_arrival_carry()
         if 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql and any(agg['name'] == 'yellow_red' for agg in self.aggregations):
-            self._save_yellow_red_carry()
+            self._save_red_cycles_carry('yellow_red')
+        if 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql and any(agg['name'] == 'arrival_pattern' for agg in self.aggregations):
+            self._save_red_cycles_carry('arrival_pattern')
         if 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql and any(agg['name'] == 'approach_delay' for agg in self.aggregations):
             self._save_approach_delay_carry()
         if 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql and any(agg['name'] == 'left_turn_gaps' for agg in self.aggregations):

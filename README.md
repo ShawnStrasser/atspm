@@ -151,6 +151,12 @@ params = {
             }
         },
         {
+            'name': 'arrival_pattern',
+            'params': {
+                'offset_slice_seconds': 5   # Red_Offset is rounded to this many seconds (the default)
+            }
+        },
+        {
             'name': 'timeline', 
             'params': {
                 'maxtime': True,            # Include MAXTIME-specific events
@@ -230,6 +236,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Approach Delay** (`approach_delay`): Seconds vehicles wait by phase and interval, with `Delay_Seconds` measured by UDOT's method and `Queued_Delay_Seconds` estimated for queues over the advance detector. See [Approach Delay](#approach-delay).
 - **Left-Turn Gaps** (`left_turn_gaps`): Gaps in the traffic on each through phase by length, so a dashboard can pick any critical gap for the left turn across it. See [Left-Turn Gaps](#left-turn-gaps).
 - **Yellow and Red Actuations** (`yellow_red`): Distribution of detector actuations relative to the start of red, including red offset and signal state. A row belongs to the `bin_size` bin of its cycle's red begin. Incremental runs give the same rows as one big run: a bin is written once the last cycle with a red in it has finished, so with runs cut on the bin each one comes out a run later, and the events it waits for are kept in `unmatched_events` (synthetic `EventId` 951 to 954).
+- **Arrival Pattern** (`arrival_pattern`): `yellow_red` for `Advance` detectors: each vehicle is moved forward to the stop bar the way `arrival_on_green` does it (`DistanceFromStopBar`, `MPH`, `LatencyCorrection` and their defaults), and counted by the seconds from the red begin of the cycle it arrives in. `Red_Offset` is rounded to the nearest `offset_slice_seconds` (5 unless given). On 150 ODOT signals over one day that is about 5,400 rows per signal, or 1,445 per phase. There is no spillback handling. Incremental runs give the same rows as one big run, by the same rule as `yellow_red` (synthetic `EventId` 960 to 963).
 - **Split Failures** (`split_failures`): Green and red occupancies by phase (and optionally detector/approach) and a count of cycles that meet split-failure thresholds; can be returned either per cycle or aggregated into time bins. Incremental runs give the same rows as one big run: a bin is written once, whole, by the first run that reaches the end of it, by the same rule as [Arrival on Green](#arrival-on-green), and `sf_unmatched` holds the events a later run needs. A missing detector off is filled in half way to the next on, but no earlier than the start of that on's bin, and a cycle is done at its first red barrier, so a run never needs an event it has not seen.
 - **Terminations** (`terminations`): Counts of GapOut, MaxOut, and ForceOff terminations by phase.
 - **Splits** (`splits`): MAXTIME-specific split events (cycle length/split services) aggregated by interval.
@@ -700,6 +707,14 @@ GROUP BY DeviceId, Phase
 *   `Red_Offset` (FLOAT): Time into red (seconds).
 *   `Count` (FLOAT): Number of actuations.
 
+#### arrival_pattern
+*   `TimeStamp` (DATETIME): Bin start time, the bin of the cycle's red begin.
+*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
+*   `Phase` (INT16): Phase number.
+*   `Signal_State` (INT16): Signal state on arrival at the stop bar: 1 green, 8 yellow, 10 red.
+*   `Red_Offset` (FLOAT): Seconds from the red begin to the arrival, rounded to the nearest `offset_slice_seconds`. Negative before red.
+*   `Count` (FLOAT): Number of vehicles.
+
 ### Supporting State Tables
 (Used primarily for incremental processing)
 
@@ -732,7 +747,7 @@ Rows with `EventId` 927 to 959 are state carried between runs, not controller ev
 | 937 | `ped` | Each input's last press, one row per input | Input |
 | 938 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped, at its projected time | Phase |
 | 939, 940, 941 | `arrival_on_green`, `platoon_ratio` | Green, yellow and red clearance begins not written yet. 939 also marks a phase green when results stopped | Phase |
-| 942 | `arrival_on_green`, `platoon_ratio`, `ped`, `yellow_red`, `approach_delay` or `left_turn_gaps` with `remove_incomplete` | A bin not written yet that `has_data` passed | 0 |
+| 942 | `arrival_on_green`, `platoon_ratio`, `ped`, `yellow_red`, `arrival_pattern`, `approach_delay` or `left_turn_gaps` with `remove_incomplete` | A bin not written yet that `has_data` passed | 0 |
 | 943 | `ped` | One unique actuation, stamped with its bin, in a bin not written yet or the last 3 written | Input |
 | 944, 945 | `ped` | Each input's next bin to write, and its last activity | Input |
 | 946, 947 | `ped` | One press, or one ped service, stamped with its bin, in a bin not written yet | Input |
@@ -746,6 +761,8 @@ Rows with `EventId` 927 to 959 are state carried between runs, not controller ev
 | 957 | `approach_delay` | A sum of a bin not written yet, stamped with its bin plus one microsecond for each unit. A sum too big for its bin takes more rows | Phase for `Delay_Seconds` in milliseconds, phase + 1000 for `Queued_Delay_Seconds` in half milliseconds |
 | 958 | `approach_delay` | A vehicle still waiting, at its arrival, or a green, yellow or red begin a vehicle may need | Phase for a vehicle, phase + 1000 times 1, 8 or 10 for an event |
 | 959 | `approach_delay` | A detector on at the end of the data, one holding the flag, when a flag began, or the on of a vehicle under the flag not at every stop bar of its detector yet | Detector, detector + 1000, + 2000 or + 3000 |
+| 960, 961, 962 | `arrival_pattern` | Green, yellow and red clearance begins of a cycle not finished writing | Phase |
+| 963 | `arrival_pattern` | A vehicle of a cycle not finished writing, or one that may arrive after a first green still to come, at its arrival at the stop bar | Phase |
 | 970, 971, 972 | `has_data` | The last event of all events, phase calls and detector events | Events in the stream's last bin that was not half quiet |
 | 974 | `has_data` | The first bin not written, one per signal | 0 |
 | 979 | `has_data` | Each phase's last event | Phase * 512 + states seen today * 8 + position (7 = do not judge) |
