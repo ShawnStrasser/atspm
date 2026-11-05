@@ -175,6 +175,7 @@ SELECT
     Phase,
     AVG(Duration) AS AvgPhaseWait,
     MAX(Duration) AS MaxPhaseWait,
-    SUM(IsSkipped) AS TotalSkips
+    SUM(IsSkipped) AS TotalSkips,
+    COUNT(*)::INT32 AS Samples
 FROM phase_waits_classified
 GROUP BY 1, 2, 3

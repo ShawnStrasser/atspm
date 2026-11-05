@@ -542,7 +542,11 @@ Only with `'findings': True`, for looking into a detector. The findings of the r
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `Phase` (INT16): Phase number.
 *   `AvgPhaseWait` (FLOAT): Average wait time in seconds.
+*   `MaxPhaseWait` (FLOAT): Longest wait in seconds.
 *   `TotalSkips` (BIGINT): Count of skipped phases.
+*   `Samples` (INT32): Waits averaged in this bin. A wait left out for a preempt is not one.
+
+To roll the average up over a longer period, weight it: `SUM(AvgPhaseWait * Samples) / SUM(Samples)`. A plain average of the bins gives a bin with one wait the same say as a bin with twenty.
 
 #### splits
 *   `TimeStamp` (DATETIME): Bin start time.

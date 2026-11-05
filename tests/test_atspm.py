@@ -93,6 +93,17 @@ def compare_split_failures_across_runs(combined, expected):
     return df[[k not in waiting for k in keys]].reset_index(drop=True)
   compare_dataframes(without(combined), without(expected))
 
+def compare_phase_wait_across_runs(combined, expected):
+  """Waits that are invalid in one big run but not across a cut move a few bins. Samples is checked apart from the tolerance
+  below, which counts differing cells: in those 16 of 191 bins it is at most one wait out, and it never is elsewhere."""
+  compare_dataframes_with_tolerance(combined.drop(columns='Samples'), expected.drop(columns='Samples'), tolerance=0.06)
+  keys = ['TimeStamp', 'DeviceId', 'Phase']
+  samples = combined.merge(expected, on=keys, suffixes=('', '_one'))
+  assert len(samples) == len(expected)
+  off = (samples['Samples'] - samples['Samples_one']).abs()
+  assert off.max() <= 1 and (off > 0).sum() <= 16
+
+
 def compare_dataframes_with_tolerance(df1, df2, tolerance):
   """
   Compare two dataframes, ignoring row order, applying rounding to specific columns,
@@ -238,7 +249,7 @@ def test_incremental_aggregation(incremental_processor_output, aggregation):
     compare_dataframes_with_tolerance(combined_df, precalc_df, tolerance=0.001)
   # phase_wait aggregates Phase Wait events and filters by IsValid, so differences propagate to averages
   elif agg_name == 'phase_wait':
-    compare_dataframes_with_tolerance(combined_df, precalc_df, tolerance=0.06)
+    compare_phase_wait_across_runs(combined_df, precalc_df)
   else:
     compare_dataframes(combined_df, precalc_df)
 
@@ -389,7 +400,7 @@ def test_incremental_aggregation_with_dataframes(incremental_processor_output_wi
     compare_dataframes_with_tolerance(combined_df, precalc_df, tolerance=0.001)
   # phase_wait aggregates Phase Wait events and filters by IsValid, so differences propagate to averages
   elif agg_name == 'phase_wait':
-    compare_dataframes_with_tolerance(combined_df, precalc_df, tolerance=0.06)
+    compare_phase_wait_across_runs(combined_df, precalc_df)
   else:
     compare_dataframes(combined_df, precalc_df)
 
