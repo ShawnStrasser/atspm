@@ -61,6 +61,14 @@ AGGREGATION_PARAMS = {
 }
 
 
+# The table each synthetic row of the main unmatched file belongs to. Any other row is a timeline interval still open. 936 and 942
+# are every table's.
+STATE_TABLES = {**dict.fromkeys(range(931, 935), 'coordination_agg'), 935: 'timeline', 955: 'timeline',
+                **dict.fromkeys((937, 943, 944, 945, 946, 947), 'ped'),
+                **dict.fromkeys((938, 939, 940, 941, 948, 949, 950), 'arrival_on_green'),
+                **dict.fromkeys((951, 952, 953, 954), 'yellow_red'), 936: None, 942: None}
+
+
 def _check_names(settings):
     """Raises on a setting or aggregation parameter this package does not have."""
     unknown = sorted(set(settings) - SETTINGS)
@@ -460,6 +468,19 @@ class SignalDataProcessor:
             v_print('*'*50, self.verbose)
             raise e
         self._check_input_follows_state()
+        self._check_state_tables_listed()
+
+    def _check_state_tables_listed(self):
+        """Raises if the main unmatched file holds rows of a table not in this run's list. The run replaces the file, so a later
+        run of that table would start with nothing from before."""
+        if not self._table_exists('unmatched_previous'):
+            return
+        held = self.conn.execute("SELECT DISTINCT EventId FROM unmatched_previous").fetchall()
+        tables = {STATE_TABLES.get(event_id, 'timeline') for event_id, in held} - {None}
+        missing = sorted(tables - {agg['name'] for agg in self.aggregations})
+        if missing:
+            raise ValueError(f"The state holds rows of {missing}, which are not in aggregations. This run would drop them, and the next run of "
+                             "those tables would come out wrong. List them, or give this list its own state file.")
 
     def _check_input_follows_state(self):
         """Raises if a device's input does not start after the last event the state holds for it. That input was run already,

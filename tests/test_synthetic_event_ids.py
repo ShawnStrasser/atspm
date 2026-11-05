@@ -123,8 +123,8 @@ def test_a_state_row_with_a_false_flag_does_not_reach_an_interval():
     marked.loc[marked.EventId.between(938, 947), 'IsValid'] = False
     later = events(60)
     later['TimeStamp'] += pd.Timedelta(hours=1)
-    plain = run(later, [HAS_DATA, TIMELINE], first)['timeline']
-    flagged = run(later, [HAS_DATA, TIMELINE], marked)['timeline']
+    plain = run(later, ALL_TOGETHER, first)['timeline']
+    flagged = run(later, ALL_TOGETHER, marked)['timeline']
     columns = list(plain.columns)
     pd.testing.assert_frame_equal(plain.sort_values(columns).reset_index(drop=True), flagged.sort_values(columns).reset_index(drop=True))
 
@@ -134,7 +134,7 @@ def test_other_measures_do_not_see_the_state_rows():
     frame = events(60)
     carry = run(frame, [HAS_DATA, TIMELINE, *ARRIVALS, *PED])['unmatched_events']
     later = frame.assign(TimeStamp=frame.TimeStamp + pd.Timedelta(hours=1))
-    with SignalDataProcessor(raw_data=later, detector_config=CONFIG, bin_size=15, verbose=0, aggregations=[HAS_DATA],
+    with SignalDataProcessor(raw_data=later, detector_config=CONFIG, bin_size=15, verbose=0, aggregations=ALL_TOGETHER,
                              unmatched_event_settings={'df_or_path': carry, 'max_days_old': 14}) as p:
         p.load()
         seen = {row[0] for row in p.conn.execute("SELECT DISTINCT EventId FROM raw_data_all").fetchall()}

@@ -155,9 +155,9 @@ def test_split_failure_state_loads_when_the_main_state_is_a_first_run(tmp_path):
 STATE_ACTUATIONS = [{'name': 'actuations', 'params': {}}]
 
 
-def run_on(path, raw, aggregations=None, **settings):
+def run_on(path, raw, aggregations=None, config=EMPTY_CONFIG, **settings):
     """One run, saving to a state file: what a worker does."""
-    p = SignalDataProcessor(raw_data=raw, detector_config=EMPTY_CONFIG, bin_size=15, verbose=0, aggregations=aggregations or [HAS_DATA, TIMELINE],
+    p = SignalDataProcessor(raw_data=raw, detector_config=config, bin_size=15, verbose=0, aggregations=aggregations or [HAS_DATA, TIMELINE],
                             unmatched_event_settings={'df_or_path': str(path), 'max_days_old': 14, 'first_run': True, **settings})
     with p:
         p.load()
@@ -185,3 +185,27 @@ def test_input_older_than_the_split_failure_state_raises(tmp_path):
     with pytest.raises(ValueError, match='older than the state'):
         SignalDataProcessor(raw_data=events([(0, 'A', 1, 2)]), detector_config=EMPTY_CONFIG, bin_size=15, verbose=0, aggregations=[],
                             unmatched_event_settings=settings).load()
+
+
+@pytest.mark.parametrize('held, listed, missing', [
+    ([HAS_DATA, TIMELINE], [HAS_DATA], 'timeline'),
+    ([{'name': 'ped', 'params': {}}], STATE_ACTUATIONS, 'ped'),
+    ([{'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}}], STATE_ACTUATIONS, 'arrival_on_green'),
+    ([{'name': 'yellow_red', 'params': {'latency_offset_seconds': 0}}], STATE_ACTUATIONS, 'yellow_red'),
+    ([HAS_DATA, TIMELINE, {'name': 'coordination_agg', 'params': {}}], [HAS_DATA, TIMELINE], 'coordination_agg'),
+])
+def test_state_of_a_table_left_out_of_the_list_raises(tmp_path, held, listed, missing):
+    path = tmp_path / 'state.parquet'
+    first = events([(0, 'A', 131, 3), (1, 'A', 1, 2), (2, 'A', 8, 2), (3, 'A', 10, 2), (4, 'A', 90, 2), (5, 'A', 82, 5)])
+    config = pd.DataFrame({'DeviceId': ['A', 'A'], 'Phase': [2, 2], 'Parameter': [5, 5], 'Function': ['Advance', 'Yellow_Red']})
+    run_on(path, first, held, config)
+    next_window = events([(900, 'A', 1, 2)])
+    with pytest.raises(ValueError, match=f"state holds rows of .*{missing}"):
+        run_on(path, next_window, listed, config)
+    run_on(path, next_window, [*held, {'name': 'terminations', 'params': {}}], config)  # a longer list is a first run for what it adds
+
+
+def test_the_rows_every_table_shares_do_not_need_a_table(tmp_path):
+    path = tmp_path / 'state.parquet'
+    pd.DataFrame({'TimeStamp': [T0, T0], 'DeviceId': ['A', 'A'], 'EventId': [936, 942], 'Parameter': [0, 0], 'IsValid': [True, True]}).to_parquet(path)
+    run_on(path, events([(900, 'A', 82, 5)]), STATE_ACTUATIONS)

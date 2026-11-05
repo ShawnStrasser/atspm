@@ -279,11 +279,11 @@ class TestEdgeCases:
         """The first run after the upgrade: old carried rows and last presses, no 943 to 947. Bins before it read as
         quiet, once."""
         old = pd.DataFrame({
-            'TimeStamp': [at(0, 59, 50), at(0, 59, 50), at(0, 59, 50)],
-            'DeviceId': ['A', 'A', 'Z'],
-            'EventId': [1, 937, 936],
-            'Parameter': [2, 2, 0],
-            'IsValid': [True, True, True],
+            'TimeStamp': [at(0, 59, 50), at(0, 59, 50)],
+            'DeviceId': ['A', 'Z'],
+            'EventId': [937, 936],
+            'Parameter': [2, 0],
+            'IsValid': [True, True],
         })
         path = tmp_path / 'old.parquet'
         old.to_parquet(path)

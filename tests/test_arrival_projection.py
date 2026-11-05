@@ -319,7 +319,9 @@ def test_older_unmatched_file_still_loads():
     # A file written before these markers, as timeline left it
     old = pd.DataFrame({'TimeStamp': [T0], 'DeviceId': 'A', 'EventId': [1], 'Parameter': [2], 'IsValid': [True]})
     events = frame(at(100, 82, 3), at(200, 8, 2), at(899.9, 1, 7))
-    assert process(events, config((2, 3)), carry=old)['arrival_on_green'].Percent_AOG.tolist() == [0.0]  # the old green is not read
+    aggregations = [{'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
+                    {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60}}, *TWO_TABLES]
+    assert process(events, config((2, 3)), aggregations, carry=old)['arrival_on_green'].Percent_AOG.tolist() == [0.0]  # the old green is not read
 
 
 @pytest.mark.parametrize('seed', [1, 2, 3])

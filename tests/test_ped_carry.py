@@ -295,11 +295,11 @@ def test_carry_with_timeline_keeps_timeline_rows():
 def test_old_carry_file_loads_and_counts_first_press(tmp_path, volumes, has_isvalid):
     """A file written before EventId 937 existed: other carried rows, no last press."""
     old = pd.DataFrame({
-        'TimeStamp': [T0 - pd.Timedelta(seconds=5), T0 - pd.Timedelta(seconds=5)],
-        'DeviceId': ['A', 'A'],
-        'EventId': [1, 936],
-        'Parameter': [2, 0],
-        'IsValid': [True, True],
+        'TimeStamp': [T0 - pd.Timedelta(seconds=5)],
+        'DeviceId': ['A'],
+        'EventId': [936],
+        'Parameter': [0],
+        'IsValid': [True],
     })
     if not has_isvalid:
         old = old.drop(columns='IsValid')
