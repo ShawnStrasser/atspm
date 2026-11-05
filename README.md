@@ -37,7 +37,6 @@ This project focuses only on transforming event logs into performance measures a
 - [Usage Example](#usage-example)
 - [Performance Measures](#performance-measures)
 - [Release Notes](docs/CHANGELOG.md)
-- [ODOT Deployment](docs/ODOT_DEPLOYMENT.md)
 - [Future Plans](#future-plans)
 - [Contributing](#contributing)
 - [License](#license)

@@ -155,3 +155,6 @@ pyvenv.cfg
 _notes.txt
 package_tester.ipynb
 scripts/test_detector_health_local.py
+
+# ODOT-only deployment guide, kept out of git
+docs/ODOT_DEPLOYMENT.md
