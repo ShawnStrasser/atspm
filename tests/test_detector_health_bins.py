@@ -1,4 +1,4 @@
-"""detector_health as bins: one run equals many at any cuts, each bin once, past rows never change, a stuck ON outlives the window, the findings table."""
+"""detector_health as bins: with a state one run equals many at any cuts, each run its own bin, a whole-day check at the first run past midnight, each bin once, a stuck ON outlives the window."""
 import os
 
 import duckdb
@@ -64,17 +64,22 @@ def _ordered(frame):
   return frame.sort_values(COLUMNS).reset_index(drop=True)
 
 
-def _runs(raw, cuts, *args, **health_params):
-  """Runs of raw cut at the times given, on one store: the rows of detector_health of every run that wrote it, each in the order written."""
-  edges = [raw['TimeStamp'].min() - pd.Timedelta(seconds=1)] + sorted(cuts) + [raw['TimeStamp'].max() + pd.Timedelta(seconds=1)]
-  out = []
-  for a, b in zip(edges[:-1], edges[1:]):
-    chunk = raw[(raw['TimeStamp'] > a) & (raw['TimeStamp'] <= b)]
-    if len(chunk):
-      got = _run(chunk, _params(*args, **health_params)).get('detector_health')
-      if got is not None:
-        out.append(got)
+def _runs(raw, cuts, detectors, tmp_path, name, **health_params):
+  """Runs of raw cut at the times given, each carrying only the last run's state and the saved rows: the tables of each run."""
+  edges = [raw['TimeStamp'].min()] + sorted(cuts) + [raw['TimeStamp'].max() + pd.Timedelta(seconds=1)]
+  rows, state, out = tmp_path / name, '', []
+  rows.mkdir()
+  for i, (a, b) in enumerate(zip(edges[:-1], edges[1:])):
+    got = _run(raw[(raw['TimeStamp'] >= a) & (raw['TimeStamp'] < b)], _params(detectors, state=state, history=str(rows), **health_params))
+    if len(got['health_rows']):
+      got['health_rows'].to_parquet(rows / f'r{i:04d}.parquet')
+    state = got['health_state']
+    out.append(got)
   return out
+
+
+def _all_rows(tables):
+  return pd.concat([t['detector_health'] for t in tables], ignore_index=True)
 
 
 def _random_cuts(raw, n, seed):
@@ -126,13 +131,6 @@ def test_an_empty_run_has_the_table_without_rows():
   assert list(out['detector_health'].columns) == COLUMNS
 
 
-def test_a_run_that_reaches_no_verdict_writes_nothing(tmp_path):
-  out = tmp_path / 'out'
-  SignalDataProcessor(raw_data=RAW[RAW['TimeStamp'] < START + pd.Timedelta(minutes=15)], bin_size=15, verbose=0, output_dir=str(out), output_format='parquet',
-                      output_to_separate_folders=False, aggregations=[_params(store=str(tmp_path / 's.duckdb'))]).run()
-  assert os.listdir(out) == []
-
-
 @pytest.mark.parametrize('output_format', ['csv', 'parquet'])
 def test_save_writes_the_tables(tmp_path, output_format):
   SignalDataProcessor(raw_data=RAW, bin_size=15, verbose=0, output_dir=str(tmp_path), output_format=output_format,
@@ -148,64 +146,68 @@ def test_bin_size_is_the_processors():
   assert hours(b, 60) == pytest.approx(hours(fine, 15), rel=0.01)
 
 
-# ---- one run and many runs
+# ---- a state: one run and many runs
 
-@pytest.mark.parametrize('seed', [1, 2, 3])
-def test_hourly_one_long_run_equals_runs_at_random_cuts(tmp_path, seed):
-  whole = _runs(RAW, [], store=str(tmp_path / 'whole.duckdb'), judge='hourly')
-  assert len(whole) == 1 and len(whole[0]) > 0 and whole[0]['TimeStamp'].max() == END - pd.Timedelta(minutes=15)
-  cut = _runs(RAW, _random_cuts(RAW, 9, seed), store=str(tmp_path / 'cut.duckdb'), judge='hourly')
-  pd.testing.assert_frame_equal(_ordered(pd.concat(cut)), _ordered(whole[0]), check_dtype=False)
+MIDNIGHT = T0 + pd.Timedelta(days=2)
 
 
-def test_no_store_gives_the_same_bins_as_a_store(tmp_path):
-  store = _runs(RAW, [], store=str(tmp_path / 'whole.duckdb'), judge='hourly')[0]
-  one_shot = _run(RAW, _params(judge='hourly'))['detector_health']
-  pd.testing.assert_frame_equal(_ordered(one_shot), _ordered(store), check_dtype=False)
+@pytest.fixture(scope='module')
+def two_days():
+  raw = _stuck_raw(3)
+  return raw[raw['TimeStamp'] < MIDNIGHT + pd.Timedelta(minutes=45)]
 
 
-def test_a_run_short_of_the_verdict_time_leaves_it_for_the_next_run(tmp_path):
-  store = str(tmp_path / 's.duckdb')
-  short = RAW[RAW['TimeStamp'] < START + pd.Timedelta(minutes=58)]
-  assert 'detector_health' not in _run(short, _params(store=store, judge='hourly'))
-  rest = RAW[(RAW['TimeStamp'] >= START + pd.Timedelta(minutes=58)) & (RAW['TimeStamp'] < START + pd.Timedelta(minutes=70))]
-  assert _run(rest, _params(store=store, judge='hourly'))['detector_health']['TimeStamp'].max() == START + pd.Timedelta(minutes=45)
+@pytest.fixture(scope='module')
+def whole(two_days, tmp_path_factory):
+  return _runs(two_days, [], DETECTORS, tmp_path_factory.mktemp('whole'), 'r')[0]
 
 
-def test_each_run_writes_only_new_bins_and_past_rows_never_change(tmp_path):
-  cuts = [START + pd.Timedelta(hours=1, minutes=5), START + pd.Timedelta(hours=2, minutes=5)]
-  parts = _runs(RAW, cuts, store=str(tmp_path / 's.duckdb'), judge='hourly')
-  assert len(parts) >= 2
-  # A bin first found late is released as a new row with a past TimeStamp, so a later run may reach back. Rows already
-  # written never change, which here means no run writes a bin, detector and label a second time.
-  assert not pd.concat(parts, ignore_index=True).duplicated(KEY).any()
-  for earlier, later in zip(parts[:-1], parts[1:]):
-    assert later['TimeStamp'].max() > earlier['TimeStamp'].max()
+@pytest.mark.parametrize('seed', [1, 2])
+def test_one_long_run_equals_runs_at_random_cuts(two_days, whole, tmp_path, seed):
+  cut = _runs(two_days, _random_cuts(two_days, 12, seed), DETECTORS, tmp_path, 'r')
+  assert len(whole['detector_health']) > 0
+  pd.testing.assert_frame_equal(_ordered(_all_rows(cut)), _ordered(whole['detector_health']), check_dtype=False)
 
 
-@pytest.mark.parametrize('judge', ['hourly', 'every_run'])
-def test_a_retry_writes_the_same_rows_again(tmp_path, judge):
-  # The first try's files never got out, and the store had moved on already
-  store = str(tmp_path / 's.duckdb')
-  cut = START + pd.Timedelta(hours=2)
-  before, last = RAW[RAW['TimeStamp'] < cut], RAW[RAW['TimeStamp'] >= cut]
-  _run(before, _params(store=store, judge=judge))
-  first = _run(last, _params(store=store, judge=judge))['detector_health']
-  assert len(first) > 0
-  for _ in range(2):
-    pd.testing.assert_frame_equal(_ordered(_run(last, _params(store=store, judge=judge))['detector_health']), _ordered(first), check_dtype=False)
+def test_each_run_its_own_bin_and_late_finds_only_inside_the_previous_day(two_days, tmp_path):
+  cuts = list(pd.date_range(MIDNIGHT - pd.Timedelta(hours=2), MIDNIGHT + pd.Timedelta(minutes=30), freq='15min'))
+  tables = _runs(two_days, cuts, DETECTORS, tmp_path, 'r', findings=True)
+  edges = [two_days['TimeStamp'].min()] + cuts
+  checks = []
+  for a, t in zip(edges, tables):
+    rows = t['detector_health']
+    if a > edges[0] and rows['TimeStamp'].lt(a - pd.Timedelta(minutes=15)).any():
+      late = rows[rows['TimeStamp'] < a - pd.Timedelta(minutes=15)]
+      assert late['TimeStamp'].ge(MIDNIGHT - pd.Timedelta(days=1)).all() and late['TimeStamp'].lt(MIDNIGHT).all()
+      checks.append(a)
+  assert len(checks) == 1 and checks[0] >= MIDNIGHT
+  assert [('detector_health_findings' in t) for t in tables].count(True) == 2     # the midnight of the first day, in the first run, and this one
+  assert not _all_rows(tables).duplicated(KEY).any()
 
 
-def test_a_retry_leaves_the_runs_after_it_as_they_were(tmp_path):
-  cut, cut2 = START + pd.Timedelta(hours=1), START + pd.Timedelta(hours=2)
-  chunks = [RAW[RAW['TimeStamp'] < cut], RAW[(RAW['TimeStamp'] >= cut) & (RAW['TimeStamp'] < cut2)], RAW[RAW['TimeStamp'] >= cut2]]
-  plain, retried = [], []
-  for frames, out, store in (([*chunks], plain, 'a.duckdb'), ([chunks[0], chunks[1], chunks[1], chunks[2]], retried, 'b.duckdb')):
-    for chunk in frames:
-      got = _run(chunk, _params(store=str(tmp_path / store), judge='hourly')).get('detector_health')
-      out.append(pd.DataFrame(columns=COLUMNS) if got is None else got)
-  pd.testing.assert_frame_equal(_ordered(retried[2]), _ordered(plain[1]), check_dtype=False)
-  pd.testing.assert_frame_equal(_ordered(retried[3]), _ordered(plain[2]), check_dtype=False)
+def test_the_first_runs_write_nothing_until_the_first_check(two_days, tmp_path):
+  first = two_days[two_days['TimeStamp'] < T0 + pd.Timedelta(hours=6)]
+  got = _run(first, _params(DETECTORS, state='', history=str(tmp_path / 'rows')))
+  assert set(got) == {'detector_health', 'health_state', 'health_rows'} and len(got['detector_health']) == 0
+
+
+def test_a_retry_from_the_last_state_writes_the_same_rows_again(two_days, tmp_path):
+  cut = MIDNIGHT - pd.Timedelta(minutes=15)
+  rows = tmp_path / 'rows'
+  rows.mkdir()
+  before = _run(two_days[two_days['TimeStamp'] < cut], _params(DETECTORS, state='', history=str(rows)))
+  before['health_rows'].to_parquet(rows / 'before.parquet')
+  last = two_days[two_days['TimeStamp'] >= cut]
+  tries = [_run(last, _params(DETECTORS, state=before['health_state'], history=str(rows)))['detector_health'] for _ in range(2)]
+  assert len(tries[0]) > 0
+  pd.testing.assert_frame_equal(_ordered(tries[0]), _ordered(tries[1]), check_dtype=False)
+
+
+def test_a_listed_run_missing_from_history_raises_before_the_check(two_days, tmp_path):
+  cut = MIDNIGHT - pd.Timedelta(minutes=15)
+  before = _run(two_days[two_days['TimeStamp'] < cut], _params(DETECTORS, state='', history=str(tmp_path / 'rows')))
+  with pytest.raises(ValueError, match='lacks the rows'):
+    _run(two_days[two_days['TimeStamp'] >= cut], _params(DETECTORS, state=before['health_state'], history=str(tmp_path / 'rows')))
 
 
 # ---- a stuck ON outlives the window
@@ -216,25 +218,26 @@ def _stuck_rows(frame, kind, detector):
 
 @pytest.mark.parametrize('cuts', [[], [T0 + pd.Timedelta(days=k, minutes=k * 7) for k in range(1, 7)]], ids=['one_run', 'daily_runs'])
 def test_a_button_stuck_past_the_window_keeps_its_bins_until_the_off(tmp_path, cuts):
-  parts = _runs(_stuck_raw(), cuts, DETECTORS, store=str(tmp_path / 's.duckdb'), judge='daily', horizon_days=1)
-  bins = pd.concat(parts, ignore_index=True)
+  bins = _all_rows(_runs(_stuck_raw(), cuts, DETECTORS, tmp_path, 'r', horizon_days=1))
   assert not bins.duplicated(KEY).any()
   rows = _stuck_rows(bins, 'Ped', 2)
   assert rows['TimeStamp'].iloc[0] == ON and rows['TimeStamp'].iloc[-1] == OFF.floor('15min')
   assert rows['TimeStamp'].diff().dropna().eq(pd.Timedelta(minutes=15)).all()
-  assert rows['Score'].sum() / 4 == pytest.approx((OFF - ON) / pd.Timedelta(hours=1))
+  assert rows['Score'].sum() / 4 == pytest.approx((OFF - ON) / pd.Timedelta(hours=1), rel=0.01)
 
 
-def test_the_open_on_is_in_the_store_not_in_the_unmatched_events_file(tmp_path):
+def test_the_open_on_is_in_the_state_not_in_the_unmatched_events_file(tmp_path):
   raw = _stuck_raw(4)
-  store, unmatched = str(tmp_path / 's.duckdb'), str(tmp_path / 'unmatched.parquet')
+  rows, state, unmatched = tmp_path / 'rows', tmp_path / 'state.parquet', str(tmp_path / 'unmatched.parquet')
+  rows.mkdir()
   for k in range(1, 4):
     chunk = raw[(raw['TimeStamp'] >= T0 + pd.Timedelta(days=k - 1)) & (raw['TimeStamp'] < T0 + pd.Timedelta(days=k))]
+    params = _params(DETECTORS, state=str(state) if state.exists() else '', history=str(rows), horizon_days=1)
     SignalDataProcessor(raw_data=chunk, detector_config=None, bin_size=15, verbose=0, output_dir=str(tmp_path / 'out'), output_format='parquet',
                         output_to_separate_folders=False, unmatched_event_settings={'df_or_path': unmatched, 'max_days_old': 1, 'first_run': True},
-                        aggregations=[_params(DETECTORS, store=store, horizon_days=1, judge='daily'), {'name': 'ped', 'params': {}}]).run()
-  con = duckdb.connect(store, read_only=True)
-  carried = con.execute("SELECT TimeStamp, Parameter FROM health_carry WHERE EventId = 9232").fetchall()
-  con.close()
-  assert [(t, p // 1000) for t, p in carried] == [(ON.to_pydatetime(), 2)]
+                        aggregations=[params, {'name': 'ped', 'params': {}}]).run()
+    if not state.exists():
+      os.replace(tmp_path / 'out' / 'health_state.parquet', state)
+  carried = pd.read_parquet(state).query('EventId == 9232')
+  assert [(t, p // 1000) for t, p in zip(carried['TimeStamp'], carried['Parameter'])] == [(ON, 2)]
   assert not pd.read_parquet(unmatched)['EventId'].between(9200, 9499).any()

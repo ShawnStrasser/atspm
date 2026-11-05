@@ -386,26 +386,33 @@ The spring change skips an hour and repeats none, so nothing is needed then. `to
 
 ```python
 {'name': 'detector_health', 'params': {
-    'store': 'C:/atspm/health_store.duckdb',  # None: one run over this run's raw_data, always judged
-    'detectors': 'detectors.parquet',         # DataFrame or path; None: detector_config
-    'horizon_days': 3,                        # how far back a verdict looks, and how much the store keeps
-    'judge': 'daily',                         # 'daily' | 'hourly' | 'every_run' | False (only add to the store)
-    'findings': False,                        # also write detector_health_findings
-    'ped': True,                              # a store's ped setting cannot change later
-    'ped_assign': False,                      # ped movement model (onnxruntime)
-    'options': None, 'ped_options': None,     # atspm-detector vehicle and ped overrides
-    'workers': 1,
-    'clock_ahead_minutes': 60,                # see below
-    'restart_old_store': True,                # see below
+    'detectors': 'detectors.parquet',    # DataFrame or path; None: detector_config
+    'state': health_state,               # the last run's health_state, as a table or a parquet or CSV path; '': first run; None: one run over this raw_data
+    'history': 'C:/atspm/health_rows',   # folder or glob of saved health_rows, or a function giving one; read only by a whole-day check
+    'horizon_days': 3,                   # how far back a whole-day check looks
+    'findings': False,                   # also write detector_health_findings, at runs with a whole-day check
+    'ped': True,
+    'ped_assign': False,                 # ped movement model (onnxruntime)
+    'options': None, 'ped_options': None,  # atspm-detector vehicle and ped overrides
+    'workers': 4,                        # processes for the whole-day check
+    'clock_ahead_minutes': 60,           # see below
 }}
 ```
 
-- **Store**: each run adds its events to a DuckDB file holding small summary rows and whatever is still open (a detector that is ON, a green still running). The store keeps `horizon_days` and no more, a run that fails leaves it unchanged, a run of the events of the last run writes that run's rows again, so a retry loses nothing whatever became of its files, and the answers equal one run over the same events however they were cut into runs. This state lives in the store, not in `unmatched_events`. Only one run can write to a store at a time. A store from an older `atspm-detector` that changed what the rows mean is renamed `<file>.v<N>` and a new one started, with a warning; it fills up again as data arrives. With `restart_old_store=False` that raises an error instead.
-- **Verdicts**: `daily` judges at each midnight and `hourly` at each hour, on the clock, wherever runs are cut: a run whose last event is within a second of such a time has reached it, and a run that reaches several judges at each of them. `every_run` judges at the end of each run, so there the cuts matter. A verdict looks back over `horizon_days`, and writes the bins since the verdict before. A run that reaches no verdict writes no `detector_health` file. With no store the run also judges at its end. A verdict that comes later can find a problem in bins already written: those rows stay as they are, and the problem comes as new rows with their past `TimeStamp`, so read the table by `TimeStamp`, not by file. No bin, detector and label is written twice, a retry aside. The more often the verdicts, the more of this: `daily` is what the numbers below were measured on.
-- **Stuck past the window**: a button or detector a verdict rated stuck ON keeps its bins for as long as it stays ON, however long, as the open ON stays in the store. While its signal logs nothing (a button: while its phase walks nothing) it has no rows, as nothing is known of it then, and they start again if it is still ON. A run with no store knows nothing before its `raw_data`.
+`judge`, `store` and `restart_old_store` are gone and raise an error naming the replacement.
+
+- **Every run**: each 15-minute bin the run reaches gets its rows from the checks that can answer at once: vehicle stuck on, too-fast actuations, too many for the traffic, ped stuck on and ped long hold. A bin reached only by fewer than 1 in 10 of the run's signals waits, and the next run writes it too.
+- **First run past midnight**: it also runs the whole-day check over the last `horizon_days` and writes what that check finds in the previous day, and only there, as new rows with past `TimeStamp`s. Read the table by `TimeStamp`, not by file. No bin, detector and label is written twice. A fault that began earlier shows from the start of the previous day.
+- **Midnight comes from the event stamps**, never a machine clock: it is past when 9 in 10 of the signals heard from in the day before it are past it, using this run's and the state's last events, or once the run is `clock_ahead_minutes` past it. Until then the run stops at midnight: its later events stay in the state and its later bins wait, for up to `clock_ahead_minutes`. A signal later than that can lose that day's whole-day rows.
+- **First runs**: pass `state: ''`. Nothing is written until the first whole-day check, at the first midnight after a complete day, as the limits come from that check.
+- **Carrying the tables**: each run makes `health_state` and `health_rows` on `processor.conn`, as with `unmatched_events`. Load `health_state` back every run. Only append `health_rows`, one file per run, and pass their folder as `history`. With paths in `state` and `history`, `save()` writes them there, in this order: `detector_health`, `health_rows`, `health_state` last, replacing it in one step. On a first run with `state: ''` the state goes to `output_dir` like any table. Only rows of runs the state lists count, so retry a failed run from the last saved state, and de-duplicate output on `TimeStamp`, `DeviceId`, `DetectorType`, `Detector` and `Label`. A run the state lists whose rows are missing from `history` raises before the check, as the check would write rows that can never be fixed. Delete rows older than `horizon_days + 1` days.
+- **Types and sizes**: both tables go through parquet or CSV, read back in their listed types. Cut events on the quarter hour by stamp: statewide (1,134 signals) the state is then 0.6 MB of parquet or 16 MB of CSV, where a cut 5 s before the quarter hour gives 15 MB or 299 MB. Keep `health_rows` in parquet: 3 days statewide are 428 MB there, and would not fit in memory as a DataFrame. With plain `pd.read_csv`, pass `dtype={'DeviceId': str}` for ids of digits. An empty run writes no rows, in all columns, and leaves the state as it is. A state from an `atspm-detector` that changed what the rows mean raises; pass `''` to start again and delete the old rows.
+- **Cost, statewide, measured**: an ordinary run took about 5 s and 1.5 GB at 3.63 M events. The midnight run took 530 to 670 s and 2.9 GB with 1 worker, and about 280 s and 6.5 GB in total with 4 workers, past a 4 GB limit on the main process.
+- **Equal to one big run**: the same events cut into any runs, each in its own process carrying only these tables, give the same rows. With `state: None` one run over this `raw_data` is judged at each midnight and at its end, and writes no `health_state` or `health_rows`. A state needs `bin_size` 15.
+- **Stuck past the window**: a button or detector a check rated stuck ON keeps its bins for as long as it stays ON, however long, as the open ON stays in the state. While its signal logs nothing (a button: while its phase walks nothing) it has no rows, as nothing is known of it then, and they start again if it is still ON. A run with no state knows nothing before its `raw_data`.
 - **Reading the bins**: sum `Score` per detector over the period and divide by 4 for 15-minute bins: that is the hours of complete failure in the period, whatever its length. Do not average: 3 hours of total failure averages 0.125 over a day, 0.042 over 3 days and 0.018 over 7. Good is no hours, Suspect under 1 hour, Bad 1 hour or more, the same for any period. Borderline findings have no rows, so they read Good. A `Score` left empty means not enough data, not a problem.
 - **Detectors**: pass `predict()`'s answers from `atspm-detector` where you can. Without them `detector_config` is used, which holds the agency's settings rather than what the detectors are found to do: `Function` is taken as named, with `Stopbar Count` read as `Count`, every detector counts as one lane, and a detector with several rows takes its lowest phase.
-- **Clocks**: only rows stamped before the end of the run's last 15-minute bin are processed. A signal whose last event is more than `clock_ahead_minutes` past the typical signal's last event is treated as having a wrong clock and does not move that time, so its later rows are left out and counted. Rows left out this way, rows with an impossible time, and rows the store already covers (the repeated hour of the fall clock change, for example) are printed per signal at `verbose=1`. That log is the only sign of them: such a signal otherwise just looks quiet in the results.
+- **Clocks**: with a state, a run reaches where 1 in 10 of its signals have an event later, so a few clocks running ahead move nothing, and events more than `clock_ahead_minutes` past that are left out. With `state: None`, only rows stamped before the end of the run's last 15-minute bin are processed, a signal more than `clock_ahead_minutes` past the typical signal's last event does not move that time, and rows left out this way are printed per signal at `verbose=1`. That log is the only sign of them: such a signal otherwise just looks quiet in the results.
 
 `to_sql=True` is not supported, and `remove_incomplete` does not apply. The `traffic-anomaly` parameters (`data`, `device_groups`, `decompose_params`, `anomaly_params`, `return_last_n_days`) were removed in 3.0.0 and raise an error.
 
@@ -594,17 +601,17 @@ GROUP BY DeviceId, Phase
 *   `ActualOffset` (INT16): Measured offset.
 
 #### detector_health
-One row per bin per problem; no row means no problem found. A row is written once, by the first verdict to find it, and never changes, so a new row can carry a past `TimeStamp`; the latest bin is the live status. Written only by runs that reach a verdict.
+One row per bin per problem; no row means no problem found. A row is written once, by the first run or whole-day check to find it, and never changes, so a new row can carry a past `TimeStamp`; the latest bin is the live status.
 *   `TimeStamp` (DATETIME): Bin start time.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `DetectorType` (TEXT): `Vehicle` or `Ped`. The two kinds of number can overlap.
-*   `Detector` (INTEGER): Detector, or ped input for a button.
+*   `Detector` (BIGINT): Detector, or ped input for a button.
 *   `Label` (TEXT): The problem, or `not_enough_data` (one row a day).
 *   `Score` (DOUBLE): How much of the bin the detector was failing: about 1 for a complete failure over the whole bin, 0.5 for half a bin of it. Problems at the same moment share that moment's worst value, so the rows of a bin add up to at most 1. Empty on `not_enough_data`.
 
 #### detector_health_findings
-Written by `detector_health` when its `findings` param is True (default False), for looking into a detector. The findings of the run's last verdict: one row per finding, with notes and borderline findings too.
-*   `TimeStamp` (DATETIME): Time of the verdict.
+Written by `detector_health` when its `findings` param is True (default False), at runs with a whole-day check, for looking into a detector. The findings of the run's last check: one row per finding, with notes and borderline findings too.
+*   `TimeStamp` (DATETIME): Time of the check.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `DetectorType` (TEXT): `Vehicle` or `Ped`.
 *   `Detector` (INTEGER): Detector, or ped input for a button. Empty on a note about the whole signal.

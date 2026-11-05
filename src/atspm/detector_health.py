@@ -1,12 +1,9 @@
-"""The detector_health aggregation: atspm-detector's vehicle and ped health in time bins, kept up to date from each run's raw_data.
+"""The detector_health aggregation: atspm-detector's vehicle and ped health in time bins.
 
-Each run adds its events to a health store (a DuckDB file, or a store in memory for a one-shot run). Verdicts fall on the
-clock (each midnight, or each hour), wherever the runs are cut: a run cuts its events at each verdict's time, judges the store
-over the last horizon_days there, and writes the bins released since the verdict before, each bin once. The store is
-detached and every temporary table dropped before save(), which writes every table it can see."""
-import os
-import warnings
-
+With state given, a run every 15 minutes writes its own bins, and the first run past a midnight also runs the whole-day check and
+writes what it finds in the previous day. What the next run needs is two tables on the connection, health_state and health_rows.
+With no state, one run over this run's raw_data, judged at each midnight and at its end. Every temporary table is dropped before
+save(), which writes every table it can see."""
 import pandas as pd
 
 from .data_loader import _quote_path, _strip_wrapping_quotes
@@ -14,24 +11,27 @@ from .utils import v_print
 
 STORE = 'health_store'
 DETECTORS = 'health_detectors'
-CADENCES = ('daily', 'hourly', 'every_run', False)
 DEFAULTS = {
-    'store': None,                  # path of the store file; None: one run over this run's raw_data, always judged
     'detectors': None,              # DataFrame or path: DeviceId, Detector, phase, function, lanes [, p_*]
                                     # [, configured_function]; None: detector_config, as the agency set it
-    'horizon_days': 3,              # how far back a verdict looks, and how much the store keeps
-    'judge': 'daily',               # 'daily' | 'hourly' | 'every_run' | False (only add to the store)
-    'findings': False,              # also write detector_health_findings: the findings of the run's last verdict
+    'state': None,                  # last run's health_state, or a path to it; '': first run; None: one run over this raw_data
+    'history': None,                # folder or glob of saved health_rows, or a function giving one; read only by a whole-day check
+    'horizon_days': 3,              # how far back a whole-day check looks
+    'findings': False,              # also write detector_health_findings, at runs with a whole-day check
     'ped': True,
     'ped_assign': False,            # ped movement model (onnxruntime)
     'options': None,                # atspm-detector vehicle health overrides
     'ped_options': None,            # atspm-detector ped health overrides
-    'workers': 1,
-    'clock_ahead_minutes': 60,      # a signal this far past the typical signal's last event has a wrong clock
-    'restart_old_store': True,      # a store from an older extractor is renamed <file>.v<N>; False raises instead
+    'workers': 4,
+    'clock_ahead_minutes': 60,      # a signal this far past the typical signal's last event has a wrong clock; also the longest a whole-day check waits
+}
+REPLACED = {
+    'judge': "the whole-day check now comes by itself at the first run past midnight, and every run writes its own bins: leave it out",
+    'store': "use 'state' (the last run's health_state) and 'history' (the folder of saved health_rows)",
+    'restart_old_store': "pass 'state': '' to start again",
 }
 REMOVED = ('data', 'device_groups', 'decompose_params', 'anomaly_params', 'return_last_n_days')
-BINS = 'TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector INTEGER, Label VARCHAR, Score DOUBLE'
+BINS = 'TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector BIGINT, Label VARCHAR, Score DOUBLE'
 FINDINGS = ('TimeStamp TIMESTAMP, DeviceId {device}, DetectorType VARCHAR, Detector INTEGER, Start TIMESTAMP, '
             '"End" TIMESTAMP, Label VARCHAR, Confidence DOUBLE, Detail VARCHAR')
 
@@ -42,14 +42,15 @@ def detector_health_params(params):
     if removed:
         raise ValueError(f"detector_health parameters {removed} no longer exist: traffic-anomaly was removed in atspm "
                          "3.0.0 and detector_health is now atspm-detector's health. See the README.")
+    replaced = [k for k in REPLACED if k in params]
+    if replaced:
+        raise ValueError("detector_health: " + "; ".join(f"{k} is gone: {REPLACED[k]}" for k in replaced))
     unknown = sorted(set(params) - set(DEFAULTS))
     if unknown:
         raise ValueError(f"detector_health: unknown parameters {unknown}; it takes {sorted(DEFAULTS)}")
     full = {**DEFAULTS, **params}
-    if full['judge'] not in CADENCES:
-        raise ValueError(f"detector_health judge must be one of {CADENCES}, not {full['judge']!r}")
-    if full['store'] is None and not full['judge']:
-        raise ValueError("detector_health: judge=False with no store keeps nothing; give a store path")
+    if full['state'] is not None and full['history'] is None:
+        raise ValueError("detector_health: a state needs history, the folder of saved health_rows")
     if not isinstance(full['clock_ahead_minutes'], int) or full['clock_ahead_minutes'] < 0:
         raise ValueError("detector_health clock_ahead_minutes must be a whole number of minutes, 0 or more")
     return full
@@ -97,32 +98,6 @@ def _register_detectors(conn, detectors):
         raise ValueError(f"detector_health detectors table is missing columns {missing}")
 
 
-def _attached(conn):
-    return len(conn.execute("SELECT 1 FROM duckdb_databases() WHERE database_name = ?", [STORE]).fetchall()) > 0
-
-
-def _attach_store(H, conn, params):
-    """Attach the store. A store from an older extractor holds rows this code cannot read, so it is set aside."""
-    def attach():
-        H.attach_store(conn, params['store'], name=STORE, horizon_days=params['horizon_days'], options=params['options'],
-                       ped=params['ped'])
-    try:
-        attach()
-    except ValueError:
-        old = _store_meta(conn).get('extractor_version') if _attached(conn) else None
-        if params['store'] is None or not params['restart_old_store'] or old in (None, H.EXTRACTOR_VERSION):
-            raise
-        H.detach_store(conn, STORE)
-        os.replace(params['store'], f"{params['store']}.v{old}")
-        warnings.warn(f"detector_health: {params['store']} was written by extractor version {old}, this package has "
-                      f"{H.EXTRACTOR_VERSION}. Renamed it {params['store']}.v{old} and started a new store.")
-        attach()
-
-
-def _store_meta(conn):
-    return dict(conn.execute(f"SELECT Key, Value FROM {STORE}.health_meta").fetchall())
-
-
 def _covered_until(conn, clock_ahead_minutes):
     """The end of the run's last 15-minute bin (None for an empty run). Signals more than clock_ahead_minutes past the
     typical signal's last event do not count: one wrong clock must not move the time the whole store works to."""
@@ -147,33 +122,11 @@ def _typical_events(conn):
     return pd.Timestamp(first), pd.Timestamp(last)
 
 
-def _judge_due(cadence, end, meta):
-    """Whether this run reaches a new day or hour, measured from the last judge."""
-    if not cadence:
-        return False
-    if cadence == 'every_run':
-        return True
-    unit = 'D' if cadence == 'daily' else 'h'
-    last = meta.get('last_judge_end', meta.get('through'))
-    if last is None:
-        return end == end.floor(unit)
-    return end.floor(unit) > pd.Timestamp(last).floor(unit)
-
-
-def _verdict_times(cadence, meta, first_event, last_event):
-    """The clock's verdict times this run reaches: as for the bins of the other aggregations, a run whose last event is within a
-    second of a time reached it; otherwise that verdict waits for the next run, so all events before it have come. The times
-    follow from the last verdict, not from where runs were cut, so one long run and many short ones judge at the same times
-    on the same events."""
-    if cadence not in ('daily', 'hourly'):
-        return []
-    meta = {'through': first_event, **meta}
-    last_event = last_event + pd.Timedelta(seconds=1)
-    if not _judge_due(cadence, last_event, meta):
-        return []
-    unit = pd.Timedelta(days=1) if cadence == 'daily' else pd.Timedelta(hours=1)
-    last = pd.Timestamp(meta.get('last_judge_end', meta['through']))
-    return list(pd.date_range(last.floor(unit) + unit, last_event, freq=unit))
+def _verdict_times(first_event, last_event):
+    """The midnights this run reaches: as for the bins of the other aggregations, a run whose last event is within a second of one
+    reached it."""
+    day = pd.Timedelta(days=1)
+    return list(pd.date_range(first_event.floor(day) + day, last_event + pd.Timedelta(seconds=1), freq=day))
 
 
 def _log_held_back(stats, upto, verbose):
@@ -213,25 +166,6 @@ def _output_tables(params, bins=None, findings=None):
         yield 'detector_health_findings', FINDINGS, findings
 
 
-def _keep_for_a_retry(conn, params, first_event, last_event, device_type):
-    """The store moves on during aggregate(), so a retry of this run finds nothing new to write. It keeps what the last run wrote,
-    with that run's last event, and a run whose events reach back to that event writes those rows again."""
-    for name, columns, _ in _output_tables(params):
-        kept = f'{STORE}.{name}_written'
-        earlier = f'{name}_earlier'
-        again = f"FROM {kept} WHERE Run_Last BETWEEN TIMESTAMP '{first_event}' AND TIMESTAMP '{last_event}'"
-        conn.execute(f"CREATE TABLE IF NOT EXISTS {kept} (Run_Last TIMESTAMP, {columns.format(device=device_type)})")
-        conn.execute(f"CREATE TEMP TABLE {earlier} AS SELECT * EXCLUDE (Run_Last) {again}")
-        if _has_table(conn, name):
-            conn.execute(f"DELETE FROM {kept} WHERE Run_Last NOT BETWEEN TIMESTAMP '{first_event}' AND TIMESTAMP '{last_event}'")
-            conn.execute(f"INSERT INTO {kept} SELECT TIMESTAMP '{last_event}', * FROM {name}")
-        elif conn.execute(f"SELECT count(*) FROM {earlier}").fetchall()[0][0]:
-            _write_table(conn, name, columns, None, None, device_type)
-        if _has_table(conn, name):
-            conn.execute(f"INSERT INTO {name} SELECT * FROM {earlier}")
-        conn.execute(f"DROP TABLE {earlier}")
-
-
 def _update_to(H, conn, params, upto, after):
     """Add raw_data's rows before upto (from after on: the earlier ones went in before the verdict at after)."""
     if after is None:
@@ -242,28 +176,54 @@ def _update_to(H, conn, params, upto, after):
     return H.update(conn, source, DETECTORS, store=STORE, upto=upto, options=params['options'], ped=params['ped'])
 
 
+def _run_live(conn, params, bin_size, device_type):
+    """A run with state as tables: detector_health, health_state, health_rows, and detector_health_findings at a whole-day check when asked."""
+    if bin_size != 15:
+        raise ValueError(f"detector_health with a state writes 15-minute bins; this run has bin_size {bin_size}")
+    try:
+        from atspm_detector import live
+    except ImportError as e:
+        raise ImportError("detector_health needs atspm-detector with incremental health: "
+                          "pip install atspm[detector-health]") from e
+    found, checked = None, None
+    if conn.execute("SELECT count(*) FROM raw_data").fetchall()[0][0] == 0:     # the state stays as it is, and the run writes no rows
+        live.empty_run(conn, params['state'])
+    else:
+        try:
+            _register_detectors(conn, params['detectors'])
+            temp = conn.execute("SELECT current_setting('temp_directory')").fetchall()[0][0]
+            found, checked = live.live_run(conn, 'raw_data', DETECTORS, state=params['state'], history=params['history'], horizon_days=params['horizon_days'],
+                                           ped=params['ped'], options=params['options'], ped_options=params['ped_options'], ped_assign=params['ped_assign'],
+                                           workers=params['workers'], clock_ahead_minutes=params['clock_ahead_minutes'], temp_dir=temp or None)
+        finally:
+            conn.execute(f"DROP TABLE IF EXISTS {DETECTORS}")
+    for name, table in (('detector_health', 'hl_final'), ('health_state', 'hl_state'), ('health_rows', 'hl_rows')):
+        conn.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM {table}")
+        conn.execute(f"DROP TABLE {table}")
+    if params['findings'] and checked is not None:
+        _write_table(conn, 'detector_health_findings', FINDINGS, found, checked, device_type)
+
+
 def run_detector_health(conn, params, verbose=1, bin_size=15):
-    """Add this run's raw_data to the store and write detector_health, the bins released by the verdicts this run reaches, and
-    detector_health_findings when its findings param is True. A run that reaches no verdict writes neither."""
+    """With a state: _run_live. With none: judge this run's raw_data at each midnight and at its end, and write detector_health and,
+    when its findings param is True, detector_health_findings."""
     H = _load_package()
     if not _has_table(conn, 'raw_data'):
         raise ValueError("detector_health reads raw_data: give raw_data and call load() first")
     device_type = next(r[1] for r in conn.execute("DESCRIBE SELECT DeviceId FROM raw_data").fetchall())
+    if params['state'] is not None:
+        return _run_live(conn, params, bin_size, device_type)
     end = _covered_until(conn, params['clock_ahead_minutes'])
-    one_shot = params['store'] is None
     if end is None:                 # nothing to add, and a new store would take its DeviceId type from no data
-        if one_shot:
-            for name, columns, frame in _output_tables(params):
-                _write_table(conn, name, columns, frame, None, device_type)
+        for name, columns, frame in _output_tables(params):
+            _write_table(conn, name, columns, frame, None, device_type)
         v_print("detector_health: no raw data in this run", verbose)
         return
     try:
         _register_detectors(conn, params['detectors'])
-        _attach_store(H, conn, params)
-        meta = _store_meta(conn)
+        H.attach_store(conn, None, name=STORE, horizon_days=params['horizon_days'], options=params['options'], ped=params['ped'])
         bins, findings, judged, after = [], None, None, None
-        first_event, last_event = _typical_events(conn)
-        for time in _verdict_times(params['judge'], meta, first_event, last_event):
+        for time in _verdict_times(*_typical_events(conn)):
             stats = _update_to(H, conn, params, time, after)
             _log_held_back(stats, None, verbose)
             after = time
@@ -276,17 +236,14 @@ def run_detector_health(conn, params, verbose=1, bin_size=15):
             return
         if stats.through >= end:    # the store is already past this run: its rows were late
             end = _next_quarter(stats.through)
-        if (one_shot or params['judge'] == 'every_run') and judged != end:
+        if judged != end:
             result = _judge(H, conn, params, end, bin_size)
             bins, findings, judged = bins + [result.bins], result.findings, end
-        if judged is not None:
-            rows = [b for b in bins if len(b)]
-            for name, columns, frame in _output_tables(params, pd.concat(rows, ignore_index=True) if rows else None, findings):
-                _write_table(conn, name, columns, frame, judged, device_type)
-        if not one_shot:
-            _keep_for_a_retry(conn, params, first_event, last_event, device_type)
+        rows = [b for b in bins if len(b)]
+        for name, columns, frame in _output_tables(params, pd.concat(rows, ignore_index=True) if rows else None, findings):
+            _write_table(conn, name, columns, frame, judged, device_type)
     finally:
         conn.execute(f"DROP TABLE IF EXISTS {DETECTORS}")
         conn.execute(f"DROP VIEW IF EXISTS {DETECTORS}_rows")
-        if _attached(conn):
+        if len(conn.execute("SELECT 1 FROM duckdb_databases() WHERE database_name = ?", [STORE]).fetchall()):
             H.detach_store(conn, STORE)

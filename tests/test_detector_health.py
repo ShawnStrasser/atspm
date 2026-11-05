@@ -1,4 +1,4 @@
-"""The detector_health aggregation on atspm-detector's incremental health (tests A1 to A8 of the design)."""
+"""The detector_health aggregation on atspm-detector's health: its parameters, one run, what save() writes, and that nothing else changes."""
 import builtins
 import os
 import re
@@ -8,7 +8,6 @@ import pandas as pd
 import pytest
 
 from src.atspm import SignalDataProcessor
-from src.atspm.detector_health import _judge_due
 
 H = pytest.importorskip('atspm_detector.incremental', exc_type=ImportError)
 from atspm_detector import health
@@ -46,9 +45,9 @@ def _chunks(minutes, data=RAW, start=START, end=END):
   return [_chunk(a, b, data) for a, b in zip(edges[:-1], edges[1:])]
 
 
-def _run(raw, *aggregations, **kwargs):
+def _run(raw, *aggregations, bin_size=15, **kwargs):
   """Load and aggregate; returns every table the connection can see, as save() would, as frames."""
-  with SignalDataProcessor(raw_data=raw, bin_size=15, verbose=0, aggregations=list(aggregations), **kwargs) as p:
+  with SignalDataProcessor(raw_data=raw, bin_size=bin_size, verbose=0, aggregations=list(aggregations), **kwargs) as p:
     p.load()
     p.aggregate()
     names = [r[0] for r in p.conn.sql("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()]
@@ -63,6 +62,11 @@ def _same(a, b):
   pd.testing.assert_frame_equal(_ordered(a), _ordered(b), check_dtype=False)
 
 
+def _save_run(raw, aggregation, out, prefix='', output_format='parquet'):
+  SignalDataProcessor(raw_data=raw, bin_size=15, verbose=0, output_dir=str(out), output_format=output_format, output_file_prefix=prefix,
+                      output_to_separate_folders=False, aggregations=[aggregation]).run()
+
+
 def _reference(raw, start, end):
   """atspm-detector on its own, over the same window."""
   con = duckdb.connect()
@@ -71,16 +75,7 @@ def _reference(raw, start, end):
   return health(con, 'events', 'detectors', start, end, bin_origin='clock', summary=True)
 
 
-def _store_rows(path):
-  con = duckdb.connect(str(path), read_only=True)
-  try:
-    names = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
-    return {n: _ordered(con.execute(f'SELECT * FROM "{n}"').df()) for n in names}
-  finally:
-    con.close()
-
-
-# ---- A1, A2: one run and chunked runs equal atspm-detector on its own
+# ---- A1: one run equals atspm-detector on its own
 
 def test_a1_one_shot_equals_the_package_on_its_own():
   out = _run(RAW, _params(findings=True))
@@ -91,68 +86,12 @@ def test_a1_one_shot_equals_the_package_on_its_own():
   _same(out['detector_health'], bins(duckdb.connect(), findings, status, END - pd.Timedelta(days=3), END))
 
 
-def test_a2_fifteen_minute_runs_equal_one_run(tmp_path):
-  store = str(tmp_path / 'health.duckdb')
-  chunks = _chunks(15)
-  assert len(chunks) == 12
-  for chunk in chunks[:-1]:
-    assert 'detector_health' not in _run(chunk, _params(store=store, judge=False))
-  chunked = _run(chunks[-1], _params(store=store, judge='every_run', findings=True))
-  one = _run(RAW, _params(judge='every_run', findings=True))
-  for table in ('detector_health', 'detector_health_findings'):
-    _same(chunked[table], one[table])
-
-
 # ---- the findings table
 
 def test_an_empty_one_shot_has_the_findings_table_too():
   out = _run(RAW.head(0), _params(findings=True))
   assert set(out) == {'detector_health', 'detector_health_findings'}
   assert all(len(frame) == 0 and frame.columns[0] == 'TimeStamp' for frame in out.values())
-
-
-# ---- A3: judge cadence
-
-def _shifted(hours):
-  return RAW.assign(TimeStamp=RAW['TimeStamp'] + pd.Timedelta(hours=hours))
-
-
-def _cadence_runs(tmp_path, cadence):
-  """Half-hour runs from 22:30 to 01:00, crossing midnight: which run ends judged."""
-  data = pd.concat([_shifted(6),                                # 21:00 to 00:00
-                    _chunk('2024-05-14 00:00', '2024-05-14 01:00', _shifted(9))])
-  store = str(tmp_path / f'{cadence}.duckdb')
-  judged = []
-  edges = pd.date_range('2024-05-13 22:30', '2024-05-14 01:00', freq='30min')
-  _run(_chunk('2024-05-13 21:00', edges[0], data), _params(store=store, judge=False))
-  for a, b in zip(edges[:-1], edges[1:]):
-    out = _run(_chunk(a, b, data), _params(store=store, judge=cadence, findings=True))
-    if 'detector_health' in out:
-      judged.append(b)
-      assert out['detector_health_findings']['TimeStamp'].eq(b).all()
-  return judged
-
-
-@pytest.mark.parametrize('cadence, expected', [
-  ('daily', ['2024-05-14 00:00']),
-  ('hourly', ['2024-05-13 23:00', '2024-05-14 00:00', '2024-05-14 01:00']),
-  ('every_run', ['2024-05-13 23:00', '2024-05-13 23:30', '2024-05-14 00:00', '2024-05-14 00:30', '2024-05-14 01:00']),
-  (False, []),
-])
-def test_a3_cadence(tmp_path, cadence, expected):
-  assert _cadence_runs(tmp_path, cadence) == [pd.Timestamp(t) for t in expected]
-
-
-@pytest.mark.parametrize('cadence, end, meta, due', [
-  ('daily', '2024-05-14 00:15', {'last_judge_end': '2024-05-13 00:00:00'}, True),     # no run ended at midnight
-  ('daily', '2024-05-14 00:30', {'last_judge_end': '2024-05-14 00:15:00'}, False),    # the first run after it judged
-  ('daily', '2024-05-14 00:00', {}, True),                                            # the store's first run
-  ('daily', '2024-05-13 18:00', {}, False),
-  ('daily', '2024-05-14 00:15', {'through': '2024-05-13 23:50:00'}, True),            # the store has never judged
-  ('hourly', '2024-05-14 03:15', {'last_judge_end': '2024-05-14 02:00:00'}, True),
-])
-def test_a3_first_run_after_the_hour(cadence, end, meta, due):
-  assert _judge_due(cadence, pd.Timestamp(end), meta) is due
 
 
 # ---- A4: what save() writes
@@ -164,12 +103,27 @@ def test_a4_save_writes_only_the_output_tables(tmp_path, output_format):
   assert sorted(os.listdir(tmp_path)) == [f'detector_health.{output_format}', f'detector_health_findings.{output_format}']
 
 
-def test_a4_a_run_that_does_not_judge_writes_nothing(tmp_path):
-  out = tmp_path / 'out'
-  SignalDataProcessor(raw_data=_chunks(15)[0], bin_size=15, verbose=0, output_dir=str(out), output_format='parquet',
-                      output_to_separate_folders=False,
-                      aggregations=[_params(store=str(tmp_path / 'store.duckdb'))]).run()
-  assert os.listdir(out) == []
+def test_a4_save_writes_state_and_rows_to_their_paths(tmp_path):
+  state, rows, out = tmp_path / 'state.parquet', tmp_path / 'rows', tmp_path / 'out'
+  chunks = _chunks(15)
+  _save_run(chunks[0], _params(state='', history=str(rows)), out, prefix='0_')
+  assert sorted(os.listdir(out)) == ['0_detector_health.parquet', '0_health_state.parquet']
+  assert len(os.listdir(rows)) == 1
+  os.replace(out / '0_health_state.parquet', state)
+  before = state.stat().st_mtime_ns
+  _save_run(chunks[1], _params(state=str(state), history=str(rows)), out, prefix='1_')
+  assert sorted(os.listdir(out)) == ['0_detector_health.parquet', '1_detector_health.parquet']
+  assert len(os.listdir(rows)) == 2 and state.stat().st_mtime_ns > before and not (tmp_path / 'state.parquet.tmp').exists()
+  assert list(pd.read_parquet(state).columns) == ['TimeStamp', 'DeviceId', 'EventId', 'Parameter', 'Value']
+
+
+def test_a4_state_through_a_csv_path(tmp_path):
+  state, rows, out = tmp_path / 'state.csv', tmp_path / 'rows', tmp_path / 'out'
+  chunks = _chunks(15)
+  _save_run(chunks[0], _params(state='', history=str(rows)), out, output_format='csv')
+  os.replace(out / 'health_state.csv', state)
+  _save_run(chunks[1], _params(state=str(state), history=str(rows)), out, output_format='csv')
+  assert (pd.read_csv(state)['EventId'] == 9602).sum() == 1
 
 
 def test_a4_no_store_or_temp_table_stays_behind():
@@ -179,7 +133,7 @@ def test_a4_no_store_or_temp_table_stays_behind():
     assert frame.columns[0] == 'TimeStamp'
 
 
-# ---- A5: every other aggregation is unaffected
+# ---- A5: every other aggregation is unaffected, with a state too
 
 OTHERS = [
   {'name': 'has_data', 'params': {}},
@@ -192,11 +146,13 @@ OTHERS = [
 ]
 
 
-def _incremental_outputs(folder, extra):
-  """The incremental runs, unmatched events carried from file to file: every file they wrote."""
+def _incremental_outputs(folder, health=False):
+  """The incremental runs, unmatched events carried from file to file: every file they wrote but detector health's."""
   folder.mkdir()
   unmatched = str(folder / 'unmatched.parquet')
+  state = str(folder.parent / 'health_state.parquet')
   for i, chunk in enumerate(_chunks(30)):
+    extra = [_params(state=state if os.path.exists(state) else '', history=str(folder.parent / 'rows'))] if health else []
     aggregations = [dict(a, params=dict(a['params'])) for a in OTHERS] + extra
     aggregations[1]['params'].update(known_detectors_max_days_old=2)
     SignalDataProcessor(raw_data=chunk, detector_config=CONFIG, bin_size=15, verbose=0, output_dir=str(folder),
@@ -206,13 +162,14 @@ def _incremental_outputs(folder, extra):
     # each run reads its state back, so a difference here reaches the next run's outputs as well
     assert os.path.exists(unmatched)
     pd.read_parquet(unmatched).to_parquet(folder / f'{i}_unmatched_copy.parquet')
-  return {f: pd.read_parquet(folder / f) for f in os.listdir(folder) if 'detector_health' not in f}
+    if health and i == 0:
+      os.replace(folder / '0_health_state.parquet', state)
+  return {f: pd.read_parquet(folder / f) for f in os.listdir(folder) if 'health' not in f}
 
 
 def test_a5_other_outputs_are_identical_with_and_without_detector_health(tmp_path):
-  without = _incremental_outputs(tmp_path / 'without', [])
-  store = str(tmp_path / 'store.duckdb')
-  with_health = _incremental_outputs(tmp_path / 'with', [_params(store=store, judge='every_run')])
+  without = _incremental_outputs(tmp_path / 'without')
+  with_health = _incremental_outputs(tmp_path / 'with', health=True)
   assert set(with_health) == set(without)
   assert any('timeline' in f for f in without) and any('unmatched' in f for f in without)
   for name, frame in without.items():
@@ -230,8 +187,7 @@ def test_a6_old_parameters_explain_themselves(old):
 
 @pytest.mark.parametrize('params, message', [
   ({'nonsense': 1}, 'unknown parameters'),
-  ({'judge': 'weekly'}, 'judge must be'),
-  ({'judge': False}, 'keeps nothing'),
+  ({'state': ''}, 'needs history'),
   ({'clock_ahead_minutes': -1}, 'clock_ahead_minutes'),
   ({'outputs': ['weekly']}, 'unknown parameters'),
   ({'outputs': '15min'}, 'unknown parameters'),
@@ -239,6 +195,12 @@ def test_a6_old_parameters_explain_themselves(old):
 def test_a6_bad_parameters(params, message):
   with pytest.raises(ValueError, match=message):
     SignalDataProcessor(raw_data=RAW, aggregations=[{'name': 'detector_health', 'params': params}])
+
+
+@pytest.mark.parametrize('old, replacement', [('judge', 'first run past midnight'), ('store', "'state'"), ('restart_old_store', "'state': ''")])
+def test_a6_replaced_parameters_name_the_replacement(old, replacement):
+  with pytest.raises(ValueError, match=f'{old} is gone.*{replacement}'):
+    SignalDataProcessor(raw_data=RAW, aggregations=[{'name': 'detector_health', 'params': {old: 'x'}}])
 
 
 def test_a6_missing_extra_names_it(monkeypatch):
@@ -301,42 +263,33 @@ def test_detectors_missing_a_column():
 
 # ---- A8: a failed run
 
-def test_a8_a_failed_update_leaves_the_store_and_the_next_run_equals_a_clean_one(tmp_path, monkeypatch):
+def test_a8_a_failed_run_leaves_nothing_on_the_connection_and_its_retry_equals_a_clean_run(tmp_path, monkeypatch):
   chunks = _chunks(60)
-  store = str(tmp_path / 'failed.duckdb')
-  _run(chunks[0], _params(store=store, judge=False))
-  before = _store_rows(store)
-
-  def fail(*args, **kwargs):
-    raise RuntimeError('out of disk')
+  history = str(tmp_path / 'rows')
+  first = _run(chunks[0], _params(state='', history=history))['health_state']
   with monkeypatch.context() as m:
-    m.setattr(H, '_trim', fail)
-    with SignalDataProcessor(raw_data=chunks[1], bin_size=15, verbose=0, aggregations=[_params(store=store)]) as p:
+    def fail(*args, **kwargs):
+      raise RuntimeError('out of disk')
+    m.setattr('atspm_detector.live._live_step', fail)
+    with SignalDataProcessor(raw_data=chunks[1], bin_size=15, verbose=0, aggregations=[_params(state=first, history=history)]) as p:
       p.load()
       with pytest.raises(RuntimeError, match='out of disk'):
         p.aggregate()
       assert not p.conn.execute("SELECT 1 FROM duckdb_databases() WHERE database_name = 'health_store'").fetchall()
-      assert not p.conn.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = 'health_detectors'").fetchall()
-  after = _store_rows(store)
-  assert set(after) == set(before)
-  for table in before:
-    pd.testing.assert_frame_equal(after[table], before[table])
-
-  clean = str(tmp_path / 'clean.duckdb')
-  _run(chunks[0], _params(store=clean, judge=False))
-  _run(chunks[1], _params(store=clean, judge=False))
-  _run(chunks[1], _params(store=store, judge=False))
-  ends = [_run(chunks[2], _params(store=s, judge='every_run'))['detector_health'] for s in (store, clean)]
-  _same(ends[0], ends[1])
+      assert not p.conn.execute("SELECT 1 FROM duckdb_tables() WHERE table_name = 'health_detectors' OR starts_with(table_name, 'hl_')").fetchall()
+  retry = _run(chunks[1], _params(state=first, history=history))
+  clean = _run(chunks[1], _params(state=first, history=history))
+  _same(retry['detector_health'], clean['detector_health'])
+  _same(retry['health_state'].query('EventId != 9605'), clean['health_state'].query('EventId != 9605'))
 
 
-# ---- every update passes upto, and the log shows what it held back
+# ---- one run: every update passes upto, and the log shows what it held back
 
-def test_a_wrong_clock_is_held_back_and_logged_and_does_not_move_the_others(tmp_path, capsys):
+def test_a_wrong_clock_is_held_back_and_logged_and_does_not_move_the_others(capsys):
   wrong = RAW[RAW['DeviceId'] == 454].assign(TimeStamp=lambda f: f['TimeStamp'] + pd.DateOffset(years=1))
   others = RAW[RAW['DeviceId'] != 454]
   with SignalDataProcessor(raw_data=pd.concat([others, wrong]), bin_size=15, verbose=1,
-                           aggregations=[_params(store=str(tmp_path / 's.duckdb'), judge='every_run', findings=True)]) as p:
+                           aggregations=[_params(findings=True)]) as p:
     p.load()
     p.aggregate()
     bad = p.conn.execute("SELECT * FROM detector_health_findings").df()
@@ -345,11 +298,11 @@ def test_a_wrong_clock_is_held_back_and_logged_and_does_not_move_the_others(tmp_
   _same(bad, _run(others, _params(findings=True))['detector_health_findings'])
 
 
-def test_a_clock_a_little_ahead_keeps_its_rows(tmp_path, capsys):
+def test_a_clock_a_little_ahead_keeps_its_rows(capsys):
   chunk = _chunks(15)[0]
   ahead = chunk.assign(TimeStamp=chunk['TimeStamp'].where(chunk['DeviceId'] != 454, chunk['TimeStamp'] + pd.Timedelta(minutes=5)))
   with SignalDataProcessor(raw_data=ahead, bin_size=15, verbose=1,
-                           aggregations=[_params(store=str(tmp_path / 's.duckdb'), judge='every_run', findings=True)]) as p:
+                           aggregations=[_params(findings=True)]) as p:
     p.load()
     p.aggregate()
     judged = p.conn.execute("SELECT DISTINCT TimeStamp FROM detector_health_findings").fetchall()
@@ -357,21 +310,7 @@ def test_a_clock_a_little_ahead_keeps_its_rows(tmp_path, capsys):
   assert judged == [(pd.Timestamp('2024-05-13 15:30:00').to_pydatetime(),)]
 
 
-def test_running_an_old_chunk_again_is_late_logged_and_still_judges(tmp_path, capsys):
-  chunks = _chunks(60)
-  store = str(tmp_path / 's.duckdb')
-  _run(chunks[0], _params(store=store, judge=False))
-  _run(chunks[1], _params(store=store, judge=False))
-  with SignalDataProcessor(raw_data=chunks[0], bin_size=15, verbose=1,
-                           aggregations=[_params(store=store, judge='every_run', findings=True)]) as p:
-    p.load()
-    p.aggregate()
-    judged = p.conn.execute("SELECT DISTINCT TimeStamp FROM detector_health_findings").fetchall()
-  assert 'at or before what the store already holds' in capsys.readouterr().out
-  assert judged == [(pd.Timestamp('2024-05-13 17:00:00').to_pydatetime(),)]
-
-
-# ---- an empty run and an old store
+# ---- an empty run and a state
 
 EMPTY = RAW.head(0)
 
@@ -384,32 +323,24 @@ def test_an_empty_one_shot_has_the_tables_without_rows():
   assert len(out['detector_health']) == 0 and len(out['detector_health_findings']) == 0
 
 
-def test_an_empty_run_leaves_the_store_alone(tmp_path):
-  store = tmp_path / 's.duckdb'
-  assert _run(EMPTY, _params(store=str(store))) == {}
-  assert not store.exists()
+def test_an_empty_run_keeps_the_state_and_writes_all_columns(tmp_path):
+  history = str(tmp_path / 'rows')
+  first = _run(_chunks(15)[0], _params(state='', history=history))
+  out = _run(EMPTY, _params(state=first['health_state'], history=history))
+  assert set(out) == {'detector_health', 'health_state', 'health_rows'}
+  assert len(out['detector_health']) == 0 and len(out['health_rows']) == 0
+  assert list(out['health_rows'].columns) == list(first['health_rows'].columns) and len(first['health_rows'].columns) == 50
+  _same(out['health_state'], first['health_state'])
 
 
-def _age_store(path, version):
-  con = duckdb.connect(str(path))
-  con.execute("UPDATE health_meta SET Value = ? WHERE Key = 'extractor_version'", [version])
-  con.close()
+def test_a_missing_state_path_raises_and_empty_text_is_a_first_run(tmp_path):
+  gone = str(tmp_path / 'gone.parquet')
+  for raw in (_chunks(15)[0], EMPTY):
+    with pytest.raises(FileNotFoundError, match="Pass state '' only for a first run"):
+      _run(raw, _params(state=gone, history=str(tmp_path / 'rows')))
+  assert set(_run(_chunks(15)[0], _params(state='', history=str(tmp_path / 'rows')))) == {'detector_health', 'health_state', 'health_rows'}
 
 
-def test_a_store_from_an_older_extractor_is_set_aside(tmp_path):
-  store = tmp_path / 's.duckdb'
-  _run(_chunks(60)[0], _params(store=str(store), judge=False))
-  _age_store(store, '0')
-  with pytest.warns(UserWarning, match='started a new store'):
-    _run(_chunks(60)[1], _params(store=str(store), judge=False))
-  assert (tmp_path / 's.duckdb.v0').exists() and store.exists()
-  assert pd.Timestamp(_store_rows(store)['health_meta'].set_index('Key')['Value']['through']) >= START + pd.Timedelta(hours=1)
-
-
-def test_an_old_store_can_raise_instead(tmp_path):
-  store = tmp_path / 's.duckdb'
-  _run(_chunks(60)[0], _params(store=str(store), judge=False))
-  _age_store(store, '0')
-  with pytest.raises(ValueError, match='start a new store'):
-    _run(_chunks(60)[1], _params(store=str(store), judge=False, restart_old_store=False))
-  assert not (tmp_path / 's.duckdb.v0').exists()
+def test_a_state_needs_15_minute_bins(tmp_path):
+  with pytest.raises(ValueError, match='15-minute bins'):
+    _run(_chunks(15)[0], _params(state='', history=str(tmp_path / 'rows')), bin_size=60)
