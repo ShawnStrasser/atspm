@@ -71,7 +71,7 @@ def test_caller_dicts_are_left_alone(tmp_path):
     state = tmp_path / 'state.parquet'
     pd.DataFrame({'TimeStamp': [T0], 'DeviceId': ['A'], 'EventId': [936], 'Parameter': [0], 'IsValid': [True]}).to_parquet(state)
     settings = {'df_or_path': str(state), 'max_days_old': 2}
-    aggregations = [HAS_DATA, TIMELINE, {'name': 'actuations', 'params': {'fill_in_missing': True, 'known_detectors_df_or_path': None, 'known_detectors_max_days_old': 7}},
+    aggregations = [HAS_DATA, TIMELINE, {'name': 'actuations', 'params': {'fill_in_missing': True, 'known_detectors_max_days_old': 7}},
                     {'name': 'arrival_on_green', 'params': {}}]
     before = repr(settings), repr(aggregations)
     raw = events([(i, 'A', 82, 5) for i in range(1000, 1010)])
@@ -106,12 +106,6 @@ def test_missing_state_file_raises(settings):
     with pytest.raises(FileNotFoundError, match='does not exist'):
         SignalDataProcessor(raw_data=RAW, bin_size=15, verbose=0, aggregations=[HAS_DATA, TIMELINE],
                             unmatched_event_settings={**settings, **STATE_SETTINGS})
-
-
-def test_missing_known_detectors_file_raises():
-    with pytest.raises(FileNotFoundError, match='known_detectors_df_or_path'):
-        SignalDataProcessor(raw_data=RAW, bin_size=15, verbose=0, aggregations=[
-            {'name': 'actuations', 'params': {'fill_in_missing': True, 'known_detectors_df_or_path': 'no_such_folder/known.parquet'}}])
 
 
 @pytest.mark.parametrize('first', ['', None])
@@ -308,3 +302,23 @@ def test_an_instant_event_is_not_invalid_for_a_bin_its_cushion_reaches(tmp_path)
     big = run(pd.concat([first, second]), ALARMS, tables=['timeline'])['timeline']
     for frame in (rows, big):
         assert frame[frame.EventClass == 'Pattern Change'].IsValid.tolist() == [True]
+
+
+@pytest.mark.parametrize('settings', [{'known_detectors_df_or_path': 'x.parquet'}])
+def test_the_old_known_detectors_file_is_gone(settings):
+    with pytest.raises(ValueError, match='unknown parameters'):
+        SignalDataProcessor(raw_data=RAW, bin_size=15, verbose=0, aggregations=[{'name': 'actuations', 'params': settings}])
+
+
+def test_state_of_known_detectors_needs_actuations_listed(tmp_path):
+    path = tmp_path / 'state.parquet'
+    listed = [{'name': 'actuations', 'params': {'fill_in_missing': True}}]
+    state = run_on(path, events([(0, 'A', 82, 5), (10, 'A', 82, 6)]), listed)
+    assert sorted(state[state.EventId == 956].Parameter) == [5, 6]
+    with pytest.raises(ValueError, match="state holds rows of .*actuations"):
+        run_on(path, events([(900, 'A', 1, 2)]), [HAS_DATA])
+
+
+def test_actuations_without_fill_in_missing_saves_no_list(tmp_path):
+    state = run_on(tmp_path / 'state.parquet', events([(0, 'A', 82, 5)]), [{'name': 'actuations', 'params': {}}])
+    assert 956 not in set(state.EventId)

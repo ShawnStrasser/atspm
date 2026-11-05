@@ -193,20 +193,19 @@ OTHERS = [
 
 
 def _incremental_outputs(folder, extra):
-  """The incremental runs, unmatched events and known detectors carried from file to file: every file they wrote."""
+  """The incremental runs, unmatched events carried from file to file: every file they wrote."""
   folder.mkdir()
-  unmatched, known = str(folder / 'unmatched.parquet'), str(folder / 'known.parquet')
+  unmatched = str(folder / 'unmatched.parquet')
   for i, chunk in enumerate(_chunks(30)):
     aggregations = [dict(a, params=dict(a['params'])) for a in OTHERS] + extra
-    aggregations[1]['params'].update(known_detectors_df_or_path=known, known_detectors_max_days_old=2)
+    aggregations[1]['params'].update(known_detectors_max_days_old=2)
     SignalDataProcessor(raw_data=chunk, detector_config=CONFIG, bin_size=15, verbose=0, output_dir=str(folder),
                         output_format='parquet', output_to_separate_folders=False, output_file_prefix=f'{i}_',
                         unmatched_event_settings={'df_or_path': unmatched, 'max_days_old': 14, 'first_run': True},
                         aggregations=aggregations).run()
     # each run reads its state back, so a difference here reaches the next run's outputs as well
-    assert os.path.exists(unmatched) and os.path.exists(known)
-    for name in ('unmatched', 'known'):
-      pd.read_parquet(folder / f'{name}.parquet').to_parquet(folder / f'{i}_{name}_copy.parquet')
+    assert os.path.exists(unmatched)
+    pd.read_parquet(unmatched).to_parquet(folder / f'{i}_unmatched_copy.parquet')
   return {f: pd.read_parquet(folder / f) for f in os.listdir(folder) if 'detector_health' not in f}
 
 

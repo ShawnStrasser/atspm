@@ -376,20 +376,19 @@ def test_the_published_formula_on_real_data(real_events):
     assert (spans['count'] == (spans['max'] - spans['min']) / pd.Timedelta(minutes=15) + 1).all()
 
 
-def test_first_window_with_no_settings_then_a_carry(real_events):
-    """How ODOT's scheduled job starts: known detectors and timeline but no unmatched settings until it has a carry."""
+def test_first_window_with_none_then_a_carry(real_events):
+    """How ODOT's scheduled job starts: known detectors and timeline, with None in place of the state until it has one."""
     has_data = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
     timeline = {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60}}
-    def aggregations(known):
-        return [has_data, timeline, {'name': 'actuations', 'params': {'known_detectors_df_or_path': known}}, {'name': 'ped', 'params': {}}]
+    aggregations = [has_data, timeline, {'name': 'actuations', 'params': {'fill_in_missing': True}}, {'name': 'ped', 'params': {}}]
     events = real_events[real_events.TimeStamp < real_events.TimeStamp.min() + pd.Timedelta(hours=9)]
     start = events.TimeStamp.min().floor('3h')
     edges = list(pd.date_range(start, events.TimeStamp.max() + pd.Timedelta(hours=3), freq='3h'))
-    carry, known, frames = None, None, []
+    carry, frames = None, []
     for a, b in zip(edges[:-1], edges[1:]):
         chunk = pd.concat([events[(events.TimeStamp >= a) & (events.TimeStamp < b)], end_marker(b - pd.Timedelta(milliseconds=100))])
-        out = process(chunk, aggregations(known), carry=carry)
-        carry, known = out['unmatched_events'], out['known_detectors']
+        out = process(chunk, aggregations, settings={'df_or_path': carry, 'max_days_old': 14})
+        carry = out['unmatched_events']
         frames.append(out['ped'])
     big = process(pd.concat([events, end_marker(edges[-1] - pd.Timedelta(milliseconds=100))]), VOLUMES)['ped']
     pd.testing.assert_frame_equal(written(frames), written([big]))

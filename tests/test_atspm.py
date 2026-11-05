@@ -264,7 +264,6 @@ def incremental_processor_output_with_dataframes():
   configs = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
   unmatched_df = ''
   sf_unmatched_df = ''
-  known_detectors_df = ''
 
   chunks = {
       '1_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 15:00:00' and timestamp < '2024-05-13 15:15:00'").df(),
@@ -302,7 +301,6 @@ def incremental_processor_output_with_dataframes():
       if agg['name'] == 'actuations':
         agg['params'] = {
             'fill_in_missing': True,
-            'known_detectors_df_or_path': known_detectors_df,
             'known_detectors_max_days_old': 2
         }
         
@@ -321,18 +319,14 @@ def incremental_processor_output_with_dataframes():
     unmatched_df = processor.conn.sql("select * from unmatched_events").df()
     sf_unmatched_df = processor.conn.sql("select * from sf_unmatched").df()
     
-    # Update known detectors dataframe for next iteration
-    known_detectors_df = processor.conn.sql("select * from known_detectors").df()
 
     # Write unmatched dataframes to disk as csv
     unmatched_df.to_csv('unmatched_df_temp.csv')
     sf_unmatched_df.to_csv('sf_unmatched_df_temp.csv')
-    known_detectors_df.to_csv('known_detectors_df_temp.csv')
 
     # Read unmatched dataframes back from disk
     unmatched_df = pd.read_csv('unmatched_df_temp.csv')
     sf_unmatched_df = pd.read_csv('sf_unmatched_df_temp.csv')
-    known_detectors_df = pd.read_csv('known_detectors_df_temp.csv')
 
   return results
 
@@ -1111,20 +1105,20 @@ def test_phase_wait_invalid_event_propagation():
 
 
 def test_empty_raw_data_with_carried_state():
-  """A run with no raw data still loads carried-over known_detectors state instead of failing on MIN(TimeStamp) = None"""
+  """A run with no raw data still loads the known detectors it carries instead of failing on MIN(TimeStamp) = None"""
   raw = duckdb.query("select * from 'tests/hires_test_data.parquet'").df()
   configs = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
-  with SignalDataProcessor(raw_data=raw, detector_config=configs, bin_size=15, verbose=0,
-                           aggregations=[{'name': 'actuations', 'params': {'fill_in_missing': True,
-                                          'known_detectors_df_or_path': None}}]) as processor:
+  aggregations = [{'name': 'actuations', 'params': {'fill_in_missing': True}}]
+  with SignalDataProcessor(raw_data=raw, detector_config=configs, bin_size=15, verbose=0, aggregations=aggregations,
+                           unmatched_event_settings={'df_or_path': None, 'max_days_old': 14}) as processor:
     processor.load()
     processor.aggregate()
-    known = processor.conn.query("SELECT * FROM known_detectors").df()
-  assert len(known) > 0
+    state = processor.conn.query("SELECT * FROM unmatched_events").df()
+  known = (state.EventId == 956).sum()
+  assert known > 0
 
-  with SignalDataProcessor(raw_data=raw.iloc[0:0], detector_config=configs, bin_size=15, verbose=0,
-                           aggregations=[{'name': 'actuations', 'params': {'fill_in_missing': True,
-                                          'known_detectors_df_or_path': known}}]) as processor:
+  with SignalDataProcessor(raw_data=raw.iloc[0:0], detector_config=configs, bin_size=15, verbose=0, aggregations=aggregations,
+                           unmatched_event_settings={'df_or_path': state, 'max_days_old': 14}) as processor:
     processor.load()
     processor.aggregate()
-    assert processor.conn.query("SELECT count(*) FROM known_detectors").fetchall()[0][0] == len(known)
+    assert processor.conn.query("SELECT count(*) FROM unmatched_events WHERE EventId = 956").fetchall()[0][0] == known

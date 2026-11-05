@@ -51,7 +51,7 @@ SETTINGS = {'raw_data', 'detector_config', 'bin_size', 'output_dir', 'output_to_
 STATE_SETTINGS = {'df_or_path', 'split_fail_df_or_path', 'max_days_old', 'first_run'}
 AGGREGATION_PARAMS = {
     'has_data': {'no_data_min', 'min_data_points'},
-    'actuations': {'fill_in_missing', 'known_detectors_df_or_path', 'known_detectors_max_days_old'},
+    'actuations': {'fill_in_missing', 'known_detectors_max_days_old'},
     'arrival_on_green': {'latency_offset_seconds', 'spillback_on_seconds', 'spillback_gap_seconds'},
     'platoon_ratio': set(),
     'yellow_red': {'latency_offset_seconds', 'min_red_offset'},
@@ -72,7 +72,7 @@ AGGREGATION_PARAMS = {
 STATE_TABLES = {**dict.fromkeys(range(931, 935), 'coordination_agg'), 935: 'timeline', 955: 'timeline',
                 **dict.fromkeys((937, 943, 944, 945, 946, 947), 'ped'),
                 **dict.fromkeys((938, 939, 940, 941, 948, 949, 950), 'arrival_on_green'),
-                **dict.fromkeys((951, 952, 953, 954), 'yellow_red'), 936: None, 942: None}
+                **dict.fromkeys((951, 952, 953, 954), 'yellow_red'), 956: 'actuations', 936: None, 942: None}
 
 
 def _check_names(settings):
@@ -319,8 +319,7 @@ class SignalDataProcessor:
         self.unmatched_event_settings = None # For incremental processing of timeline, split failure, arrival on green, and yellow red)
         self.unmatched_found = False
         self.sf_unmatched_found = False  # Separate flag for split_failures unmatched file
-        self.known_detectors_settings = None # Set from the actuations params, to track detectors with zero counts
-        self.known_detectors_found = False
+        self.known_detector_days = None # Set from the actuations params, how long a silent detector stays on the list
         self.incremental_run = False
         self.event_gap_schedule = None  # Set from the timeline params when timeline runs
         self.remove_incomplete = False
@@ -378,32 +377,10 @@ class SignalDataProcessor:
                 else:
                     self.unmatched_found = False
 
-        # Check for known_detectors parameters in actuations aggregation
-        # If found, extract them and create known_detectors_settings
+        # With fill_in_missing, state keeps each device's detectors, so one silent for a whole run still gets its zero rows
         for agg in self.aggregations:
-            if agg['name'] == 'actuations' and 'params' in agg:
-                params = agg['params']
-                if 'known_detectors_df_or_path' in params:
-                    if self.known_detectors_settings is None:
-                        self.known_detectors_settings = {}
-                    # Use get() and then remove via dict comprehension to avoid modifying original params
-                    self.known_detectors_settings['df_or_path'] = params.get('known_detectors_df_or_path')
-                    self.known_detectors_settings['max_days_old'] = params.get('known_detectors_max_days_old', 2)  # Default to 2 days
-                    # Remove these keys from params without modifying the original dict in-place
-                    # by creating a filtered copy that will be used later
-                    agg['params'] = {k: v for k, v in params.items() 
-                                     if k not in ('known_detectors_df_or_path', 'known_detectors_max_days_old')}
-                    
-                    # Set incremental_run and known_detectors_found flags
-                    if not self.incremental_run:
-                        self.incremental_run = True
-                    # Format the df_or_path for DuckDB
-                    value = self.known_detectors_settings['df_or_path']
-                    self.known_detectors_found = _state_given('known_detectors_df_or_path', value,
-                                                              (self.unmatched_event_settings or {}).get('first_run', False), self.verbose)
-                    if self.known_detectors_found and isinstance(value, str):
-                        self.known_detectors_settings['df_or_path'] = f"'{value}'"
-                    break
+            if agg['name'] == 'actuations' and agg['params'].get('fill_in_missing') and 'df_or_path' in (self.unmatched_event_settings or {}):
+                self.known_detector_days = agg['params'].get('known_detectors_max_days_old', 2)
 
         # Check the detector_health parameters now rather than after the other aggregations have run. A copy leaves
         # the caller's list and dicts untouched.
@@ -447,8 +424,7 @@ class SignalDataProcessor:
                     self.detector_config,
                     self.unmatched_event_settings,
                     self.unmatched_found or self.sf_unmatched_found,
-                    self.known_detectors_settings,
-                    self.known_detectors_found,
+                    self.known_detector_days,
                     self.drop_fall_back_hour)
             # delete self.raw_data and self.detector_config to free up memory
             self.data_loaded = True
@@ -677,6 +653,15 @@ class SignalDataProcessor:
             GROUP BY DeviceId;
         """)
 
+    def _save_known_detectors(self):
+        """Saves each detector's last on event (synthetic EventId 956), read by actuations. One silent in this run keeps its previous one."""
+        previous = "UNION ALL SELECT TimeStamp, DeviceId, Parameter FROM unmatched_previous WHERE EventId = 956" if self._table_exists('unmatched_previous') else ""
+        self._add_to_unmatched_events(f"""
+            SELECT MAX(TimeStamp) AS TimeStamp, DeviceId, 956::INT16 AS EventId, Parameter, TRUE AS IsValid
+            FROM (SELECT TimeStamp, DeviceId, Parameter FROM raw_data WHERE EventId = 82 {previous})
+            GROUP BY DeviceId, Parameter
+        """)
+
     def _table_exists(self, name):
         return self.conn.execute(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [name]
@@ -899,7 +884,7 @@ class SignalDataProcessor:
 
                 # Add known_detectors_found flag for actuations aggregation
                 if aggregation['name'] == 'actuations':
-                    params['known_detectors_found'] = self.known_detectors_found
+                    params['known_detectors_found'] = self.known_detector_days is not None and self._table_exists('unmatched_previous')
                 
                 # Add coord_state_found flag for coordination_agg aggregation (uses unmatched events)
                 if aggregation['name'] == 'coordination_agg':
@@ -983,6 +968,8 @@ class SignalDataProcessor:
             self._save_complete_bins()
         if self.incremental_run and not self.to_sql:
             self._save_last_events()
+        if self.known_detector_days is not None and not self.to_sql:
+            self._save_known_detectors()
 
         # Print out runtimes
         v_print(f"\n\nTotal aggregation runtime: {sum(self.runtimes.values()):.2f} seconds.", self.verbose)
@@ -990,58 +977,6 @@ class SignalDataProcessor:
         for name, runtime in self.runtimes.items():
             v_print(f"{name}: {runtime:.2f} seconds", self.verbose)
 
-        # After all aggregations are finished, create and update the known_detectors table
-        # This combines detectors from the current batch with previous known detectors
-        if self.known_detectors_settings is not None and any(agg['name'] == 'actuations' for agg in self.aggregations):
-            v_print("Creating/updating known_detectors table", self.verbose, 2)
-            
-            # Create a query to extract all detectors from raw_data and update LastSeen timestamp
-            current_detectors_query = """
-            CREATE OR REPLACE TABLE current_detectors AS
-            SELECT DISTINCT
-                DeviceId,
-                Parameter as Detector,
-                MAX(TimeStamp) as LastSeen
-            FROM raw_data
-            WHERE EventID = 82
-            GROUP BY DeviceId, Detector;
-            """
-            self.conn.query(current_detectors_query)
-            
-            # Create or update the known_detectors table
-            if self.known_detectors_found:
-                # Merge current detectors with previously known detectors
-                merge_query = """
-                CREATE OR REPLACE TABLE known_detectors AS
-                SELECT 
-                    u.DeviceId,
-                    u.Detector,
-                    GREATEST(
-                        COALESCE(MAX(kd.LastSeen), TIMESTAMP '1970-01-01 00:00:00'),
-                        COALESCE(MAX(cd.LastSeen), TIMESTAMP '1970-01-01 00:00:00')
-                    ) as LastSeen
-                FROM 
-                    (SELECT DISTINCT DeviceId, Detector FROM known_detectors_previous 
-                     UNION 
-                     SELECT DISTINCT DeviceId, Detector FROM current_detectors) u
-                LEFT JOIN known_detectors_previous kd ON u.DeviceId = kd.DeviceId AND u.Detector = kd.Detector
-                LEFT JOIN current_detectors cd ON u.DeviceId = cd.DeviceId AND u.Detector = cd.Detector
-                GROUP BY u.DeviceId, u.Detector;
-                """
-            else:
-                # Just use current detectors if no history is available
-                merge_query = """
-                CREATE OR REPLACE TABLE known_detectors AS
-                SELECT 
-                    DeviceId,
-                    Detector,
-                    LastSeen
-                FROM current_detectors;
-                """
-            
-            self.conn.query(merge_query)
-            v_print("Known detectors table updated", self.verbose, 2)
-    
     def save(self):
         """Saves the processed data."""
         if self.to_sql:

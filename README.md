@@ -118,8 +118,7 @@ params = {
             'name': 'actuations', 
             'params': {
                 'fill_in_missing': True,    # Zero-fill silent detectors in bins where the device has data
-                'known_detectors_df_or_path': 'known_detectors.csv', # For zero-filling
-                'known_detectors_max_days_old': 2
+                'known_detectors_max_days_old': 2  # With a main unmatched file, how long a silent detector keeps its zero rows
             }
         },
         {
@@ -605,11 +604,6 @@ GROUP BY DeviceId, Phase
 ### Supporting State Tables
 (Used primarily for incremental processing)
 
-#### known_detectors
-*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
-*   `Detector` (INTEGER): Detector number.
-*   `LastSeen` (DATETIME): Timestamp when detector was last seen.
-
 #### sf_unmatched
 (Split Failures Unmatched)
 The events a later run works out `split_failures` from: each detector's last event, and the events of a phase's unfinished cycle from its green on, with `Detector` 0 on the phase events.
@@ -625,7 +619,7 @@ The events a later run works out `split_failures` from: each detector's last eve
 *   `EventId` (INT16): Event ID.
 *   `Parameter` (INT16): Parameter value.
 
-Rows with `EventId` 931 to 955 are state carried between runs, not controller events. Each number has one meaning. A run must list every table the file holds rows of, or it raises. It raises as well on input that does not start after the last event held for its device, and, with `actuations`, `terminations`, `splits`, `coordination_agg`, `phase_wait` or `ped_delay` listed, on a run cut inside a bin, as they would write that bin twice:
+Rows with `EventId` 931 to 956 are state carried between runs, not controller events. Each number has one meaning. A run must list every table the file holds rows of, or it raises. It raises as well on input that does not start after the last event held for its device, and, with `actuations`, `terminations`, `splits`, `coordination_agg`, `phase_wait` or `ped_delay` listed, on a run cut inside a bin, as they would write that bin twice:
 
 | `EventId` | Written by | Holds | `Parameter` |
 | --- | --- | --- | --- |
@@ -645,6 +639,7 @@ Rows with `EventId` 931 to 955 are state carried between runs, not controller ev
 | 951, 952, 953 | `yellow_red` | Green, yellow and red clearance begins of a cycle not finished writing | Phase |
 | 954 | `yellow_red` | An actuation of a cycle not finished writing, already moved back by the latency | Phase |
 | 955 | `timeline` | The last phase call event of each device | 0 |
+| 956 | `actuations` with `fill_in_missing` | Each detector's last on event, for the zero rows of one silent for a whole run | Detector |
 
 ## Release Notes
 

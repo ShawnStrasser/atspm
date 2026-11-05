@@ -15,21 +15,19 @@ def _events_df(events):
     return df
 
 
-def _run(raw, known_detectors=None):
-    params = {"fill_in_missing": True}
-    if known_detectors is not None:
-        params["known_detectors_df_or_path"] = known_detectors
+def _run(raw, state=None):
     processor = SignalDataProcessor(
         raw_data=raw,
         bin_size=15,
         verbose=0,
-        aggregations=[{"name": "actuations", "params": params}],
+        unmatched_event_settings=None if state is None else {"df_or_path": state, "max_days_old": 14},
+        aggregations=[{"name": "actuations", "params": {"fill_in_missing": True}}],
     )
     processor.load()
     processor.aggregate()
     acts = processor.conn.sql("SELECT * FROM actuations").df()
-    known = processor.conn.sql("SELECT * FROM known_detectors").df() if known_detectors is not None else None
-    return acts, known
+    state_out = processor.conn.sql("SELECT * FROM unmatched_events").df() if state is not None else None
+    return acts, state_out
 
 
 def _bin(i):
@@ -63,7 +61,7 @@ def test_known_detector_zero_filled_only_while_device_reports():
         (BASE + timedelta(seconds=30), 1, 82, 1),
         (BASE + timedelta(seconds=40), 1, 82, 2),
     ])
-    _, known = _run(run1, known_detectors="")
+    _, state = _run(run1, state="")
 
     # Run 2: device 1 reports in bins 4-5 through detector 1 and a non-detector event,
     # detector 2 (known only from run 1) is silent; nothing at all in bin 6
@@ -71,7 +69,7 @@ def test_known_detector_zero_filled_only_while_device_reports():
         (BASE + timedelta(minutes=60, seconds=30), 1, 82, 1),
         (BASE + timedelta(minutes=75, seconds=30), 1, 1, 2),
     ])
-    acts, _ = _run(run2, known_detectors=known)
+    acts, _ = _run(run2, state=state)
 
     det2 = acts[acts.Detector == 2].sort_values("TimeStamp")
     assert list(det2.TimeStamp) == [_bin(4), _bin(5)]

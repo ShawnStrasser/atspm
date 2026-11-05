@@ -55,7 +55,7 @@ def test_known_detectors_max_days_old_applies_to_true_last_seen():
         ),
     ]
 
-    known_detectors_df_or_path = ""
+    state = ""
     outputs = []
 
     for chunk in chunks:
@@ -64,12 +64,12 @@ def test_known_detectors_max_days_old_applies_to_true_last_seen():
             "detector_config": detector_config,
             "bin_size": 60,
             "verbose": 0,
+            "unmatched_event_settings": {"df_or_path": state, "max_days_old": 1},
             "aggregations": [
                 {
                     "name": "actuations",
                     "params": {
                         "fill_in_missing": True,
-                        "known_detectors_df_or_path": known_detectors_df_or_path,
                         "known_detectors_max_days_old": 2,
                     },
                 }
@@ -79,7 +79,7 @@ def test_known_detectors_max_days_old_applies_to_true_last_seen():
         processor.load()
         processor.aggregate()
         outputs.append(processor.conn.sql("SELECT * FROM actuations").df())
-        known_detectors_df_or_path = processor.conn.sql("SELECT * FROM known_detectors").df()
+        state = processor.conn.sql("SELECT * FROM unmatched_events").df()
         processor.close()
 
     day_1_output = outputs[1]
@@ -99,3 +99,20 @@ def test_known_detectors_max_days_old_applies_to_true_last_seen():
         "when known_detectors_max_days_old=2."
     )
     assert int(day_2_flatline.iloc[0]["Total"]) == 0
+
+
+def test_a_detector_leaves_the_list_after_known_detectors_max_days_old():
+    base = datetime(2024, 1, 1, 0, 0, 0)
+    state, outputs = "", []
+    for day, detectors in ((0, (10, 20)), (5, (20,))):
+        processor = SignalDataProcessor(
+            raw_data=_events_df([(base + timedelta(days=day), 1, 82, d) for d in detectors]), bin_size=60, verbose=0,
+            unmatched_event_settings={"df_or_path": state, "max_days_old": 14},
+            aggregations=[{"name": "actuations", "params": {"fill_in_missing": True, "known_detectors_max_days_old": 2}}])
+        processor.load()
+        processor.aggregate()
+        outputs.append(processor.conn.sql("SELECT * FROM actuations").df())
+        state = processor.conn.sql("SELECT * FROM unmatched_events").df()
+        processor.close()
+    assert outputs[1].Detector.tolist() == [20]
+    assert state[state.EventId == 956].Parameter.tolist() == [20]

@@ -43,7 +43,6 @@ params = {
         {'name': 'has_data', 'params': {'no_data_min': 5, 'min_data_points': 3}}, # remove bins with less than 10 rows every 3 minutes
         {'name': 'actuations', 'params': {
             'fill_in_missing': True,
-            'known_detectors_df_or_path': known_detectors_data,
             'known_detectors_max_days_old': 2
         }},
         {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},  # DistanceFromStopBar, MPH and LatencyCorrection from detector_config if it has them, see the README

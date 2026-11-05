@@ -29,7 +29,7 @@ device_detectors AS (
     FROM (
         SELECT DeviceId, Detector FROM base_counts
         UNION 
-        SELECT DeviceId, Detector FROM known_detectors_previous
+        SELECT DeviceId, Parameter FROM unmatched_previous WHERE EventId = 956
     )
     {% else %}
     -- Just use current detectors if no history is available

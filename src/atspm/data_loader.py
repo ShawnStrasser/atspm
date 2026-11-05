@@ -142,8 +142,7 @@ def load_data(conn,
               detector_config=None,
               unmatched_events=None,
               use_unmatched=False,
-              known_detectors=None,
-              use_known_detectors=False,
+              known_detector_days=None,
               drop_fall_back_hour=True):
 
     # Reference point for the max_days_old filters below. A run whose raw data is empty has no
@@ -247,8 +246,13 @@ def load_data(conn,
                 where_clause = f" WHERE {timestamp_filter} > TIMESTAMP '{min_timestamp}' - INTERVAL '{max_days_old} days'"
 
                 if key == 'df_or_path':
-                    # An alarm or flash state holds until the device's next one, and that can be any time later
-                    where_clause += f" OR {_build_column_expression(column_map, 'EventId', use_alias=False)} IN (173, 174, 175)"
+                    # An alarm or flash state holds until the device's next one, and that can be any time later.
+                    # A detector stays on the known list for as long as actuations was told.
+                    event_id = _build_column_expression(column_map, 'EventId', use_alias=False)
+                    known_days = max_days_old if known_detector_days is None else known_detector_days
+                    where_clause = (f" WHERE CASE WHEN {event_id} IN (173, 174, 175) THEN TRUE"
+                                    f" WHEN {event_id} = 956 THEN {timestamp_filter} > TIMESTAMP '{min_timestamp}' - INTERVAL '{known_days} days'"
+                                    f" ELSE {timestamp_filter} > TIMESTAMP '{min_timestamp}' - INTERVAL '{max_days_old} days' END")
                     parameter_select = _build_column_expression(column_map, 'Parameter')
                     # Check if IsValid column exists (for incremental processing with has_data validity tracking)
                     has_isvalid = 'isvalid' in [c.lower() for c in source_columns]
@@ -265,7 +269,7 @@ def load_data(conn,
                     SELECT TimeStamp, DeviceId, EventId, Parameter FROM raw_data
                     UNION ALL
                     SELECT TimeStamp, DeviceId, EventId, Parameter FROM unmatched_previous
-                    WHERE EventId NOT BETWEEN 938 AND 954; -- only arrival_on_green, platoon_ratio, ped and yellow_red read these
+                    WHERE EventId NOT BETWEEN 938 AND 954 AND EventId <> 956; -- only arrival_on_green, platoon_ratio, ped, yellow_red and actuations read these
                     """
                 elif key == 'split_fail_df_or_path':
                     load_sql = f"""
@@ -283,41 +287,5 @@ def load_data(conn,
         print("*"*50)
         print("Error when loading unmatched_events! Here are some tips:")
         print("Loading from a CSV file may cause errors if the timestamp is not in the correct format. Try saving data in Parquet instead.")
-        print("*"*50)
-        raise e
-    
-    # Load known_detectors (if provided)
-    try:
-        if use_known_detectors:
-            max_days_old = known_detectors.get('max_days_old', 2)  # Default to 2 days if not specified
-            
-            known_detectors_reference = known_detectors.get('df_or_path')
-            
-            if isinstance(known_detectors_reference, str):
-                reference = known_detectors_reference
-            else:
-                # Create a pointer for DuckDB
-                reference = 'known_detectors_df'
-                known_detectors_df = known_detectors_reference
-            
-            # Create WHERE clause to filter out old records
-            where_clause = f" WHERE LastSeen::DATETIME > TIMESTAMP '{min_timestamp}' - INTERVAL '{max_days_old} days'"
-            
-            # Load the known_detectors_previous table
-            load_sql = f"""
-            CREATE TABLE known_detectors_previous AS
-            SELECT DeviceId as DeviceId, Detector as Detector, LastSeen::DATETIME as LastSeen
-            FROM {reference} {where_clause};
-            """
-            
-            v_print(f"Loading known detectors from: \n{reference}\n", verbose, 2)
-            v_print(f'Executing SQL to load known detectors: \n{load_sql}', verbose, 2)
-            conn.query(load_sql)
-            
-    except Exception as e:
-        print("*"*50)
-        print("Error when loading known_detectors! Here are some tips:")
-        print("Loading from a CSV file may cause errors if the timestamp is not in the correct format. Try saving data in Parquet instead.")
-        print("Make sure known_detectors table has DeviceId, Detector, and LastSeen columns.")
         print("*"*50)
         raise e

@@ -327,16 +327,15 @@ def test_known_detectors_alone_adds_no_unmatched_events():
 
 
 def test_known_detectors_with_timeline_still_carries():
-    """How ODOT's first window runs: no unmatched settings yet, but the next run reads unmatched_events."""
+    """A first window with None for the path, and the next run reads unmatched_events."""
     aggs = [
         aggregation(),
         {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}},
         {'name': 'timeline', 'params': {'min_duration': 0, 'cushion_time': 0}},
-        {'name': 'actuations', 'params': {'known_detectors_df_or_path': None}},
+        {'name': 'actuations', 'params': {'fill_in_missing': True}},
     ]
-    out1 = process(presses(895), aggs)
+    out1 = process(presses(895), aggs, settings={'df_or_path': None, 'max_days_old': 2})
     assert len(carried(out1['unmatched_events'])) == 1
-    aggs[3] = {'name': 'actuations', 'params': {'known_detectors_df_or_path': out1['known_detectors']}}
     out2 = process(presses(905), aggs, carry=out1['unmatched_events'])
     assert unique_total([out2['ped']]) == 0
 
