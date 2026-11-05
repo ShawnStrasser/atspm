@@ -99,14 +99,23 @@ The following tables will be produced (see the [README Output Schemas section](.
 
 ```python
 {'name': 'detector_health', 'params': {
-    'store': health_store_path,    # a DuckDB file kept between runs, on local disk
     'detectors': detectors_data,   # atspm-detector predict() answers; leave out to use detector_config
-    'horizon_days': 3,             # how far back a verdict looks, and how much the store keeps
-    'judge': 'daily',
+    'state': health_state,         # the last run's health_state; '' on the first run
+    'history': health_rows_folder, # the folder of saved health_rows
+    'horizon_days': 3,
+    'workers': 4,                  # the midnight run: about 280 s and 6.5 GB in all; with 1, 530 to 670 s and 2.9 GB
 }},
 ```
 
-The output table `detector_health`, in `bin_size` bins, is written only by a run that reaches a verdict, as is `detector_health_findings` with `'findings': True`. Its checks read none of the events filtered out above. See the [README](../README.md#detector-health).
+Every run writes `detector_health` for its own 15-minute bin. The first run past midnight also writes what the whole-day check finds in the previous day, with past `TimeStamp`s. Nothing needs scheduling: midnight is read from the event stamps. First runs write no rows until the first whole-day check. Its checks read none of the events filtered out above. See the [README](../README.md#detector-health).
+
+`detector_health` has the columns `TimeStamp`, `DeviceId`, `DetectorType`, `Detector` (BIGINT), `Label`, `Score`. After each run, from `processor.conn`, in this order:
+
+1. Save `detector_health`. De-duplicate it on `TimeStamp`, `DeviceId`, `DetectorType`, `Detector` and `Label`, as a retried run writes the same rows.
+2. Append `health_rows` as one new parquet file in `health_rows_folder`. It is only appended and read through the path, never loaded back as a table.
+3. Save `health_state` last. It is loaded back every run, as a DataFrame or a parquet or CSV path. With plain `pd.read_csv`, use `dtype={'DeviceId': str}` for ids of digits.
+
+If a run fails, retry it from the last saved state. A run the state lists whose rows are missing from the folder raises an error. Cut events on the quarter hour by stamp, or expect a larger state: 299 MB of CSV statewide, against 16 MB.
 
 ## Key Configuration Notes
 
