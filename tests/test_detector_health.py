@@ -103,9 +103,9 @@ def test_a2_fifteen_minute_runs_equal_one_run(tmp_path):
     _same(chunked[table], one[table])
 
 
-# ---- the optional tables
+# ---- the findings table
 
-def test_an_empty_one_shot_has_the_optional_tables_too():
+def test_an_empty_one_shot_has_the_findings_table_too():
   out = _run(RAW.head(0), _params(findings=True))
   assert set(out) == {'detector_health', 'detector_health_findings'}
   assert all(len(frame) == 0 and frame.columns[0] == 'TimeStamp' for frame in out.values())

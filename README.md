@@ -209,7 +209,7 @@ The data produced by `atspm` can be visualized using Power BI, Plotly, or other 
 
 ## Performance Measures
 
-`atspm` produces two types of outputs:
+`atspm` writes the tables named in the `aggregations` list you give it, and no others: each table below is written when listed in `aggregations`. Everything a run does comes from that list and its params, so nothing is kept between runs but the carry files and health store you choose to pass. There are two types of output:
 
 - Binned aggregate tables, where each row represents a `bin_size`-minute interval
 - A non-binned `timeline` table with start/end times for key events
@@ -506,7 +506,7 @@ One row per bin per problem; no row means no problem found. Each bin is written 
 *   `Score` (DOUBLE): How much of the bin the detector was failing: about 1 for a complete failure over the whole bin, 0.5 for half a bin of it. Problems at the same moment share that moment's worst value, so the rows of a bin add up to at most 1. Empty on `not_enough_data`.
 
 #### detector_health_findings
-Only with `'findings': True`, for looking into a detector. The findings of the run's last verdict: one row per finding, with notes and borderline findings too.
+Written by `detector_health` when its `findings` param is True (default False), for looking into a detector. The findings of the run's last verdict: one row per finding, with notes and borderline findings too.
 *   `TimeStamp` (DATETIME): Time of the verdict.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `DetectorType` (TEXT): `Vehicle` or `Ped`.

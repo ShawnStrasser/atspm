@@ -198,6 +198,7 @@ class SignalDataProcessor:
         Controls the verbosity of output. 0: only errors, 1: performance, 2: debug statements.
     aggregations : list of dict
         A list of dictionaries, each containing the name of an aggregation function and its parameters.
+        A table is written when listed here, and no others.
         Supported aggregations include: 'has_data', 'actuations', 'arrival_on_green',
         'coordination', 'coordination_agg', 'ped', 'split_failures', 'splits', 'terminations',
         'yellow_red', 'timeline', 'ped_delay', 'phase_wait', and potentially others.

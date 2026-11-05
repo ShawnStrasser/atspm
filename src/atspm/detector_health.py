@@ -225,7 +225,7 @@ def _update_to(H, conn, params, upto, after):
 
 def run_detector_health(conn, params, verbose=1, bin_size=15):
     """Add this run's raw_data to the store and write detector_health, the bins released by the verdicts this run reaches, and
-    detector_health_findings if asked for. A run that reaches no verdict writes neither."""
+    detector_health_findings when its findings param is True. A run that reaches no verdict writes neither."""
     H = _load_package()
     if not _has_table(conn, 'raw_data'):
         raise ValueError("detector_health reads raw_data: give raw_data and call load() first")

@@ -1,4 +1,4 @@
-"""detector_health as bins: one run equals many at any cuts, each bin once, past rows never change, a stuck ON outlives the window, the optional findings table."""
+"""detector_health as bins: one run equals many at any cuts, each bin once, past rows never change, a stuck ON outlives the window, the findings table."""
 import os
 
 import duckdb
