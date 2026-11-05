@@ -1,4 +1,4 @@
--- Included by unique_ped.sql, full_ped.sql and ped_carry.sql. A list of CTEs, not a query.
+-- Included by ped.sql and ped_carry.sql. A list of CTEs, not a query.
 -- What the ped counts know when a run ends: this run's events, and what earlier runs carried in unmatched_events.
 --
 -- Each bin is written once, whole, by the run that reaches its end (see results_end.sql). The carry is:
@@ -16,7 +16,7 @@ unique_counts AS (
     SELECT TimeStamp, DeviceId, Phase, SUM(Unique_Actuations)::BIGINT AS Unique_Actuations
     FROM (
         SELECT * FROM (
-            {% include 'unique_ped_counts.sql' %}
+            {% include 'ped_unique_counts.sql' %}
         )
         {% if ped_carried %}
         UNION ALL

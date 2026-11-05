@@ -156,7 +156,7 @@ params = {
             }
         },
         {
-            'name': 'full_ped', 
+            'name': 'ped', 
             'params': {
                 'seconds_between_actuations': 15, # Min time between unique peds (default shown)
                 'return_volumes': True            # Estimate pedestrian volumes
@@ -228,7 +228,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Splits** (`splits`): MAXTIME-specific split events (cycle length/split services) aggregated by interval.
 - **Coordination** (`coordination`): Raw events for Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME). Includes both `Raw_TimeStamp` and binned `TimeStamp`.
 - **Coordination Aggregate** (`coordination_agg`): Binned coordination state per interval. Provides the active Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME) for every bin using fill-forward logic.
-- **Pedestrian Services** (`full_ped`): Pedestrian services, actuations, and (optionally) estimated pedestrian volumes derived from push-button actuations. A press is a unique actuation if it comes more than `seconds_between_actuations` (default 15) after the previous press on that input, or if no earlier press is known. See [Pedestrian counts and volumes](#pedestrian-counts-and-volumes).
+- **Pedestrian** (`ped`): Pedestrian services, push-button presses, unique presses and estimated pedestrian volumes, all in one row per phase and interval. `return_volumes=False` (default True) leaves out `Estimated_Volumes` and the rows of quiet bins. A press is a unique actuation if it comes more than `seconds_between_actuations` (default 15) after the previous press on that input, or if no earlier press is known. See [Pedestrian counts and volumes](#pedestrian-counts-and-volumes).
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
 - **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
 - **Detector Health** (`detector_health`): How much of each `bin_size` interval each vehicle detector and ped button was failing, and with what problem, from `atspm-detector`. Needs `pip install atspm[detector-health]`. See [Detector health](#detector-health).
@@ -265,7 +265,7 @@ Two limits: a run that really stops inside the last second of a bin is taken as 
 
 ### Pedestrian counts and volumes
 
-`Estimated_Volumes` in `full_ped` is the published estimate, with its rolling hour taken over a bin and the 3 bins before it:
+`Estimated_Volumes` in `ped` is the published estimate, with its rolling hour taken over a bin and the 3 bins before it:
 
 ```
 hour = unique actuations in this bin and the 3 before it
@@ -282,11 +282,11 @@ Looking back is what lets a bin be final the moment it is written. It used to lo
 | Shape of the day | The same volumes sit a few minutes later: the middle of an input's day moves by a median of 3.7 minutes, and network hours read up to 8.5% lower on the morning rise and up to 7.7% higher on the evening fall |
 | Each bin | 95% of bins with peds move by 1 ped or less. The largest moves, up to 40, are on the busiest bins, where a burst reads higher at its end and lower at its start |
 
-**Incremental runs** give the same rows as one big run wherever the runs are cut, for `unique_ped` and `full_ped`, with or without `timeline`, when `unmatched_event_settings` has `df_or_path`. A bin is written once, whole, by the first run that reaches the end of it, the same rule as [Arrival on Green](#arrival-on-green), so nothing is held back from a run that reaches the end of its last bin and no past row ever changes. Each input's last press (synthetic `EventId` 937), the unique actuations of the last 3 bins written and of any bin not written yet (943), each input's next bin to write (944) and last activity (945), and the presses and ped services of any bin not written yet (946, 947) are kept in `unmatched_events`. A run with no unmatched settings has nothing after it, so it writes all it has.
+**Incremental runs** give the same rows as one big run wherever the runs are cut, for `ped`, with or without `timeline`, when `unmatched_event_settings` has `df_or_path`. A bin is written once, whole, by the first run that reaches the end of it, the same rule as [Arrival on Green](#arrival-on-green), so nothing is held back from a run that reaches the end of its last bin and no past row ever changes. Each input's last press (synthetic `EventId` 937), the unique actuations of the last 3 bins written and of any bin not written yet (943), each input's next bin to write (944) and last activity (945), and the presses and ped services of any bin not written yet (946, 947) are kept in `unmatched_events`. A run with no unmatched settings has nothing after it, so it writes all it has.
 
 With volumes on, an input has a row in every bin from its first activity (a press or a ped service) on, quiet bins included, with an estimate of just the intercept. That goes on through runs where it does nothing, until `max_days_old` passes with no activity, and it starts again at its next activity. One big run has no such limit, so it also has the intercept rows of an input quiet for longer than `max_days_old`, and that is the one difference between it and incremental runs. A device that stops logging keeps its intercept rows the same way. Join `has_data` or set `remove_incomplete` to leave them out. `return_volumes=False` leaves out all rows that count nothing.
 
-Three limits: a run that really stops inside the last second of a bin is taken as having reached the end of it, a press in a bin already written is too late to count, and if `unique_ped` and `full_ped` run together they should use the same `seconds_between_actuations`, since they share one carry. Volumes assume a `bin_size` of 15. The first run from an older unmatched file has no earlier bins to read, so its first 3 bins read a little low, once.
+Two limits: a run that really stops inside the last second of a bin is taken as having reached the end of it, and a press in a bin already written is too late to count. Volumes assume a `bin_size` of 15. The first run from an older unmatched file has no earlier bins to read, so its first 3 bins read a little low, once.
 
 ### The fall clock change
 
@@ -523,15 +523,6 @@ Only with `'findings': True`, for looking into a detector. The findings of the r
 *   `Confidence` (DOUBLE): 0 to 1, the check's own severity: 0.5 at its suspect limit, 0.8 at its bad limit.
 *   `Detail` (TEXT): The evidence.
 
-#### full_ped
-*   `TimeStamp` (DATETIME): Bin start time.
-*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
-*   `Phase` (INT16): Phase number.
-*   `PedServices` (INT16): Count of ped services.
-*   `PedActuation` (INT16): Count of ped actuations.
-*   `Unique_Actuations` (INT16): Count of unique ped actuations: presses more than `seconds_between_actuations` (default 15) after the previous press on that input.
-*   `Estimated_Volumes` (FLOAT): Estimated pedestrian volume from this bin and the 3 before it (only present if `return_volumes=True`, the default). See [Pedestrian counts and volumes](#pedestrian-counts-and-volumes).
-
 #### has_data
 *   `TimeStamp` (DATETIME): Bin start time where data exists.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
@@ -539,9 +530,11 @@ Only with `'findings': True`, for looking into a detector. The findings of the r
 #### ped
 *   `TimeStamp` (DATETIME): Bin start time.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
-*   `Phase` (INT16): Phase number.
-*   `PedServices` (INT16): Count of ped services.
-*   `PedActuation` (INT16): Count of ped actuations.
+*   `Phase` (INT16): `Parameter` of the event: the phase of a service, the ped input of a press. The two are read as one number.
+*   `PedServices` (INT16): Ped services: walks begun (`EventId` 21) and ped overlap walks begun (67).
+*   `PedActuation` (INT16): Button presses (`EventId` 90), repeat presses included.
+*   `Unique_Actuations` (INT16): Unique presses: those more than `seconds_between_actuations` (default 15) after the previous press on that input, or with no earlier press known.
+*   `Estimated_Volumes` (FLOAT): Estimated pedestrians from this bin and the 3 before it. Left out by `return_volumes=False` (default True). See [Pedestrian counts and volumes](#pedestrian-counts-and-volumes).
 
 #### ped_delay
 *   `TimeStamp` (DATETIME): Bin start time (rounded from EndTime of walk).
@@ -590,12 +583,6 @@ Only with `'findings': True`, for looking into a detector. The findings of the r
 *   `EventClass` (TEXT): Description of the event class.
 *   `EventValue` (INTEGER): Parameter value (Phase, Detector, etc.).
 
-#### unique_ped
-*   `TimeStamp` (DATETIME): Bin start time.
-*   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
-*   `Phase` (INT16): Phase number.
-*   `Unique_Actuations` (INT16): Count of unique actuations: presses more than `seconds_between_actuations` (default 15) after the previous press on that input.
-
 #### yellow_red
 *   `TimeStamp` (DATETIME): Bin start time.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
@@ -633,13 +620,13 @@ Rows with `EventId` 931 to 954 are state carried between runs, not controller ev
 | --- | --- | --- | --- |
 | 931 to 934 | `coordination_agg` | Pattern, cycle length, actual cycle length, actual offset | The value |
 | 935, 936 | `timeline` | The last bin with data and the last event of each device | 0 |
-| 937 | `unique_ped`, `full_ped` | Each input's last press, one row per input | Input |
+| 937 | `ped` | Each input's last press, one row per input | Input |
 | 938 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped, at its projected time | Phase |
 | 939, 940, 941 | `arrival_on_green`, `platoon_ratio` | Green, yellow and red clearance begins not written yet. 939 also marks a phase green when results stopped | Phase |
-| 942 | `arrival_on_green`, `platoon_ratio`, `unique_ped`, `full_ped` or `yellow_red` with `remove_incomplete` | A bin not written yet that passed `has_data` | 0 |
-| 943 | `unique_ped`, `full_ped` | One unique actuation, stamped with its bin, in a bin not written yet or the last 3 written | Input |
-| 944, 945 | `unique_ped`, `full_ped` | Each input's next bin to write, and its last activity | Input |
-| 946, 947 | `unique_ped`, `full_ped` | One press, or one ped service, stamped with its bin, in a bin not written yet | Input |
+| 942 | `arrival_on_green`, `platoon_ratio`, `ped` or `yellow_red` with `remove_incomplete` | A bin not written yet that passed `has_data` | 0 |
+| 943 | `ped` | One unique actuation, stamped with its bin, in a bin not written yet or the last 3 written | Input |
+| 944, 945 | `ped` | Each input's next bin to write, and its last activity | Input |
+| 946, 947 | `ped` | One press, or one ped service, stamped with its bin, in a bin not written yet | Input |
 | 948 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped that began while its detector held the spillback flag | Phase |
 | 949 | `arrival_on_green`, `platoon_ratio` | A detector holding the spillback flag, stamped when it last turned off, or when it turned on if it is on | Detector |
 | 950 | `arrival_on_green`, `platoon_ratio` | A detector on at the end of the data, stamped when it turned on | Detector |

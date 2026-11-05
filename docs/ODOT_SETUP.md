@@ -85,7 +85,7 @@ The following tables will be produced (see the [README Output Schemas section](.
 | arrival_on_green   | Arrival on green metrics           |
 | communications     | Communication event summary        |
 | coordination       | MAXTIME coordination data          |
-| ped                | Pedestrian actuation summary       |
+| ped                | Pedestrian counts and volumes      |
 | split_failures     | Split failure detection            |
 | splits             | MAXTIME split timing data          |
 | terminations       | Phase termination reasons          |

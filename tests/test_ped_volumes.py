@@ -1,13 +1,13 @@
-"""Estimated_Volumes in full_ped: a bin's estimate reads that bin and the 3 before it, which earlier runs carry, so it is
+"""Estimated_Volumes in ped: a bin's estimate reads that bin and the 3 before it, which earlier runs carry, so it is
 final when written. The rows must be the same however the data was cut into runs, including one big run."""
 import numpy as np
 import pandas as pd
 import pytest
 import duckdb
 from src.atspm import SignalDataProcessor
-from tests.test_unique_ped_carry import incremental, process, reach_bin_end, REAL_EVENTS
+from tests.test_ped_carry import incremental, process, reach_bin_end, REAL_EVENTS
 
-VOLUMES = [{'name': 'full_ped', 'params': {}}]
+VOLUMES = [{'name': 'ped', 'params': {}}]
 KEYS = ['TimeStamp', 'DeviceId', 'Phase']
 INTERCEPT = 1.1063 / 4
 
@@ -40,7 +40,7 @@ def written(frames):
     return frame.sort_values(KEYS).reset_index(drop=True)
 
 
-def assert_same_as_batch(events, cuts, aggregations=VOLUMES, name='full_ped', **kwargs):
+def assert_same_as_batch(events, cuts, aggregations=VOLUMES, name='ped', **kwargs):
     outputs, carry = incremental(events, cuts, aggregations, **kwargs)
     actual = written([o[name] for o in outputs])
     expected = written([process(reach_bin_end(events), aggregations, carry='first', **kwargs)[name]])
@@ -114,8 +114,8 @@ def test_real_data_with_every_run_saved_to_a_file(real_events, tmp_path):
             output_file_prefix=f'{i}_', aggregations=VOLUMES,
             unmatched_event_settings={'df_or_path': str(tmp_path / 'carry.parquet'), 'max_days_old': 14},
         ).run()
-        frames.append(pd.read_parquet(tmp_path / f'{i}_full_ped.parquet'))
-    batch = process(events, VOLUMES, carry='first')['full_ped']
+        frames.append(pd.read_parquet(tmp_path / f'{i}_ped.parquet'))
+    batch = process(events, VOLUMES, carry='first')['ped']
     pd.testing.assert_frame_equal(written(frames), written([batch]))
 
 
@@ -133,12 +133,12 @@ class TestWriting:
     ])
     def test_last_written_bin(self, end, last_written):
         events = pd.concat([events_at(at(0, 5)), end_marker(end)])
-        out = process(events, VOLUMES, carry='first')['full_ped']
+        out = process(events, VOLUMES, carry='first')['ped']
         assert out.TimeStamp.max() == last_written
 
     def test_a_run_with_no_file_writes_all_it_has(self):
         events = pd.concat([events_at(at(0, 5)), end_marker(at(2, 50))])
-        assert process(events, VOLUMES)['full_ped'].TimeStamp.max() == at(2, 45)
+        assert process(events, VOLUMES)['ped'].TimeStamp.max() == at(2, 45)
 
     def test_values_use_the_bin_and_the_3_before_it(self):
         events = pd.concat([
@@ -149,7 +149,7 @@ class TestWriting:
             events_at(at(2, 1)),            # 1 in bin 2:00
             end_marker(at(2, 14, 59.9)),
         ])
-        out = process(events, VOLUMES)['full_ped'].sort_values('TimeStamp').reset_index(drop=True)
+        out = process(events, VOLUMES)['ped'].sort_values('TimeStamp').reset_index(drop=True)
         assert out.TimeStamp.tolist() == [at(1, 0), at(1, 15), at(1, 30), at(1, 45), at(2, 0)]
         np.testing.assert_allclose(
             out.Estimated_Volumes,
@@ -167,7 +167,7 @@ class TestWriting:
             before = pd.concat([before, end_marker(cut - pd.Timedelta(milliseconds=100))])
         first = process(before, VOLUMES, carry='first')
         second = process(after, VOLUMES, carry=first['unmatched_events'])
-        out = written([first['full_ped'], second['full_ped']])
+        out = written([first['ped'], second['ped']])
         np.testing.assert_allclose(
             out.Estimated_Volumes,
             [volume(2, 2), volume(1, 3), volume(3, 6), volume(1, 7), volume(1, 6)],
@@ -177,15 +177,15 @@ class TestWriting:
     def test_nothing_reads_low_at_the_end_of_a_run(self):
         """The last 3 bins of a run were low when they looked ahead. A bin here is final when written."""
         events = pd.concat([events_at(*[at(1, m) for m in range(0, 45, 3)]), end_marker(at(1, 44, 59.9))])
-        cut = process(events, VOLUMES, carry='first')['full_ped']
-        longer = process(pd.concat([events, events_at(*[at(1, m) for m in range(45, 120, 3)]), end_marker(at(1, 59, 59.9))]), VOLUMES, carry='first')['full_ped']
+        cut = process(events, VOLUMES, carry='first')['ped']
+        longer = process(pd.concat([events, events_at(*[at(1, m) for m in range(45, 120, 3)]), end_marker(at(1, 59, 59.9))]), VOLUMES, carry='first')['ped']
         written_later = longer[longer.TimeStamp <= cut.TimeStamp.max()]
         pd.testing.assert_frame_equal(written([cut]), written([written_later]))
 
     def test_past_rows_are_written_once_and_each_run_starts_after_the_last(self):
         events = pd.concat([events_at(at(h, 7)) for h in range(8)] + [end_marker(at(h, 59, 59.9)) for h in range(9)])
         _, outputs, _ = assert_same_as_batch(events, [at(h) for h in range(1, 9)])
-        spans = [(o['full_ped'].TimeStamp.min(), o['full_ped'].TimeStamp.max()) for o in outputs if len(o['full_ped'])]
+        spans = [(o['ped'].TimeStamp.min(), o['ped'].TimeStamp.max()) for o in outputs if len(o['ped'])]
         for (_, end), (start, _) in zip(spans[:-1], spans[1:]):
             assert start == end + pd.Timedelta(minutes=15)
 
@@ -194,7 +194,7 @@ class TestWriting:
         events = pd.concat([events_at(*[at(h, m) for m in (7, 22, 37, 52)]) for h in range(4)] + [end_marker(at(h, 59, 59.9)) for h in range(4)])
         _, outputs, _ = assert_same_as_batch(events, [at(h) for h in range(1, 4)])
         for h, out in enumerate(outputs):
-            assert out['full_ped'].TimeStamp.tolist()[-1] == at(h, 45) or sorted(out['full_ped'].TimeStamp)[-1] == at(h, 45)
+            assert out['ped'].TimeStamp.tolist()[-1] == at(h, 45) or sorted(out['ped'].TimeStamp)[-1] == at(h, 45)
 
 
 #########################################
@@ -264,7 +264,7 @@ class TestEdgeCases:
     def test_empty_run_changes_nothing(self):
         out1 = process(pd.concat([events_at(at(0, 5), at(2, 50)), end_marker(at(2, 57))]), VOLUMES, carry='first')
         out2 = process(events_at(at(0)).iloc[:0], VOLUMES, carry=out1['unmatched_events'])
-        assert len(out2['full_ped']) == 0
+        assert len(out2['ped']) == 0
         sort = ['TimeStamp', 'DeviceId', 'EventId', 'Parameter']
         pd.testing.assert_frame_equal(
             out2['unmatched_events'].sort_values(sort).reset_index(drop=True),
@@ -272,8 +272,8 @@ class TestEdgeCases:
             check_dtype=False,
         )
         out3 = process(end_marker(at(3, 14, 59.9)), VOLUMES, carry=out2['unmatched_events'])
-        assert out3['full_ped'].TimeStamp.min() == at(2, 45)
-        assert out3['full_ped'].query('TimeStamp == @at(2, 45)').Unique_Actuations.tolist() == [1]
+        assert out3['ped'].TimeStamp.min() == at(2, 45)
+        assert out3['ped'].query('TimeStamp == @at(2, 45)').Unique_Actuations.tolist() == [1]
 
     def test_old_carry_file_with_no_count_rows(self, tmp_path):
         """The first run after the upgrade: old carried rows and last presses, no 943 to 947. Bins before it read as
@@ -289,15 +289,15 @@ class TestEdgeCases:
         old.to_parquet(path)
         events = pd.concat([events_at(at(1, 0, 5), at(1, 20)), events_at(at(2, 5), device='B'), end_marker(at(2, 59, 59.9))])
         out = process(events, VOLUMES, settings={'df_or_path': str(path), 'max_days_old': 14})
-        a = out['full_ped'].query("DeviceId == 'A'").sort_values('TimeStamp').reset_index(drop=True)
+        a = out['ped'].query("DeviceId == 'A'").sort_values('TimeStamp').reset_index(drop=True)
         assert a.TimeStamp.min() == at(1, 0)  # its first activity, though that press repeats the carried one
         np.testing.assert_allclose(a.Estimated_Volumes[:2], [INTERCEPT, volume(1, 1)], rtol=1e-6)
-        assert out['full_ped'].query("DeviceId == 'B'").TimeStamp.tolist() == [at(2, 0), at(2, 15), at(2, 30), at(2, 45)]
+        assert out['ped'].query("DeviceId == 'B'").TimeStamp.tolist() == [at(2, 0), at(2, 15), at(2, 30), at(2, 45)]
         assert (out['unmatched_events'].EventId == 945).sum() == 2
 
     def test_return_volumes_false_still_leaves_quiet_rows_out(self):
         events = pd.concat([events_at(at(0, 5)), events_at(at(2, 5)), end_marker(at(2, 59, 59.9))])
-        aggregations = [{'name': 'full_ped', 'params': {'return_volumes': False}}]
+        aggregations = [{'name': 'ped', 'params': {'return_volumes': False}}]
         actual, _, _ = assert_same_as_batch(events, [at(1), at(2, 3)], aggregations)
         assert 'Estimated_Volumes' not in actual.columns
         assert actual.TimeStamp.tolist() == [at(0), at(2)]
@@ -316,9 +316,9 @@ class TestMaxDaysOld:
             out = process(end_marker(start + pd.Timedelta(minutes=59, seconds=59.9)), VOLUMES,
                           carry=out['unmatched_events'], max_days_old=2)
             if day <= 1:
-                assert not out['full_ped'].query("DeviceId == 'A'").empty
+                assert not out['ped'].query("DeviceId == 'A'").empty
             else:
-                assert out['full_ped'].query("DeviceId == 'A'").empty
+                assert out['ped'].query("DeviceId == 'A'").empty
         assert not out['unmatched_events'].query("EventId in [944, 945]").shape[0]
 
     def test_an_input_back_after_max_days_old_starts_again(self):
@@ -326,7 +326,7 @@ class TestMaxDaysOld:
         back = at(0) + pd.Timedelta(days=5)
         out = process(pd.concat([events_at(back + pd.Timedelta(minutes=5)), end_marker(back + pd.Timedelta(minutes=59, seconds=59.9))]),
                       VOLUMES, carry=out['unmatched_events'], max_days_old=2)
-        rows = out['full_ped'].query("DeviceId == 'A'").sort_values('TimeStamp')
+        rows = out['ped'].query("DeviceId == 'A'").sort_values('TimeStamp')
         assert rows.TimeStamp.iloc[0] == back
         np.testing.assert_allclose(rows.Estimated_Volumes.iloc[0], volume(1, 1), rtol=1e-6)
 
@@ -338,23 +338,23 @@ class TestMaxDaysOld:
 HAS_DATA = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
 
 
-@pytest.mark.parametrize('aggregation', ['full_ped', 'unique_ped'])
-def test_remove_incomplete_keeps_a_bin_written_after_its_run(aggregation):
+@pytest.mark.parametrize('return_volumes', [True, False])
+def test_remove_incomplete_keeps_a_bin_written_after_its_run(return_volumes):
     # One quiet signal: the first run stops well short of the end of the bin, which has_data passed
     events = pd.concat([events_at(at(1, 1), at(1, 13)), events_at(at(1, 20), at(1, 50)), end_marker(at(1, 59, 59.9))])
-    aggregations = [HAS_DATA, {'name': aggregation, 'params': {}}]
-    big = process(events, aggregations, carry='first', remove_incomplete=True)[aggregation]
+    aggregations = [HAS_DATA, {'name': 'ped', 'params': {'return_volumes': return_volumes}}]
+    big = process(events, aggregations, carry='first', remove_incomplete=True)['ped']
     first = process(events[events.TimeStamp < at(1, 14)], aggregations, carry='first', remove_incomplete=True)
-    assert first[aggregation].empty
+    assert first['ped'].empty
     assert (first['unmatched_events'].EventId == 942).sum() == 1
     second = process(events[events.TimeStamp >= at(1, 14)], aggregations, carry=first['unmatched_events'], remove_incomplete=True)
-    pd.testing.assert_frame_equal(written([second[aggregation]]), written([big]))
-    assert at(1) in set(second[aggregation].TimeStamp)
+    pd.testing.assert_frame_equal(written([second['ped']]), written([big]))
+    assert at(1) in set(second['ped'].TimeStamp)
 
 
 def test_remove_incomplete_leaves_out_a_bin_with_no_data():
     events = pd.concat([events_at(at(1, 1)), events_at(at(2, 1)), end_marker(at(1, 14, 59)), end_marker(at(2, 14, 59.9))])
-    out = process(events, [HAS_DATA, {'name': 'full_ped', 'params': {}}], remove_incomplete=True)['full_ped']
+    out = process(events, [HAS_DATA, {'name': 'ped', 'params': {}}], remove_incomplete=True)['ped']
     assert sorted(out.query("DeviceId == 'A'").TimeStamp) == [at(1), at(2)]
 
 
@@ -364,7 +364,7 @@ def test_remove_incomplete_leaves_out_a_bin_with_no_data():
 
 def test_the_published_formula_on_real_data(real_events):
     """The formula, recalculated from Unique_Actuations, gives the column."""
-    frame = written([process(real_events, VOLUMES)['full_ped']])
+    frame = written([process(real_events, VOLUMES)['ped']])
     rolling = frame.groupby(['DeviceId', 'Phase'])['Unique_Actuations'].rolling(4, min_periods=1).sum().reset_index(level=[0, 1], drop=True).sort_index()
     hourly = 0.7167 * rolling + 0.0599 * rolling ** 2
     ratio = (frame['Unique_Actuations'] / rolling).fillna(0)
@@ -381,7 +381,7 @@ def test_first_window_with_no_settings_then_a_carry(real_events):
     has_data = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
     timeline = {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60}}
     def aggregations(known):
-        return [has_data, timeline, {'name': 'actuations', 'params': {'known_detectors_df_or_path': known}}, {'name': 'full_ped', 'params': {}}]
+        return [has_data, timeline, {'name': 'actuations', 'params': {'known_detectors_df_or_path': known}}, {'name': 'ped', 'params': {}}]
     events = real_events[real_events.TimeStamp < real_events.TimeStamp.min() + pd.Timedelta(hours=9)]
     start = events.TimeStamp.min().floor('3h')
     edges = list(pd.date_range(start, events.TimeStamp.max() + pd.Timedelta(hours=3), freq='3h'))
@@ -390,23 +390,23 @@ def test_first_window_with_no_settings_then_a_carry(real_events):
         chunk = pd.concat([events[(events.TimeStamp >= a) & (events.TimeStamp < b)], end_marker(b - pd.Timedelta(milliseconds=100))])
         out = process(chunk, aggregations(known), carry=carry)
         carry, known = out['unmatched_events'], out['known_detectors']
-        frames.append(out['full_ped'])
-    big = process(pd.concat([events, end_marker(edges[-1] - pd.Timedelta(milliseconds=100))]), VOLUMES)['full_ped']
+        frames.append(out['ped'])
+    big = process(pd.concat([events, end_marker(edges[-1] - pd.Timedelta(milliseconds=100))]), VOLUMES)['ped']
     pd.testing.assert_frame_equal(written(frames), written([big]))
 
 
-@pytest.mark.parametrize('name', ['full_ped', 'unique_ped'])
-def test_to_sql_query_runs_on_a_table_of_your_own(name):
+@pytest.mark.parametrize('return_volumes', [True, False])
+def test_to_sql_query_runs_on_a_table_of_your_own(return_volumes):
     events = pd.concat([events_at(at(1, 1), at(1, 20)), end_marker(at(1, 59, 59.9))])
-    aggregations = [{'name': name, 'params': {}}]
-    query = SignalDataProcessor(raw_data=events, bin_size=15, verbose=0, to_sql=True, aggregations=aggregations).run()[name]
+    aggregations = [{'name': 'ped', 'params': {'return_volumes': return_volumes}}]
+    query = SignalDataProcessor(raw_data=events, bin_size=15, verbose=0, to_sql=True, aggregations=aggregations).run()['ped']
     connection = duckdb.connect()
     connection.register('events_frame', events)
     connection.execute("CREATE TABLE raw_data AS SELECT TimeStamp, DeviceId, EventId::INT16 AS EventId, Parameter::INT16 AS Parameter FROM events_frame")
     connection.execute(query)
-    frame = connection.execute(f"SELECT * FROM {name}").df()
-    pd.testing.assert_frame_equal(written([frame]), written([process(events, aggregations)[name]]), check_dtype=False)
+    frame = connection.execute("SELECT * FROM ped").df()
+    pd.testing.assert_frame_equal(written([frame]), written([process(events, aggregations)['ped']]), check_dtype=False)
 
 
 def test_volumes_default_stays_on():
-    assert 'Estimated_Volumes' in process(events_at(at(1), at(1, 2)), VOLUMES)['full_ped'].columns
+    assert 'Estimated_Volumes' in process(events_at(at(1), at(1, 2)), VOLUMES)['ped'].columns

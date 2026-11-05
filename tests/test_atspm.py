@@ -37,9 +37,7 @@ TEST_PARAMS = {
       {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
       {'name': 'communications', 'params': {'event_codes': '400,503,502'}},
       {'name': 'coordination', 'params': {}},
-      {'name': 'ped', 'params': {}},
-      {'name': 'unique_ped', 'params': {'seconds_between_actuations': 15}},
-      {'name': 'full_ped', 'params': {'seconds_between_actuations': 15, 'return_volumes':True}},
+      {'name': 'ped', 'params': {'seconds_between_actuations': 15, 'return_volumes':True}},
       {'name': 'split_failures', 'params': {'red_time': 5, 'red_occupancy_threshold': 0.80, 'green_occupancy_threshold': 0.80, 'by_approach': True, 'by_cycle': False}},
       {'name': 'splits', 'params': {}},
       {'name': 'terminations', 'params': {}},
@@ -409,6 +407,51 @@ def test_oneshot_actuations_with_fill_in_missing(oneshot_processor_output_with_f
   # Compare the dataframes
   compare_dataframes(actuations_df, precalc_df)
 
+def _ped_from_raw_events(raw):
+  """ped's three counts worked out here from the events, in plain pandas, with no SQL shared with the package.
+
+  PedServices is events 21 and 67, PedActuation is event 90, and a press is unique if it is more than 15 seconds after the
+  previous press on that input or has none before it. The two ped tables removed in 3.0.0 had these values."""
+  ped = raw[raw['EventId'].isin([21, 67, 90])].copy()
+  ped['Bin'] = ped['TimeStamp'].dt.floor('15min')
+  ped['Service'] = ped['EventId'] != 90
+  ped['Press'] = ped['EventId'] == 90
+  presses = ped[ped['Press']].sort_values('TimeStamp')
+  since = presses.groupby(['DeviceId', 'Parameter'])['TimeStamp'].diff()
+  ped['Unique'] = False
+  ped.loc[presses.index, 'Unique'] = since.isna() | (since > pd.Timedelta(seconds=15))
+  counts = ped.groupby(['Bin', 'DeviceId', 'Parameter'], as_index=False)[['Service', 'Press', 'Unique']].sum()
+  counts.columns = ['TimeStamp', 'DeviceId', 'Phase', 'PedServices', 'PedActuation', 'Unique_Actuations']
+  return counts.astype({'Phase': 'int16', 'PedServices': 'int16', 'PedActuation': 'int16', 'Unique_Actuations': 'int16'})
+
+
+def test_ped_counts_equal_the_raw_events():
+  """Pins the values of the two ped tables removed in 3.0.0: all three counts in one row, on every bin with any activity."""
+  with SignalDataProcessor(raw_data=TEST_PARAMS['raw_data'], bin_size=15, verbose=0,
+                           aggregations=[{'name': 'ped', 'params': {'return_volumes': False}}]) as processor:
+    processor.load()
+    processor.aggregate()
+    out = processor.conn.sql("SELECT * FROM ped").df()
+  expected = _ped_from_raw_events(TEST_PARAMS['raw_data'])
+  assert out['Unique_Actuations'].sum() < out['PedActuation'].sum()
+  keys = ['TimeStamp', 'DeviceId', 'Phase']
+  pd.testing.assert_frame_equal(out.sort_values(keys).reset_index(drop=True), expected.sort_values(keys).reset_index(drop=True),
+                                check_dtype=False)
+
+
+def test_ped_precalculated_file_equals_the_raw_events_on_bins_with_activity():
+  """The other rows of tests/precalculated/ped.parquet are the zeros of an input in a quiet bin."""
+  file = pd.read_parquet('tests/precalculated/ped.parquet')
+  counts = ['PedServices', 'PedActuation', 'Unique_Actuations']
+  active = file[file[counts].sum(axis=1) > 0]
+  assert (file.drop(active.index)[counts] == 0).all(axis=None)
+  keys = ['TimeStamp', 'DeviceId', 'Phase']
+  expected = _ped_from_raw_events(TEST_PARAMS['raw_data']).merge(active[keys], on=keys)  # the file has remove_incomplete
+  assert len(expected) == len(active)
+  pd.testing.assert_frame_equal(active[keys + counts].sort_values(keys).reset_index(drop=True), expected.sort_values(keys).reset_index(drop=True),
+                                check_dtype=False)
+
+
 def test_ped_delay_output(processor_output):
   """Test pedestrian delay aggregation output"""
   output_file = os.path.join(TEST_PARAMS['output_dir'], f"{TEST_PARAMS['output_file_prefix']}ped_delay.parquet")
@@ -669,9 +712,7 @@ def test_empty_dataframe_input():
     {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}},
     {'name': 'communications', 'params': {'event_codes': '400,503,502'}},
     {'name': 'coordination', 'params': {}},
-    {'name': 'ped', 'params': {}},
-    {'name': 'unique_ped', 'params': {'seconds_between_actuations': 15}},
-    {'name': 'full_ped', 'params': {'seconds_between_actuations': 15, 'return_volumes': True}},
+    {'name': 'ped', 'params': {'seconds_between_actuations': 15, 'return_volumes': True}},
     {'name': 'split_failures', 'params': {'red_time': 5, 'red_occupancy_threshold': 0.80, 'green_occupancy_threshold': 0.80, 'by_approach': True, 'by_cycle': False}},
     {'name': 'splits', 'params': {}},
     {'name': 'terminations', 'params': {}},

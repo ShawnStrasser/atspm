@@ -32,12 +32,11 @@ ARRIVAL_CARRY_AGGREGATIONS = ('arrival_on_green', 'platoon_ratio')
 DEFAULT_SPILLBACK_ON_SECONDS = 6
 DEFAULT_SPILLBACK_GAP_SECONDS = 5
 
-# Aggregations that count unique ped actuations, and the default time lapse before a new one is counted.
-PED_CARRY_AGGREGATIONS = ('unique_ped', 'full_ped')
+# The default time lapse before a new unique ped actuation is counted.
 DEFAULT_SECONDS_BETWEEN_ACTUATIONS = 15
 
 # Aggregations that keep what they have not written yet in the main unmatched file, each with its own rows.
-OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, *PED_CARRY_AGGREGATIONS, 'yellow_red')
+OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, 'ped', 'yellow_red')
 
 
 def _spillback_params(params):
@@ -200,7 +199,7 @@ class SignalDataProcessor:
     aggregations : list of dict
         A list of dictionaries, each containing the name of an aggregation function and its parameters.
         Supported aggregations include: 'has_data', 'actuations', 'arrival_on_green', 'communications',
-        'coordination', 'coordination_agg', 'ped', 'unique_ped', 'full_ped', 'split_failures', 'splits', 'terminations',
+        'coordination', 'coordination_agg', 'ped', 'split_failures', 'splits', 'terminations',
         'yellow_red', 'timeline', 'ped_delay', 'phase_wait', and potentially others.
 
     Methods
@@ -640,7 +639,7 @@ class SignalDataProcessor:
         ))
 
     def _ped_carried(self, params):
-        """Whether unique_ped and full_ped read the bin counts carried from an earlier run.
+        """Whether ped reads the bin counts carried from an earlier run.
 
         An empty run has no dependable DeviceId type and writes nothing, so it leaves them out and
         _save_ped_carry keeps them for the next run.
@@ -651,10 +650,7 @@ class SignalDataProcessor:
         return carried > 0 and self.conn.execute("SELECT COUNT(*) FROM raw_data").fetchall()[0][0] > 0
 
     def _save_ped_carry(self, params):
-        """Saves what unique_ped and full_ped need from this run to unmatched_events (synthetic EventId 943 to 947).
-
-        See ped_state.sql. Both read one carry, made with the params of the last of them in the list.
-        """
+        """Saves what ped needs from this run to unmatched_events (synthetic EventId 943 to 947). See ped_state.sql."""
         if self.conn.execute("SELECT COUNT(*) FROM raw_data").fetchall()[0][0] > 0:
             self._add_to_unmatched_events(render_query('ped_carry', **params))
         elif self._table_exists('unmatched_previous'):
@@ -673,7 +669,7 @@ class SignalDataProcessor:
     def _save_last_ped_presses(self):
         """Saves each input's last press to unmatched_events (synthetic EventId 937), one row per input.
 
-        The next run's unique_ped and full_ped count their first press against it. An input with no press in
+        The next run's ped counts its first press against it. An input with no press in
         this run keeps its previous row until max_days_old drops it. A run without timeline has no
         unmatched_events yet, so the table is created if a main unmatched file was asked for.
         """
@@ -692,7 +688,7 @@ class SignalDataProcessor:
         # Instantiate a dictionary to store runtimes
         self.runtimes = {}
         self.sql_queries = {} # for storing sql string when to_sql is True
-        ped_params = None # the last unique_ped or full_ped params, for saving their carry
+        ped_params = None # ped's params, for saving its carry
 
         # Create unmatched_events table if unmatched_events is not None
         # This table will be used to insert unmatched events, to be saved and reloaded in the next run
@@ -769,8 +765,8 @@ class SignalDataProcessor:
                     params['event_gap_schedule'] = self.event_gap_schedule
 
                 #######################
-                ### Unique Pedestrian ###
-                if aggregation['name'] in PED_CARRY_AGGREGATIONS and 'seconds_between_actuations' not in params:
+                ### Pedestrian ###
+                if aggregation['name'] == 'ped' and 'seconds_between_actuations' not in params:
                     params['seconds_between_actuations'] = DEFAULT_SECONDS_BETWEEN_ACTUATIONS
 
                 #######################
@@ -778,7 +774,7 @@ class SignalDataProcessor:
                 # If unmatched_event_settings is supplied, then change the from_table for timeline, split_failures, arrival_on_green, and yellow_red
                 # These are views that have the relateded unmatched events unioned to them
                 # coordination_agg and phase_wait also use unmatched events to store previous coordination state
-                # unique_ped and full_ped use them to store each input's last press and what they have not written yet
+                # ped uses them to store each input's last press and what it has not written yet
                 # arrival_on_green and platoon_ratio use them to store what they have not written yet, and yellow_red its unfinished cycles
                 if self.incremental_run and aggregation['name'] in ['timeline', 'split_failures', 'coordination_agg', 'phase_wait', *OWN_CARRY_AGGREGATIONS]:
                     params['incremental_run'] = True #lets the aggregation know to save unmatched events for next run
@@ -809,7 +805,7 @@ class SignalDataProcessor:
                 if aggregation['name'] in OWN_CARRY_AGGREGATIONS:
                     params['carry_bins'] = 'df_or_path' in (self.unmatched_event_settings or {})
 
-                if aggregation['name'] in PED_CARRY_AGGREGATIONS:
+                if aggregation['name'] == 'ped':
                     params['ped_carried'] = self._ped_carried(params)
                     ped_params = params
 

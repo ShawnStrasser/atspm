@@ -211,7 +211,7 @@ def test_the_open_on_is_in_the_store_not_in_the_unmatched_events_file(tmp_path):
     chunk = raw[(raw['TimeStamp'] >= T0 + pd.Timedelta(days=k - 1)) & (raw['TimeStamp'] < T0 + pd.Timedelta(days=k))]
     SignalDataProcessor(raw_data=chunk, detector_config=None, bin_size=15, verbose=0, output_dir=str(tmp_path / 'out'), output_format='parquet',
                         output_to_separate_folders=False, unmatched_event_settings={'df_or_path': unmatched, 'max_days_old': 1},
-                        aggregations=[_params(DETECTORS, store=store, horizon_days=1, judge='daily'), {'name': 'full_ped', 'params': {}}]).run()
+                        aggregations=[_params(DETECTORS, store=store, horizon_days=1, judge='daily'), {'name': 'ped', 'params': {}}]).run()
   con = duckdb.connect(store, read_only=True)
   carried = con.execute("SELECT TimeStamp, Parameter FROM health_carry WHERE EventId = 9232").fetchall()
   con.close()

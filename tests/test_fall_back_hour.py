@@ -16,8 +16,6 @@ ALL_AGGREGATIONS = [
     {'name': 'communications', 'params': {'event_codes': '400,503,502'}},
     {'name': 'coordination', 'params': {}},
     {'name': 'ped', 'params': {}},
-    {'name': 'unique_ped', 'params': {}},
-    {'name': 'full_ped', 'params': {}},
     {'name': 'split_failures', 'params': {'red_time': 5, 'red_occupancy_threshold': 0.80, 'green_occupancy_threshold': 0.80, 'by_approach': True, 'by_cycle': False}},
     {'name': 'splits', 'params': {}},
     {'name': 'terminations', 'params': {}},
@@ -115,7 +113,7 @@ def test_no_aggregation_has_a_bin_or_event_in_the_hour():
         for column in ('TimeStamp', 'Raw_TimeStamp', 'StartTime', 'EndTime'):
             if column in frame.columns and in_hour(kept[table][column]).any():
                 rows = frame[in_hour(frame[column])]
-                if table == 'full_ped':
+                if table == 'ped':
                     # A known input keeps its zero rows, as in any outage, and join has_data leaves them out
                     assert (rows[['PedServices', 'PedActuation', 'Unique_Actuations']] == 0).all(axis=None)
                 elif table in ('coordination_agg', 'actuations') and column == 'TimeStamp':
@@ -127,7 +125,16 @@ def test_no_aggregation_has_a_bin_or_event_in_the_hour():
                     else:
                         assert rows.empty, (table, column)
                 checked.append((table, column))
-    assert {'has_data', 'terminations', 'timeline', 'ped', 'unique_ped', 'full_ped', 'arrival_on_green', 'raw_data'} <= {t for t, _ in checked}
+    assert {'has_data', 'terminations', 'timeline', 'ped', 'arrival_on_green', 'raw_data'} <= {t for t, _ in checked}
+
+
+def test_ped_without_volumes_has_no_row_in_the_hour():
+    """With its quiet rows left out, ped writes nothing in the hour. With the hour kept it has rows there."""
+    events = events_around(SUNDAY)
+    aggregations = [HAS_DATA, {'name': 'ped', 'params': {'return_volumes': False}}]
+    in_hour = lambda stamps: ((stamps >= SUNDAY + pd.Timedelta(hours=1)) & (stamps < SUNDAY + pd.Timedelta(hours=2)))
+    assert in_hour(run(events, aggregations, drop_fall_back_hour=False)['ped'].TimeStamp).any()
+    assert not in_hour(run(events, aggregations)['ped'].TimeStamp).any()
 
 
 def test_an_interval_across_the_hour_is_not_valid():
@@ -138,10 +145,11 @@ def test_an_interval_across_the_hour_is_not_valid():
     assert not across.IsValid.any()
 
 
-def test_incremental_runs_through_the_hour_equal_one_big_run():
+@pytest.mark.parametrize('return_volumes', [True, False])
+def test_incremental_runs_through_the_hour_equal_one_big_run(return_volumes):
     """15-minute runs, four of which have no events left. They must not fail or lose anything carried."""
     events = events_around(SUNDAY).sort_values('TimeStamp')
-    aggregations = [HAS_DATA, {'name': 'unique_ped', 'params': {}}, {'name': 'full_ped', 'params': {}},
+    aggregations = [HAS_DATA, {'name': 'ped', 'params': {'return_volumes': return_volumes}},
                     {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}}, {'name': 'platoon_ratio', 'params': {}},
                     {'name': 'timeline', 'params': {'min_duration': 0.2, 'cushion_time': 60}}]
     settings = lambda carry: {'df_or_path': carry, 'max_days_old': 14}
@@ -151,7 +159,7 @@ def test_incremental_runs_through_the_hour_equal_one_big_run():
     for start, end in zip(edges[:-1], edges[1:]):
         out = run(events[(events.TimeStamp >= start) & (events.TimeStamp < end)], aggregations, unmatched_event_settings=settings(carry))
         carry = out['unmatched_events']
-        for table in ('unique_ped', 'full_ped', 'arrival_on_green', 'platoon_ratio'):
+        for table in ('ped', 'arrival_on_green', 'platoon_ratio'):
             tables.setdefault(table, []).append(out[table])
     keys = ['TimeStamp', 'DeviceId', 'Phase']
     for table, frames in tables.items():
