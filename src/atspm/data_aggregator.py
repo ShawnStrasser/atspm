@@ -141,6 +141,14 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
         GROUP BY DeviceId
         HAVING LAST(ActualOffset ORDER BY TimeStamp) != 0;
         """
+        # A device with no bin in this run has not changed its plan: it keeps its state for the next run
+        if kwargs.get('coord_state_found', False):
+            query += """
+            INSERT INTO unmatched_events
+            SELECT TimeStamp, DeviceId, EventId, Parameter, IsValid
+            FROM unmatched_previous
+            WHERE EventId BETWEEN 931 AND 934 AND DeviceId NOT IN (SELECT DeviceId FROM coordination_agg);
+            """
 
     try:
         if to_sql: # return sql as string

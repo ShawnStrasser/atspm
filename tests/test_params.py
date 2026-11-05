@@ -209,3 +209,32 @@ def test_the_rows_every_table_shares_do_not_need_a_table(tmp_path):
     path = tmp_path / 'state.parquet'
     pd.DataFrame({'TimeStamp': [T0, T0], 'DeviceId': ['A', 'A'], 'EventId': [936, 942], 'Parameter': [0, 0], 'IsValid': [True, True]}).to_parquet(path)
     run_on(path, events([(900, 'A', 82, 5)]), STATE_ACTUATIONS)
+
+
+COORDINATION = [HAS_DATA, TIMELINE, {'name': 'coordination_agg', 'params': {}}]
+
+
+def coordination_run(path, raw):
+    with SignalDataProcessor(raw_data=raw, detector_config=EMPTY_CONFIG, bin_size=15, verbose=0, aggregations=COORDINATION,
+                             unmatched_event_settings={'df_or_path': str(path), 'max_days_old': 14, 'first_run': True}) as p:
+        p.load()
+        p.aggregate()
+        p.conn.execute(f"COPY unmatched_events TO '{path}'")
+        return p.conn.sql('SELECT * FROM coordination_agg').df().set_index('DeviceId')
+
+
+@pytest.mark.parametrize('quiet', [events([(1000, 'B', 1, 2)]), events([(1000, 'B', 1, 2)]).iloc[:0]], ids=['one_signal', 'no_events_at_all'])
+def test_a_signal_silent_for_a_run_keeps_its_pattern(tmp_path, quiet):
+    path = tmp_path / 'state.parquet'
+    coordination_run(path, events([(10, 'A', 131, 3), (20, 'A', 132, 90), (10, 'B', 131, 4), (20, 'B', 1, 2)]))
+    coordination_run(path, quiet)
+    after = coordination_run(path, events([(2000, 'A', 1, 2), (2000, 'B', 1, 2)]))
+    assert after.loc['A', 'Pattern'] == 3 and after.loc['A', 'CycleLength'] == 90 and after.loc['B', 'Pattern'] == 4
+
+
+def test_a_signal_with_data_takes_its_new_pattern_not_the_kept_one(tmp_path):
+    path = tmp_path / 'state.parquet'
+    coordination_run(path, events([(10, 'A', 131, 3)]))
+    coordination_run(path, events([(1000, 'A', 131, 5)]))
+    state = pd.read_parquet(path).query('EventId == 931')
+    assert state.Parameter.tolist() == [5]
