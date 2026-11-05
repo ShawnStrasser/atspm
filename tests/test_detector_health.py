@@ -12,6 +12,7 @@ from src.atspm.detector_health import _judge_due
 
 H = pytest.importorskip('atspm_detector.incremental', exc_type=ImportError)
 from atspm_detector import health
+from atspm_detector.bins import bins
 
 RAW = duckdb.query("select * from 'tests/hires_test_data.parquet'").df()
 CONFIG = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
@@ -82,12 +83,12 @@ def _store_rows(path):
 # ---- A1, A2: one run and chunked runs equal atspm-detector on its own
 
 def test_a1_one_shot_equals_the_package_on_its_own():
-  out = _run(RAW, _params(summary=True))
+  out = _run(RAW, _params(findings=True))
   findings, status = _reference(RAW, END - pd.Timedelta(days=3), END)
   assert set(findings['DetectorType']) == {'Vehicle', 'Ped'}
-  assert (out['detector_health']['TimeStamp'] == END).all()
-  _same(out['detector_health'].drop(columns='TimeStamp'), findings)
-  _same(out['detector_health_status'].drop(columns='TimeStamp'), status)
+  assert (out['detector_health_findings']['TimeStamp'] == END).all()
+  _same(out['detector_health_findings'].drop(columns='TimeStamp'), findings)
+  _same(out['detector_health'], bins(duckdb.connect(), findings, status, END - pd.Timedelta(days=3), END))
 
 
 def test_a2_fifteen_minute_runs_equal_one_run(tmp_path):
@@ -96,54 +97,17 @@ def test_a2_fifteen_minute_runs_equal_one_run(tmp_path):
   assert len(chunks) == 12
   for chunk in chunks[:-1]:
     assert 'detector_health' not in _run(chunk, _params(store=store, judge=False))
-  chunked = _run(chunks[-1], _params(store=store, judge='every_run', summary=True))
-  one = _run(RAW, _params(summary=True))
-  for table in ('detector_health', 'detector_health_status'):
+  chunked = _run(chunks[-1], _params(store=store, judge='every_run', findings=True))
+  one = _run(RAW, _params(judge='every_run', findings=True))
+  for table in ('detector_health', 'detector_health_findings'):
     _same(chunked[table], one[table])
-
-
-def test_status_only_with_summary():
-  out = _run(RAW, _params())
-  assert set(out) == {'detector_health'}
-  status = _run(RAW, _params(summary=True))['detector_health_status']
-  assert not status.duplicated(['DeviceId', 'DetectorType', 'Detector', 'Date']).any()
 
 
 # ---- the optional tables
 
-def test_the_15_minute_table_is_the_same_from_chunked_runs_and_from_one_run(tmp_path):
-  store = str(tmp_path / 'health.duckdb')
-  chunks = _chunks(15)
-  for chunk in chunks[:-1]:
-    _run(chunk, _params(store=store, judge=False))
-  chunked = _run(chunks[-1], _params(store=store, judge='every_run', outputs=['tables', '15min']))
-  one = _run(RAW, _params(outputs=['15min']))
-  assert set(one) == {'detector_health', 'detector_health_15min'}
-  assert len(one['detector_health_15min']) > 0
-  assert list(one['detector_health_15min'].columns) == ['TimeStamp', 'DeviceId', 'DetectorType', 'Detector', 'Label', 'Confidence', 'Status']
-  _same(chunked['detector_health_15min'], one['detector_health_15min'])
-  q15 = one['detector_health_15min']
-  assert q15['TimeStamp'].between(START, END, inclusive='left').all()
-  assert set(q15['Status']) <= {'suspect', 'bad'}
-
-
-def test_the_active_table_keeps_its_state_in_the_store(tmp_path):
-  store = str(tmp_path / 'health.duckdb')
-  chunks = _chunks(60)
-  _run(chunks[0], _params(store=store, judge=False))
-  first = _run(chunks[1], _params(store=store, judge='every_run', outputs=['active']))['detector_health_active']
-  second = _run(chunks[2], _params(store=store, judge='every_run', outputs=['active']))['detector_health_active']
-  assert list(first.columns) == ['TimeStamp', 'DeviceId', 'DetectorType', 'Detector', 'Label', 'Start', 'End', 'Confidence',
-                                 'State', 'FirstSeen', 'LastSeen', 'Missed']
-  assert len(first) > 0 and (first['TimeStamp'] == START + pd.Timedelta(hours=2)).all() and (second['TimeStamp'] == END).all()
-  assert 'confirmed' in set(second['State'])
-  stored = _store_rows(store)['health_active']
-  _same(stored, second.drop(columns='TimeStamp'))
-
-
 def test_an_empty_one_shot_has_the_optional_tables_too():
-  out = _run(RAW.head(0), _params(outputs=['15min', 'active']))
-  assert set(out) == {'detector_health', 'detector_health_15min', 'detector_health_active'}
+  out = _run(RAW.head(0), _params(findings=True))
+  assert set(out) == {'detector_health', 'detector_health_findings'}
   assert all(len(frame) == 0 and frame.columns[0] == 'TimeStamp' for frame in out.values())
 
 
@@ -162,10 +126,10 @@ def _cadence_runs(tmp_path, cadence):
   edges = pd.date_range('2024-05-13 22:30', '2024-05-14 01:00', freq='30min')
   _run(_chunk('2024-05-13 21:00', edges[0], data), _params(store=store, judge=False))
   for a, b in zip(edges[:-1], edges[1:]):
-    out = _run(_chunk(a, b, data), _params(store=store, judge=cadence))
+    out = _run(_chunk(a, b, data), _params(store=store, judge=cadence, findings=True))
     if 'detector_health' in out:
       judged.append(b)
-      assert out['detector_health']['TimeStamp'].eq(b).all()
+      assert out['detector_health_findings']['TimeStamp'].eq(b).all()
   return judged
 
 
@@ -196,8 +160,8 @@ def test_a3_first_run_after_the_hour(cadence, end, meta, due):
 @pytest.mark.parametrize('output_format', ['csv', 'parquet', 'json'])
 def test_a4_save_writes_only_the_output_tables(tmp_path, output_format):
   SignalDataProcessor(raw_data=RAW, bin_size=15, verbose=0, output_dir=str(tmp_path), output_format=output_format,
-                      output_to_separate_folders=False, aggregations=[_params(summary=True)]).run()
-  assert sorted(os.listdir(tmp_path)) == [f'detector_health.{output_format}', f'detector_health_status.{output_format}']
+                      output_to_separate_folders=False, aggregations=[_params(findings=True)]).run()
+  assert sorted(os.listdir(tmp_path)) == [f'detector_health.{output_format}', f'detector_health_findings.{output_format}']
 
 
 def test_a4_a_run_that_does_not_judge_writes_nothing(tmp_path):
@@ -209,8 +173,8 @@ def test_a4_a_run_that_does_not_judge_writes_nothing(tmp_path):
 
 
 def test_a4_no_store_or_temp_table_stays_behind():
-  out = _run(RAW, _params(summary=True))
-  assert set(out) == {'detector_health', 'detector_health_status'}
+  out = _run(RAW, _params(findings=True))
+  assert set(out) == {'detector_health', 'detector_health_findings'}
   for table, frame in out.items():
     assert frame.columns[0] == 'TimeStamp'
 
@@ -270,8 +234,8 @@ def test_a6_old_parameters_explain_themselves(old):
   ({'judge': 'weekly'}, 'judge must be'),
   ({'judge': False}, 'keeps nothing'),
   ({'clock_ahead_minutes': -1}, 'clock_ahead_minutes'),
-  ({'outputs': ['weekly']}, 'outputs must be'),
-  ({'outputs': '15min'}, 'outputs must be'),
+  ({'outputs': ['weekly']}, 'unknown parameters'),
+  ({'outputs': '15min'}, 'unknown parameters'),
 ])
 def test_a6_bad_parameters(params, message):
   with pytest.raises(ValueError, match=message):
@@ -373,23 +337,23 @@ def test_a_wrong_clock_is_held_back_and_logged_and_does_not_move_the_others(tmp_
   wrong = RAW[RAW['DeviceId'] == 454].assign(TimeStamp=lambda f: f['TimeStamp'] + pd.DateOffset(years=1))
   others = RAW[RAW['DeviceId'] != 454]
   with SignalDataProcessor(raw_data=pd.concat([others, wrong]), bin_size=15, verbose=1,
-                           aggregations=[_params(store=str(tmp_path / 's.duckdb'), judge='every_run')]) as p:
+                           aggregations=[_params(store=str(tmp_path / 's.duckdb'), judge='every_run', findings=True)]) as p:
     p.load()
     p.aggregate()
-    bad = p.conn.execute("SELECT * FROM detector_health").df()
+    bad = p.conn.execute("SELECT * FROM detector_health_findings").df()
   assert re.search(f"signal 454: [0-9]+ events stamped at or after {END}", capsys.readouterr().out)
   assert (bad['TimeStamp'] == END).all()
-  _same(bad, _run(others, _params())['detector_health'])
+  _same(bad, _run(others, _params(findings=True))['detector_health_findings'])
 
 
 def test_a_clock_a_little_ahead_keeps_its_rows(tmp_path, capsys):
   chunk = _chunks(15)[0]
   ahead = chunk.assign(TimeStamp=chunk['TimeStamp'].where(chunk['DeviceId'] != 454, chunk['TimeStamp'] + pd.Timedelta(minutes=5)))
   with SignalDataProcessor(raw_data=ahead, bin_size=15, verbose=1,
-                           aggregations=[_params(store=str(tmp_path / 's.duckdb'), judge='every_run')]) as p:
+                           aggregations=[_params(store=str(tmp_path / 's.duckdb'), judge='every_run', findings=True)]) as p:
     p.load()
     p.aggregate()
-    judged = p.conn.execute("SELECT DISTINCT TimeStamp FROM detector_health").fetchall()
+    judged = p.conn.execute("SELECT DISTINCT TimeStamp FROM detector_health_findings").fetchall()
   assert 'events stamped' not in capsys.readouterr().out
   assert judged == [(pd.Timestamp('2024-05-13 15:30:00').to_pydatetime(),)]
 
@@ -400,10 +364,10 @@ def test_running_an_old_chunk_again_is_late_logged_and_still_judges(tmp_path, ca
   _run(chunks[0], _params(store=store, judge=False))
   _run(chunks[1], _params(store=store, judge=False))
   with SignalDataProcessor(raw_data=chunks[0], bin_size=15, verbose=1,
-                           aggregations=[_params(store=store, judge='every_run')]) as p:
+                           aggregations=[_params(store=store, judge='every_run', findings=True)]) as p:
     p.load()
     p.aggregate()
-    judged = p.conn.execute("SELECT DISTINCT TimeStamp FROM detector_health").fetchall()
+    judged = p.conn.execute("SELECT DISTINCT TimeStamp FROM detector_health_findings").fetchall()
   assert 'at or before what the store already holds' in capsys.readouterr().out
   assert judged == [(pd.Timestamp('2024-05-13 17:00:00').to_pydatetime(),)]
 
@@ -414,11 +378,11 @@ EMPTY = RAW.head(0)
 
 
 def test_an_empty_one_shot_has_the_tables_without_rows():
-  out = _run(EMPTY, _params(summary=True))
-  assert list(out['detector_health'].columns) == ['TimeStamp', 'DeviceId', 'DetectorType', 'Detector', 'Start', 'End',
-                                                  'Label', 'Confidence', 'Detail']
-  assert list(out['detector_health_status'].columns) == ['TimeStamp', 'DeviceId', 'DetectorType', 'Detector', 'Date', 'Status']
-  assert len(out['detector_health']) == 0 and len(out['detector_health_status']) == 0
+  out = _run(EMPTY, _params(findings=True))
+  assert list(out['detector_health'].columns) == ['TimeStamp', 'DeviceId', 'DetectorType', 'Detector', 'Label', 'Score']
+  assert list(out['detector_health_findings'].columns) == ['TimeStamp', 'DeviceId', 'DetectorType', 'Detector', 'Start', 'End',
+                                                           'Label', 'Confidence', 'Detail']
+  assert len(out['detector_health']) == 0 and len(out['detector_health_findings']) == 0
 
 
 def test_an_empty_run_leaves_the_store_alone(tmp_path):
