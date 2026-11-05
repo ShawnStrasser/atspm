@@ -467,7 +467,7 @@ AlarmStatus1 AS /* intermediate step */
 AlarmStatus AS
 	(
 	SELECT TimeStamp, DeviceID, EventId, Parameter,
-	       COALESCE(EndTime, TimeStamp + INTERVAL ({{cushion_time}}) SECOND) AS EndTime,
+	       {% if incremental_run %}EndTime{% else %}COALESCE(EndTime, TimeStamp + INTERVAL ({{cushion_time}}) SECOND){% endif %} AS EndTime,
 	       TRUE AS IsValid
 	FROM AlarmStatus1
 	),

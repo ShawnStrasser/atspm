@@ -41,6 +41,9 @@ OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, 'ped', 'yellow_red')
 # Tables that write whatever bins a run has, with nothing kept for a later run. Cut inside a bin, a run writes that bin again.
 WRITE_BINS_AT_ONCE = ('actuations', 'terminations', 'splits', 'coordination_agg', 'phase_wait', 'ped_delay')
 
+# timeline's instant events (see timeline.sql)
+INSTANT_EVENT_CLASSES = ('Pattern Change', 'Cycle Length Change', 'Offset Change', 'Interval Advance', 'Clock Update', 'Power Failure', 'Power Restored')
+
 # Every setting a run takes. A misspelled name would otherwise do nothing, with no message. detector_health checks its own.
 SETTINGS = {'raw_data', 'detector_config', 'bin_size', 'output_dir', 'output_to_separate_folders', 'output_format',
             'output_file_prefix', 'remove_incomplete', 'drop_fall_back_hour', 'unmatched_event_settings', 'to_sql', 'verbose',
@@ -529,6 +532,8 @@ class SignalDataProcessor:
         Bins before the marker were checked by earlier runs, with the result kept in IsValid.
         """
         bin_interval = f"INTERVAL '{self.bin_size} minutes'"
+        # An instant event has no real duration: its end is only the cushion, which can reach a bin the run has not seen
+        interval_end = f"CASE WHEN t.EventClass IN {INSTANT_EVENT_CLASSES} THEN t.StartTime ELSE t.EndTime END"
         has_previous = self.conn.execute(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_previous'"
         ).fetchall()[0][0]
@@ -563,7 +568,7 @@ class SignalDataProcessor:
                     SELECT t.rowid AS rid, t.DeviceId,
                            UNNEST(generate_series(
                                GREATEST(TIME_BUCKET({bin_interval}, t.StartTime), COALESCE(b.FirstBin, TIME_BUCKET({bin_interval}, t.StartTime))),
-                               TIME_BUCKET({bin_interval}, t.EndTime),
+                               TIME_BUCKET({bin_interval}, {interval_end}),
                                {bin_interval})) AS bin_ts
                     FROM timeline t
                     LEFT JOIN gap_bounds b USING (DeviceId)

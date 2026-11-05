@@ -60,7 +60,7 @@ def test_the_list_of_names_matches_the_queries():
         return found
 
     set_by_processor = {'bin_size', 'from_table', 'unmatched', 'incremental_run', 'carry_bins', 'controller_type', 'remove_incomplete',
-                        'known_detectors_found', 'ped_carried', 'coord_state_found', 'event_gap_schedule', 'yellow_red_carried', 'carry_alarms'}
+                        'known_detectors_found', 'ped_carried', 'coord_state_found', 'event_gap_schedule', 'yellow_red_carried'}
     for name, known in AGGREGATION_PARAMS.items():
         read = names(f'{name}.sql', set()) - set_by_processor
         assert read <= known, (name, read - known)
@@ -255,3 +255,56 @@ def test_a_cut_inside_a_bin_is_fine_for_the_tables_that_hold_it(tmp_path):
     listed = [HAS_DATA, TIMELINE, {'name': 'ped', 'params': {}}]
     run_on(path, events([(0, 'A', 90, 5), (400, 'A', 90, 5)]), listed)
     run_on(path, events([(500, 'A', 90, 5)]), listed)
+
+
+ALARMS = [HAS_DATA, TIMELINE]
+
+
+def timeline_runs(tmp_path, *chunks, **settings):
+    path = tmp_path / 'state.parquet'
+    rows = []
+    for chunk in chunks:
+        with SignalDataProcessor(raw_data=chunk, detector_config=EMPTY_CONFIG, bin_size=15, verbose=0, aggregations=ALARMS,
+                                 unmatched_event_settings={'df_or_path': str(path), 'max_days_old': 14, 'first_run': True, **settings}) as p:
+            p.load()
+            p.aggregate()
+            p.conn.execute(f"COPY unmatched_events TO '{path}'")
+            rows.append(p.conn.sql('SELECT * FROM timeline').df())
+    return pd.concat(rows, ignore_index=True), pd.read_parquet(path)
+
+
+@pytest.mark.parametrize('event, parameter, event_class', [(173, 3, 'Flash - Automatic'), (174, 16, 'MMU Flash'), (175, 7, 'Alarm Group State')])
+def test_an_alarm_carries_across_a_cut(tmp_path, event, parameter, event_class):
+    close = 2 if event == 173 else 0
+    first = events([(10, 'A', event, parameter), (20, 'A', 82, 5)])
+    second = events([(1000, 'A', 82, 5), (1500, 'A', event, close), (1510, 'A', 82, 5)])
+    rows, state = timeline_runs(tmp_path, first, second)
+    row = rows[rows.EventClass == event_class]
+    assert row.StartTime.tolist() == [T0 + pd.Timedelta(seconds=10)] and row.Duration.tolist() == [1490]
+    # Its end is open again in the state, until the next one
+    assert (state.EventId == event).sum() == (0 if event == 174 else 1)
+
+
+def test_an_alarm_with_two_bits_is_carried_once_and_gives_both_rows(tmp_path):
+    rows, state = timeline_runs(tmp_path, events([(10, 'A', 174, 16 + 32), (20, 'A', 82, 5)]), events([(1500, 'A', 174, 0), (1510, 'A', 82, 5)]))
+    assert sorted(rows[rows.EventClass.isin(['MMU Flash', 'Local Flash'])].Duration) == [1490, 1490]
+
+
+def test_a_flash_older_than_max_days_old_still_gets_its_row(tmp_path):
+    rows, _ = timeline_runs(tmp_path, events([(10, 'A', 173, 6), (20, 'A', 82, 5)]), events([(5 * 86400, 'A', 173, 2), (5 * 86400 + 10, 'A', 82, 5)]), max_days_old=2)
+    assert rows[rows.EventClass == 'Flash - MMU'].Duration.tolist() == pytest.approx([5 * 86400 - 10])
+
+
+def test_one_big_run_still_ends_the_last_alarm_at_the_cushion():
+    out = run(events([(10, 'A', 173, 3), (20, 'A', 82, 5)]), ALARMS, tables=['timeline'])['timeline']
+    assert out[out.EventClass == 'Flash - Automatic'].Duration.tolist() == [60]
+
+
+def test_an_instant_event_is_not_invalid_for_a_bin_its_cushion_reaches(tmp_path):
+    late = 890  # 10 s before the bin ends, and 60 s of cushion
+    first = events([(10, 'A', 82, 5), (late, 'A', 131, 3)])
+    second = events([(900, 'A', 82, 5)])
+    rows, _ = timeline_runs(tmp_path, first, second)
+    big = run(pd.concat([first, second]), ALARMS, tables=['timeline'])['timeline']
+    for frame in (rows, big):
+        assert frame[frame.EventClass == 'Pattern Change'].IsValid.tolist() == [True]

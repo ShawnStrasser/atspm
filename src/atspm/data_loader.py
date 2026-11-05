@@ -247,6 +247,8 @@ def load_data(conn,
                 where_clause = f" WHERE {timestamp_filter} > TIMESTAMP '{min_timestamp}' - INTERVAL '{max_days_old} days'"
 
                 if key == 'df_or_path':
+                    # An alarm or flash state holds until the device's next one, and that can be any time later
+                    where_clause += f" OR {_build_column_expression(column_map, 'EventId', use_alias=False)} IN (173, 174, 175)"
                     parameter_select = _build_column_expression(column_map, 'Parameter')
                     # Check if IsValid column exists (for incremental processing with has_data validity tracking)
                     has_isvalid = 'isvalid' in [c.lower() for c in source_columns]

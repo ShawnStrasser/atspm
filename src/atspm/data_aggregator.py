@@ -43,8 +43,9 @@ def aggregate_data(conn, aggregation_name, to_sql, **kwargs):
         # Include 902 (Phase Wait pending) - this is how we track 43s that need Phase Wait matching
         # across chunks without interfering with PhaseCall matching of the same 43
         # Include IsValid column: TRUE by default, will be updated by signal_data_processor if has_data exists
+        # DISTINCT: one 174 event is a row per alarm bit in timeline
         query += f""" CREATE TABLE unmatched_events AS
-            SELECT 
+            SELECT DISTINCT
                 StartTime AS TimeStamp, 
                 DeviceId, 
                 EventId, 
