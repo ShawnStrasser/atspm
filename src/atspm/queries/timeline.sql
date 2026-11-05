@@ -471,8 +471,22 @@ AlarmStatus AS
 	       TRUE AS IsValid
 	FROM AlarmStatus1
 	),
+{% if incremental_run and not live -%}
+-- An alarm or flash still open at the end of a run gets a row now, 60 seconds long with EventValue 0, once. The row with its true
+-- length (EventValue NULL) comes when the next alarm event arrives. Both have the same DeviceId, EventClass and StartTime.
+-- EventId + 1000 marks it, down to the end of this query. 173 Parameter 2 is the healthy state, not an alarm.
+AlarmPrompt AS
+	(
+	SELECT a.TimeStamp, a.DeviceID, a.EventId + 1000 AS EventId, a.Parameter, a.TimeStamp + INTERVAL 60 SECOND AS EndTime, TRUE AS IsValid
+	FROM AlarmStatus1 a
+	WHERE a.EndTime IS NULL AND a.EventId IN (173, 174) AND NOT (a.EventId = 173 AND a.Parameter = 2)
+	{%- if unmatched %}
+	  AND NOT EXISTS (SELECT 1 FROM unmatched_previous u WHERE u.DeviceId = a.DeviceID AND u.EventId = a.EventId AND u.TimeStamp = a.TimeStamp AND u.Parameter = a.Parameter)
+	{%- endif %}
+	),
+{% endif -%}
 alarm_definitions AS (
-  SELECT * FROM (VALUES
+  WITH d AS (SELECT * FROM (VALUES
     (174, 0, 'Cycle Fault', 1, 'bitmap'),
     (174, 1, 'Coord Fault', 2, 'bitmap'),
     (174, 2, 'Coord Fail', 4, 'bitmap'),
@@ -487,7 +501,8 @@ alarm_definitions AS (
     (173, 6, 'Flash - MMU', 6, 'enum'),
     (173, 7, 'Flash - Startup', 7, 'enum'),
     (173, 8, 'Flash - Preempt', 8, 'enum')
-  ) AS t(event_id, bit_position, alarm_type, bit_mask, alarm_class)
+  ) AS t(event_id, bit_position, alarm_type, bit_mask, alarm_class))
+  SELECT * FROM d UNION ALL SELECT event_id + 1000, bit_position, alarm_type, bit_mask, alarm_class FROM d
 ),
 categories AS (
   SELECT * FROM (VALUES
@@ -567,7 +582,7 @@ FROM (
     END AS EventClass,
     (CASE
       WHEN t.EventId = 175 THEN t.Parameter
-      WHEN a.alarm_type IS NOT NULL THEN NULL
+      WHEN a.alarm_type IS NOT NULL THEN CASE WHEN t.EventId > 1000 THEN 0 END
       WHEN c.EventClass = 'Split' THEN t.Parameter
       WHEN c.EventClass IN ('Ped Service', 'FYA', 'Phase Call', 'Preempt', 'TSP Call', 'TSP Checkin', 
                             'TSP Adjustment', 'TSP Service', 'TSP Detector', 'Overlap Ped', 
@@ -674,6 +689,10 @@ FROM (
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM PedDetectorFailed
     UNION ALL
     SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM AlarmStatus
+    {%- if incremental_run and not live %}
+    UNION ALL
+    SELECT TimeStamp, DeviceID, EventID, Parameter, EndTime, IsValid FROM AlarmPrompt
+    {%- endif %}
   ) u
   ASOF LEFT JOIN InvalidWindow cu ON u.DeviceID = cu.DeviceID AND u.EndTime > cu.StartTime
   ) t

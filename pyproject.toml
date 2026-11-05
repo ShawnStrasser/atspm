@@ -32,3 +32,4 @@ dependencies = [
 
 [project.optional-dependencies]
 detector-health = ["atspm-detector>=2.0.0"]
+dev = ["pytest>=9.2", "pytest-xdist>=3.8"]

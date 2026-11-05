@@ -482,7 +482,7 @@ def test_a_lane_stuck_on_past_max_days_old_stays_on_while_its_device_logs():
 
 def test_remove_incomplete_drops_a_bin_with_no_data_across_runs():
     """A green across a bin with no events, on a signal that logs each minute: has_data has no row for it."""
-    minutes = [row for t in (*range(-BIN, BIN, 60), *range(2 * BIN + 60, 3 * BIN, 60)) for row in end_at(t)]
+    minutes = [row for t in (*range(-4 * BIN, BIN, 60), *range(2 * BIN + 60, 3 * BIN, 60)) for row in end_at(t)]
     events = frame(*car(-9, -8), at(0, 1, PHASE), *car(10, 11), at(2 * BIN + 30, 10, PHASE), *minutes, *end_at(3 * BIN + 20))
     outputs = cut_runs(events, [BIN, 2 * BIN, 3 * BIN], aggregations=[HAS_DATA, GAPS], remove_incomplete=True)
     table = written(outputs)

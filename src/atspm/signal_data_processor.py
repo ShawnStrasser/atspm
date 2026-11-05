@@ -93,6 +93,8 @@ def _check_names(settings):
         unknown = [] if known is None else sorted(set(agg.get('params', {})) - known)
         if unknown:
             raise ValueError(f"{agg['name']}: unknown parameters {unknown}; it takes {sorted(known)}")
+        if agg['name'] == 'split_failures' and agg.get('params', {}).get('by_approach') is False:
+            raise ValueError("split_failures: by_approach=False is not supported; only by_approach=True works")
 
 
 def _state_given(name, value, first_run, verbose):

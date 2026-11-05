@@ -1,8 +1,7 @@
 """has_data, from how it should work.
 
-Score is above 0 and up to 1 for how complete a bin's events are, and no row reads as 0. Each phase logs its states in a fixed order,
-so a skipped state proves events were lost. A stream silent for over 4 times its usual longest gap has stopped, and what it was logging
-counts as missing. A quiet bin with no evidence of either reads 1. remove_incomplete keeps a bin at Score 0.5 or more.
+Score is the share of a bin's time not inside an unexpected gap with no events at all, above 0 and up to 1, and no row reads as 0. Only all
+events together count. A gap is a run of minutes with no event, unexpected over 4 times the signal's recent longest gap. remove_incomplete keeps a bin at Score 0.5 or more.
 """
 import pandas as pd
 import pytest
@@ -95,18 +94,39 @@ def test_a_quiet_signal_with_no_history_reads_1():
     assert scores(process(events)) == {0: 1, 15: 1, 30: 1, 45: 1}
 
 
-def test_a_skipped_state_proves_a_loss():
-    events = cycles(0, 60)
+def test_only_time_in_a_gap_with_no_events_lowers_the_score():
+    # Detectors and calls gone, or a state skipped: other events keep coming, so nothing is lost
+    events = cycles(0, 120)
+    in_hour = events.TimeStamp >= T0 + pd.Timedelta(minutes=60)
+    no_detectors = events[~(in_hour & events.EventId.isin([43, 44, 81, 82]))].reset_index(drop=True)
+    assert set(scores(process(no_detectors)).values()) == {1}
     skip = (events.EventId == 8) & (events.TimeStamp == T0 + pd.Timedelta(minutes=20, seconds=25))
-    s = scores(process(events[~skip].reset_index(drop=True)))
-    assert 0.95 < s[15] < 1
-    assert s[0] == 1 and s[30] == 1
+    assert set(scores(process(events[~skip].reset_index(drop=True))).values()) == {1}
 
 
-def test_only_lost_phase_events_on_a_new_phase_are_not_judged():
-    # A phase that never logs a red clearance is not expected to
-    events = cycles(0, 60)
-    assert scores(process(events[events.EventId != 9].reset_index(drop=True))) == {0: 1, 15: 1, 30: 1, 45: 1}
+def test_score_is_time_not_counts():
+    # Half the events gone evenly leaves no gap; a block gone is a gap, scored by its time
+    events = cycles(0, 120)
+    thinned = events[~((events.TimeStamp >= T0 + pd.Timedelta(minutes=60)) & (events.TimeStamp < T0 + pd.Timedelta(minutes=75))
+                       & (events.EventId.isin([82, 9, 10, 11])))]
+    assert scores(process(thinned.reset_index(drop=True)))[60] == 1
+    assert scores(process(without(events, 60, 67)))[60] == pytest.approx(8 / 15, abs=0.03)
+
+
+def test_a_gap_in_the_signals_usual_pattern_reads_1():
+    # One burst every 10 minutes all along: its 10 minute gaps are its pattern
+    rows = [(T0 + pd.Timedelta(minutes=m, seconds=s), 'A', 1, 2) for m in range(0, 180, 10) for s in (0, 5, 10)]
+    events = pd.DataFrame(rows, columns=['TimeStamp', 'DeviceId', 'EventId', 'Parameter'])
+    assert set(scores(process(events)).values()) == {1}
+
+
+def test_flash_memory_is_cleared_across_runs(tmp_path):
+    events = without(cycles(0, 120), 60, 90)
+    flash = pd.DataFrame([(T0 + pd.Timedelta(minutes=60), 'A', 173, 1), (T0 + pd.Timedelta(minutes=60, seconds=1), 'A', 43, 2)], columns=events.columns)
+    events = pd.concat([events, flash]).sort_values('TimeStamp').reset_index(drop=True)
+    outs, _ = cut_runs(events, [T0 + pd.Timedelta(minutes=c) for c in range(15, 120, 15)], tmp_path)
+    s = {(r.TimeStamp - T0) / pd.Timedelta(minutes=1): r.Score for o in outs for r in o['has_data'].itertuples()}
+    assert s[60] == 1 and s[75] == 1
 
 
 def test_a_signal_in_flash_is_silent_without_loss():

@@ -319,7 +319,7 @@ def test_time_of_day_threshold(case):
 def test_interval_touching_silence_edges_stays_valid():
     """Intervals that end at the last event before a silence, or start at the first event after it, do not
     span it."""
-    start, end = _ts("10:00:00"), _ts("10:10:00")
+    start, end = _ts("10:00:00"), _ts("10:07:00")  # 8 of the bin's 15 minutes have events: its Score stays over 0.5
     raw = _build_raw_df(
         [(t, 1, 82, 5) for t in pd.date_range(start - pd.Timedelta(minutes=5), start, freq="10s")]
         + [(t, 1, 82, 5) for t in pd.date_range(end, end + pd.Timedelta(minutes=5), freq="10s")]

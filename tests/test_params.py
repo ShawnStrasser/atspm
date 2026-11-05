@@ -275,7 +275,8 @@ def test_an_alarm_carries_across_a_cut(tmp_path, event, parameter, event_class):
     first = events([(10, 'A', event, parameter), (20, 'A', 82, 5)])
     second = events([(1000, 'A', 82, 5), (1500, 'A', event, close), (1510, 'A', 82, 5)])
     rows, state = timeline_runs(tmp_path, first, second)
-    row = rows[rows.EventClass == event_class]
+    assert rows[(rows.EventClass == event_class) & (rows.EventValue == 0)].Duration.tolist() == ([] if event == 175 else [60])  # reported at once, then in full
+    row = rows[(rows.EventClass == event_class) & (rows.EventValue.isna() | (event == 175))]
     assert row.StartTime.tolist() == [T0 + pd.Timedelta(seconds=10)] and row.Duration.tolist() == [1490]
     # Its end is open again in the state, until the next one
     assert (state.EventId == event).sum() == (0 if event == 174 else 1)
@@ -283,12 +284,12 @@ def test_an_alarm_carries_across_a_cut(tmp_path, event, parameter, event_class):
 
 def test_an_alarm_with_two_bits_is_carried_once_and_gives_both_rows(tmp_path):
     rows, state = timeline_runs(tmp_path, events([(10, 'A', 174, 16 + 32), (20, 'A', 82, 5)]), events([(1500, 'A', 174, 0), (1510, 'A', 82, 5)]))
-    assert sorted(rows[rows.EventClass.isin(['MMU Flash', 'Local Flash'])].Duration) == [1490, 1490]
+    assert sorted(rows[rows.EventClass.isin(['MMU Flash', 'Local Flash']) & rows.EventValue.isna()].Duration) == [1490, 1490]
 
 
 def test_a_flash_older_than_max_days_old_still_gets_its_row(tmp_path):
     rows, _ = timeline_runs(tmp_path, events([(10, 'A', 173, 6), (20, 'A', 82, 5)]), events([(5 * 86400, 'A', 173, 2), (5 * 86400 + 10, 'A', 82, 5)]), max_days_old=2)
-    assert rows[rows.EventClass == 'Flash - MMU'].Duration.tolist() == pytest.approx([5 * 86400 - 10])
+    assert rows[(rows.EventClass == 'Flash - MMU') & rows.EventValue.isna()].Duration.tolist() == pytest.approx([5 * 86400 - 10])
 
 
 def test_one_big_run_still_ends_the_last_alarm_at_the_cushion():

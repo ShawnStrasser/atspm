@@ -355,6 +355,7 @@ def test_remove_incomplete_keeps_a_bin_written_after_its_run(return_volumes):
 def test_remove_incomplete_leaves_out_a_bin_with_no_data():
     # A signal logging each minute, then nothing from 01:15 to 02:00
     minutes = [events_at(at(hour, minute)) for hour in (1, 2) for minute in range(15)]
+    minutes += [events_at(at(0, minute), event=82, parameter=1) for minute in range(15, 60)]  # has_data's history: 3 bins before
     events = pd.concat([*minutes, end_marker(at(1, 14, 59)), end_marker(at(2, 14, 59.9))])
     out = process(events, [HAS_DATA, {'name': 'ped', 'params': {}}], remove_incomplete=True)['ped']
     assert sorted(out.query("DeviceId == 'A'").TimeStamp) == [at(1), at(2)]

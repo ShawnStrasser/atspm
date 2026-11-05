@@ -24,7 +24,7 @@ TEST_PARAMS = {
   'raw_data': duckdb.query("select * from 'tests/hires_test_data.parquet'").df(),
   'detector_config': duckdb.query("select * from 'tests/configs_test_data.parquet'").df(),
   'bin_size': 15,
-  'output_dir': 'tests/test_output',
+  'output_dir': f"tests/test_output{os.environ.get('PYTEST_XDIST_WORKER', '')}",
   'output_to_separate_folders': False,
   'output_format': 'parquet',
   'output_file_prefix': 'test_',
@@ -95,20 +95,6 @@ def compare_phase_wait_across_runs(combined, expected):
   assert off.max() <= 1 and (off > 0).sum() <= 16
 
 
-def without_score(df, agg_name='has_data'):
-  """tests/precalculated/has_data.parquet holds no Score. Its bins are unchanged, and the Score column waits for a ruling on that file."""
-  return df.drop(columns='Score') if agg_name == 'has_data' else df
-
-
-def expected_split_failures(precalc_df):
-  """The file holds Cycles 5 for device 454 phase 8 at 16:30. Now a cycle is done at its first red barrier it counts 6, and
-  that one value waits for a ruling on tests/precalculated/split_failures.parquet."""
-  df = precalc_df.copy()
-  row = (df.TimeStamp == pd.Timestamp('2024-05-13 16:30:00')) & (df.DeviceId == 454) & (df.Phase == 8)
-  assert df.loc[row, 'Cycles'].tolist() == [5]
-  df.loc[row, 'Cycles'] = 6
-  return df
-
 def compare_dataframes_with_tolerance(df1, df2, tolerance):
   """
   Compare two dataframes, ignoring row order, applying rounding to specific columns,
@@ -150,10 +136,8 @@ def test_aggregation(processor_output, aggregation):
 
   output_df = pd.read_parquet(output_file)
   precalc_df = pd.read_parquet(precalc_file)
-  if agg_name == 'split_failures':
-    precalc_df = expected_split_failures(precalc_df)
 
-  compare_dataframes(without_score(output_df, agg_name), precalc_df)
+  compare_dataframes(output_df, precalc_df)
 
 def test_all_files_generated():
   """Test that all expected files are generated"""
@@ -186,7 +170,7 @@ def test_context_manager():
   assert os.path.exists(precalc_file), f"Precalculated file {precalc_file} not found"
   precalc_df = pd.read_parquet(precalc_file)
   
-  compare_dataframes(without_score(result_df), precalc_df)
+  compare_dataframes(result_df, precalc_df)
 
 @pytest.fixture(scope="module")
 def incremental_processor_output():
@@ -208,7 +192,7 @@ def incremental_processor_output():
       '12_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 17:45:00' and timestamp < '2024-05-13 18:00:00'").df(),
   }
 
-  output_dir = 'tests/test_incremental_output'
+  output_dir = f"tests/test_incremental_output{os.environ.get('PYTEST_XDIST_WORKER', '')}"
   os.makedirs(output_dir, exist_ok=True)
 
   for i, chunk in chunks.items():
@@ -248,8 +232,6 @@ def test_incremental_aggregation(incremental_processor_output, aggregation):
   combined_df = pd.concat(incremental_dfs).drop_duplicates().reset_index(drop=True)
   
   precalc_df = pd.read_parquet(precalc_file)
-  if agg_name == 'split_failures':
-    precalc_df = expected_split_failures(precalc_df)
 
   # timeline has known edge cases where invalid signal state events span chunk boundaries
   # Phase Wait events processed before the invalid state is known may have IsValid differences
@@ -259,7 +241,7 @@ def test_incremental_aggregation(incremental_processor_output, aggregation):
   elif agg_name == 'phase_wait':
     compare_phase_wait_across_runs(combined_df, precalc_df)
   else:
-    compare_dataframes(without_score(combined_df, agg_name), precalc_df)
+    compare_dataframes(combined_df, precalc_df)
 
 # REPLICATING ODOT'S PRODUCTION ENVIRONMENT
 @pytest.fixture(scope="module")
@@ -326,12 +308,12 @@ def incremental_processor_output_with_dataframes():
     
 
     # Write unmatched dataframes to disk as csv
-    unmatched_df.to_csv('unmatched_df_temp.csv')
-    sf_unmatched_df.to_csv('sf_unmatched_df_temp.csv')
+    unmatched_df.to_csv(f"unmatched_df_temp{os.environ.get('PYTEST_XDIST_WORKER', '')}.csv")
+    sf_unmatched_df.to_csv(f"sf_unmatched_df_temp{os.environ.get('PYTEST_XDIST_WORKER', '')}.csv")
 
     # Read unmatched dataframes back from disk
-    unmatched_df = pd.read_csv('unmatched_df_temp.csv')
-    sf_unmatched_df = pd.read_csv('sf_unmatched_df_temp.csv')
+    unmatched_df = pd.read_csv(f"unmatched_df_temp{os.environ.get('PYTEST_XDIST_WORKER', '')}.csv")
+    sf_unmatched_df = pd.read_csv(f"sf_unmatched_df_temp{os.environ.get('PYTEST_XDIST_WORKER', '')}.csv")
 
   return results
 
@@ -393,8 +375,6 @@ def test_incremental_aggregation_with_dataframes(incremental_processor_output_wi
 
   combined_df = pd.concat(incremental_results).drop_duplicates().reset_index(drop=True)
   precalc_df = pd.read_parquet(precalc_file)
-  if agg_name == 'split_failures':
-    precalc_df = expected_split_failures(precalc_df)
 
   # timeline has known edge cases where invalid signal state events span chunk boundaries
   # Phase Wait events processed before the invalid state is known may have IsValid differences
@@ -404,7 +384,7 @@ def test_incremental_aggregation_with_dataframes(incremental_processor_output_wi
   elif agg_name == 'phase_wait':
     compare_phase_wait_across_runs(combined_df, precalc_df)
   else:
-    compare_dataframes(without_score(combined_df, agg_name), precalc_df)
+    compare_dataframes(combined_df, precalc_df)
 
 def test_oneshot_actuations_with_fill_in_missing(oneshot_processor_output_with_fill_in_missing):
   """Test actuations with fill_in_missing in oneshot mode"""

@@ -142,7 +142,7 @@ params = {
                 'red_time': 5,              # Min red time to consider a split failure
                 'red_occupancy_threshold': 0.80,
                 'green_occupancy_threshold': 0.80,
-                'by_approach': True         # Aggregate by approach instead of detector
+                'by_approach': True         # Must be True: by_approach=False raises
             }
         },
         {
@@ -230,7 +230,7 @@ The data produced by `atspm` can be visualized using Power BI, Plotly, or other 
 
 All of the following tables include a `TimeStamp` column aligned to the start of each aggregation bin (for example, 15 minutes):
 
-- **Has Data** (`has_data`): Scores how complete each controller's events are in each bin, from what the events themselves prove was lost. Also used to filter incomplete periods for other measures.
+- **Has Data** (`has_data`): Scores each bin by the share of its minutes not inside an unexpected gap with no events at all. Also used to filter incomplete periods for other measures.
 - **Actuations** (`actuations`): Detector actuations per detector and interval (with optional zero-filling of missing intervals).
 - **Arrival on Green** (`arrival_on_green`): Percentage of vehicles reaching the stop bar during green by phase, with each advance detector actuation projected to the stop bar. See [Arrival on Green](#arrival-on-green).
 - **Platoon Ratio** (`platoon_ratio`): HCM platoon ratio by phase and interval, `Rp = Percent_AOG / (g/C)`, with the green ratio estimated from phase green time within each bin and the HCM arrival type (1–6). Unlike arrival on green, it is comparable across phases with different splits. Requires `arrival_on_green`.
@@ -436,6 +436,8 @@ Clock Update events have no reliable size, since the controller's time correctio
 
 With `controller_type='siemens'`, the timeline also handles the hourly log restart. Siemens controllers stop logging at the top of each hour and resume a few seconds later with `EventId` 1000 and a snapshot of the current state stamped with the restart time, so an interval running across the hour has its true start or end lost. Any interval overlapping the window from the device's last event before the restart (no earlier than the top of the hour) through the restart itself is marked invalid. Event 1000 is vendor-specific, so this only applies when the controller type is set.
 
+**Alarms and flash across runs.** With a main unmatched file, an alarm or flash (173, 174, not `Flash - Not Flash`) still open at the end of a run is written at once with a 60-second `Duration` and `EventValue` 0. When the next alarm event arrives the final row is written with the true length and `EventValue` NULL. Both have the same `DeviceId`, `EventClass` and `StartTime`, and one that ends in the run it began has only the final row. So count alarms as distinct `DeviceId`, `EventClass`, `StartTime`, and for durations use `EventValue` NULL, or the longest row of each.
+
 Passing `maxtime=True` to the `timeline` aggregation adds MAXTIME-only events such as splits and alarm group events (Event 175).
 Passing `live=True` keeps incomplete timeline events (normally dropped), marks them `IsValid=False`, and assigns a common `EndTime` at the current bin boundary. This is useful for near-real-time dashboards.
 
@@ -623,14 +625,12 @@ Written by `detector_health` when its `findings` param is True (default False), 
 *   `Detail` (TEXT): The evidence.
 
 #### has_data
-At most one row per signal and bin. No row reads as Score 0, so a lost bin has none. A bin with no evidence of loss reads 1, however quiet it was.
+At most one row per signal and bin. No row reads as Score 0, so a lost bin has none.
 *   `TimeStamp` (DATETIME): Bin start time.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
-*   `Score` (FLOAT): Above 0 and up to 1. The smaller of two shares:
-    *   Order: each phase logs green, yellow and red in a fixed order, so a step that skips a state it has logged today proves those events were lost. Phase events seen / (seen + proved missing).
-    *   Stops: all events, phase calls (43, 44) and detector events (82) are three streams. One silent for over 4 times its usual longest gap (the median of the longest gap in each of its last 4 bins with events) has stopped, and what it was logging counts as missing. All events seen / (seen + stopped missing).
+*   `Score` (FLOAT): Above 0 and up to 1. 1 - minutes of the bin in an unexpected gap / minutes of the bin. Half a bin in such a gap reads 0.5. It measures time in gaps, not counts.
 
-It reads `EventId` 218 and below. A flash status (173 with `Parameter` other than 2) ends order checks across it and clears what the streams remember, as a signal in flash can be silent. `remove_incomplete`, `timeline`'s `IsValid` and `coordination_agg` read a bin as having data at Score 0.5 or more.
+It reads all events together, `EventId` 218 and below: a quiet detector or a lack of calls is not data loss while anything else is logged. A gap is a run of clock minutes with no event at all. It is unexpected when it runs over 4 times the signal's own recent longest gap, the longest in its last 4 bins with events, and over 2 minutes, so a quiet night reads 1. Nothing is judged until 4 bins with events are remembered. A flash status (173 with `Parameter` other than 2) clears that memory, as a signal in flash can be silent. `remove_incomplete`, `timeline`'s `IsValid` and `coordination_agg` read a bin as having data at Score 0.5 or more.
 
 With a main unmatched file a bin is written by the first run whose data reaches its end, so a run cut anywhere gives the same rows, written once. A run with no such file writes all it has. A signal is known from its first event until it has logged nothing for `max_days_old`.
 
@@ -671,7 +671,6 @@ To roll the average up over a longer period, weight it: `SUM(AvgPhaseWait * Samp
 #### split_failures
 *   `TimeStamp` (DATETIME): Bin start time.
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
-*   `Detector` (INT16): Detector number (if `by_approach=False`).
 *   `Phase` (INT16): Phase number.
 *   `Green_Time` (FLOAT): Average green time, in seconds per cycle.
 *   `Green_Occupancy` (FLOAT): Average green occupancy (0.0 - 1.0).
@@ -771,12 +770,11 @@ Rows with `EventId` 927 to 959 are state carried between runs, not controller ev
 | 959 | `approach_delay` | A detector on at the end of the data, one holding the flag, when a flag began, or the on of a vehicle under the flag not at every stop bar of its detector yet | Detector, detector + 1000, + 2000 or + 3000 |
 | 960, 961, 962 | `arrival_pattern` | Green, yellow and red clearance begins of a cycle not finished writing | Phase |
 | 963 | `arrival_pattern` | A vehicle of a cycle not finished writing, or one that may arrive after a first green still to come, at its arrival at the stop bar | Phase |
-| 970, 971, 972 | `has_data` | The last event of all events, phase calls and detector events | Events in the stream's last bin that was not half quiet |
+| 970 | `has_data` | The signal's last event | 0 |
 | 974 | `has_data` | The first bin not written, one per signal | 0 |
-| 979 | `has_data` | Each phase's last event | Phase * 512 + states seen today * 8 + position (7 = do not judge) |
-| 980 to 982, 984 to 990, 992, 994 to 996 | `has_data` | Counts of a bin part way through, stamped with that bin | The count |
+| 984, 993 | `has_data` | A bin part way through, stamped with that bin | Longest gap so far, minutes; minutes in unexpected gaps so far |
 | 991 | `has_data` | A flash status in a bin part way through | 0 |
-| 997, 998, 999 | `has_data` | The stream's last 4 finished bins with events | Longest gap, seconds |
+| 997 | `has_data` | The last 4 finished bins with events | Longest gap, minutes, or -1 for a flash status |
 
 ## Release Notes
 
