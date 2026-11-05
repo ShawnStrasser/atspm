@@ -1,5 +1,4 @@
 """The detector_health aggregation on atspm-detector's health: its parameters, one run, what save() writes, and that nothing else changes."""
-import builtins
 import os
 import re
 
@@ -9,7 +8,7 @@ import pytest
 
 from src.atspm import SignalDataProcessor
 
-H = pytest.importorskip('atspm_detector.incremental', exc_type=ImportError)
+from atspm_detector import incremental as H
 from atspm_detector import health
 from atspm_detector.bins import bins
 
@@ -201,18 +200,6 @@ def test_a6_bad_parameters(params, message):
 def test_a6_replaced_parameters_name_the_replacement(old, replacement):
   with pytest.raises(ValueError, match=f'{old} is gone.*{replacement}'):
     SignalDataProcessor(raw_data=RAW, aggregations=[{'name': 'detector_health', 'params': {old: 'x'}}])
-
-
-def test_a6_missing_extra_names_it(monkeypatch):
-  real_import = builtins.__import__
-
-  def no_package(name, *args, **kwargs):
-    if name.startswith('atspm_detector'):
-      raise ModuleNotFoundError(name)
-    return real_import(name, *args, **kwargs)
-  monkeypatch.setattr(builtins, '__import__', no_package)
-  with pytest.raises(ImportError, match=r'atspm\[detector-health\]'):
-    _run(_chunks(15)[0], _params())
 
 
 def test_to_sql_is_not_supported():

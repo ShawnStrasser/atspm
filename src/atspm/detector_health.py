@@ -57,11 +57,7 @@ def detector_health_params(params):
 
 
 def _load_package():
-    try:
-        from atspm_detector import incremental
-    except ImportError as e:
-        raise ImportError("detector_health needs atspm-detector with incremental health: "
-                          "pip install atspm[detector-health]") from e
+    from atspm_detector import incremental
     return incremental
 
 
@@ -180,11 +176,7 @@ def _run_live(conn, params, bin_size, device_type):
     """A run with state as tables: detector_health, health_state, health_rows, and detector_health_findings at a whole-day check when asked."""
     if bin_size != 15:
         raise ValueError(f"detector_health with a state writes 15-minute bins; this run has bin_size {bin_size}")
-    try:
-        from atspm_detector import live
-    except ImportError as e:
-        raise ImportError("detector_health needs atspm-detector with incremental health: "
-                          "pip install atspm[detector-health]") from e
+    from atspm_detector import live
     found, checked = None, None
     if conn.execute("SELECT count(*) FROM raw_data").fetchall()[0][0] == 0:     # the state stays as it is, and the run writes no rows
         live.empty_run(conn, params['state'])

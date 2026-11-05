@@ -58,12 +58,7 @@ Or pinned to a specific version:
 ```bash
 pip install atspm==3.x.x
 ```
-`atspm` works on Python 3.11-3.15 with DuckDB 2 and is tested on Ubuntu, Windows, and MacOS.
-
-The `detector_health` aggregation needs one more package, on Python 3.11-3.14:
-```bash
-pip install atspm[detector-health]
-```
+`atspm` works on Python 3.11-3.14 with DuckDB 2 and is tested on Ubuntu, Windows, and MacOS. It installs `atspm-detector`, which the `detector_health` aggregation uses.
 
 ## Quick Start
 
@@ -245,7 +240,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Pedestrian** (`ped`): Pedestrian services, push-button presses, unique presses and estimated pedestrian volumes, all in one row per phase and interval. `return_volumes=False` (default True) leaves out `Estimated_Volumes` and the rows of quiet bins. A press is a unique actuation if it comes more than `seconds_between_actuations` (default 15) after the previous press on that input, or if no earlier press is known. See [Pedestrian counts and volumes](#pedestrian-counts-and-volumes).
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
 - **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). A wait is left out when the device logged no call on any phase during it or in the 15 minutes before it ended, since the call state is then unknown. For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
-- **Detector Health** (`detector_health`): How much of each `bin_size` interval each vehicle detector and ped button was failing, and with what problem, from `atspm-detector`. Needs `pip install atspm[detector-health]`. See [Detector health](#detector-health).
+- **Detector Health** (`detector_health`): How much of each `bin_size` interval each vehicle detector and ped button was failing, and with what problem, from `atspm-detector`. See [Detector health](#detector-health).
 
 ### Arrival on Green
 
@@ -382,7 +377,7 @@ The spring change skips an hour and repeats none, so nothing is needed then. `to
 
 ### Detector health
 
-`detector_health` runs `atspm-detector`'s checks for vehicle detectors (stuck on, silent, counts falling, too-fast actuations and so on) and ped buttons (stuck on, machine-regular presses, a sudden stop and so on) in one pass over `raw_data`. It needs no other aggregation. Install it with `pip install atspm[detector-health]`.
+`detector_health` runs `atspm-detector`'s checks for vehicle detectors (stuck on, silent, counts falling, too-fast actuations and so on) and ped buttons (stuck on, machine-regular presses, a sudden stop and so on) in one pass over `raw_data`. It needs no other aggregation.
 
 ```python
 {'name': 'detector_health', 'params': {

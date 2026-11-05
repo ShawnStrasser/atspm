@@ -8,7 +8,7 @@ import pytest
 
 from src.atspm import SignalDataProcessor
 
-H = pytest.importorskip('atspm_detector.incremental', exc_type=ImportError)
+from atspm_detector import incremental as H
 
 COLUMNS = ['TimeStamp', 'DeviceId', 'DetectorType', 'Detector', 'Label', 'Score']
 KEY = ['TimeStamp', 'DeviceId', 'DetectorType', 'Detector', 'Label']
