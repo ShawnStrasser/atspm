@@ -183,11 +183,29 @@ def test_each_run_writes_only_new_bins_and_past_rows_never_change(tmp_path):
     assert later['TimeStamp'].max() > earlier['TimeStamp'].max()
 
 
-def test_a_second_run_of_the_same_events_writes_nothing_new(tmp_path):
+@pytest.mark.parametrize('judge', ['hourly', 'every_run'])
+def test_a_retry_writes_the_same_rows_again(tmp_path, judge):
+  # The first try's files never got out, and the store had moved on already
   store = str(tmp_path / 's.duckdb')
-  first = _run(RAW, _params(store=store, judge='hourly'))['detector_health']
-  again = _run(RAW, _params(store=store, judge='hourly'))
-  assert len(first) > 0 and ('detector_health' not in again or len(again['detector_health']) == 0)
+  cut = START + pd.Timedelta(hours=2)
+  before, last = RAW[RAW['TimeStamp'] < cut], RAW[RAW['TimeStamp'] >= cut]
+  _run(before, _params(store=store, judge=judge))
+  first = _run(last, _params(store=store, judge=judge))['detector_health']
+  assert len(first) > 0
+  for _ in range(2):
+    pd.testing.assert_frame_equal(_ordered(_run(last, _params(store=store, judge=judge))['detector_health']), _ordered(first), check_dtype=False)
+
+
+def test_a_retry_leaves_the_runs_after_it_as_they_were(tmp_path):
+  cut, cut2 = START + pd.Timedelta(hours=1), START + pd.Timedelta(hours=2)
+  chunks = [RAW[RAW['TimeStamp'] < cut], RAW[(RAW['TimeStamp'] >= cut) & (RAW['TimeStamp'] < cut2)], RAW[RAW['TimeStamp'] >= cut2]]
+  plain, retried = [], []
+  for frames, out, store in (([*chunks], plain, 'a.duckdb'), ([chunks[0], chunks[1], chunks[1], chunks[2]], retried, 'b.duckdb')):
+    for chunk in frames:
+      got = _run(chunk, _params(store=str(tmp_path / store), judge='hourly')).get('detector_health')
+      out.append(pd.DataFrame(columns=COLUMNS) if got is None else got)
+  pd.testing.assert_frame_equal(_ordered(retried[2]), _ordered(plain[1]), check_dtype=False)
+  pd.testing.assert_frame_equal(_ordered(retried[3]), _ordered(plain[2]), check_dtype=False)
 
 
 # ---- a stuck ON outlives the window

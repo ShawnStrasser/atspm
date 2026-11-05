@@ -213,6 +213,25 @@ def _output_tables(params, bins=None, findings=None):
         yield 'detector_health_findings', FINDINGS, findings
 
 
+def _keep_for_a_retry(conn, params, first_event, last_event, device_type):
+    """The store moves on during aggregate(), so a retry of this run finds nothing new to write. It keeps what the last run wrote,
+    with that run's last event, and a run whose events reach back to that event writes those rows again."""
+    for name, columns, _ in _output_tables(params):
+        kept = f'{STORE}.{name}_written'
+        earlier = f'{name}_earlier'
+        again = f"FROM {kept} WHERE Run_Last BETWEEN TIMESTAMP '{first_event}' AND TIMESTAMP '{last_event}'"
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {kept} (Run_Last TIMESTAMP, {columns.format(device=device_type)})")
+        conn.execute(f"CREATE TEMP TABLE {earlier} AS SELECT * EXCLUDE (Run_Last) {again}")
+        if _has_table(conn, name):
+            conn.execute(f"DELETE FROM {kept} WHERE Run_Last NOT BETWEEN TIMESTAMP '{first_event}' AND TIMESTAMP '{last_event}'")
+            conn.execute(f"INSERT INTO {kept} SELECT TIMESTAMP '{last_event}', * FROM {name}")
+        elif conn.execute(f"SELECT count(*) FROM {earlier}").fetchall()[0][0]:
+            _write_table(conn, name, columns, None, None, device_type)
+        if _has_table(conn, name):
+            conn.execute(f"INSERT INTO {name} SELECT * FROM {earlier}")
+        conn.execute(f"DROP TABLE {earlier}")
+
+
 def _update_to(H, conn, params, upto, after):
     """Add raw_data's rows before upto (from after on: the earlier ones went in before the verdict at after)."""
     if after is None:
@@ -243,7 +262,8 @@ def run_detector_health(conn, params, verbose=1, bin_size=15):
         _attach_store(H, conn, params)
         meta = _store_meta(conn)
         bins, findings, judged, after = [], None, None, None
-        for time in _verdict_times(params['judge'], meta, *_typical_events(conn)):
+        first_event, last_event = _typical_events(conn)
+        for time in _verdict_times(params['judge'], meta, first_event, last_event):
             stats = _update_to(H, conn, params, time, after)
             _log_held_back(stats, None, verbose)
             after = time
@@ -263,6 +283,8 @@ def run_detector_health(conn, params, verbose=1, bin_size=15):
             rows = [b for b in bins if len(b)]
             for name, columns, frame in _output_tables(params, pd.concat(rows, ignore_index=True) if rows else None, findings):
                 _write_table(conn, name, columns, frame, judged, device_type)
+        if not one_shot:
+            _keep_for_a_retry(conn, params, first_event, last_event, device_type)
     finally:
         conn.execute(f"DROP TABLE IF EXISTS {DETECTORS}")
         conn.execute(f"DROP VIEW IF EXISTS {DETECTORS}_rows")
