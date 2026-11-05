@@ -38,6 +38,43 @@ DEFAULT_SECONDS_BETWEEN_ACTUATIONS = 15
 # Aggregations that keep what they have not written yet in the main unmatched file, each with its own rows.
 OWN_CARRY_AGGREGATIONS = (*ARRIVAL_CARRY_AGGREGATIONS, 'ped', 'yellow_red')
 
+# Every setting a run takes. A misspelled name would otherwise do nothing, with no message. detector_health checks its own.
+SETTINGS = {'raw_data', 'detector_config', 'bin_size', 'output_dir', 'output_to_separate_folders', 'output_format',
+            'output_file_prefix', 'remove_incomplete', 'drop_fall_back_hour', 'unmatched_event_settings', 'to_sql', 'verbose',
+            'aggregations', 'controller_type'}
+STATE_SETTINGS = {'df_or_path', 'split_fail_df_or_path', 'max_days_old'}
+AGGREGATION_PARAMS = {
+    'has_data': {'no_data_min', 'min_data_points'},
+    'actuations': {'fill_in_missing', 'known_detectors_df_or_path', 'known_detectors_max_days_old'},
+    'arrival_on_green': {'latency_offset_seconds', 'spillback_on_seconds', 'spillback_gap_seconds'},
+    'platoon_ratio': set(),
+    'yellow_red': {'latency_offset_seconds', 'min_red_offset'},
+    'split_failures': {'red_time', 'red_occupancy_threshold', 'green_occupancy_threshold', 'by_approach', 'by_cycle'},
+    'terminations': set(),
+    'splits': set(),
+    'coordination': set(),
+    'coordination_agg': set(),
+    'ped': {'seconds_between_actuations', 'return_volumes'},
+    'ped_delay': set(),
+    'phase_wait': {'preempt_recovery_seconds', 'assumed_cycle_length', 'skip_multiplier', 'tsp_skip_multiplier'},
+    'timeline': {'maxtime', 'min_duration', 'cushion_time', 'max_event_gap_seconds', 'live', 'live_transform'},
+}
+
+
+def _check_names(settings):
+    """Raises on a setting or aggregation parameter this package does not have."""
+    unknown = sorted(set(settings) - SETTINGS)
+    if unknown:
+        raise ValueError(f"Unknown settings {unknown}; it takes {sorted(SETTINGS)}")
+    unknown = sorted(set(settings.get('unmatched_event_settings') or {}) - STATE_SETTINGS)
+    if unknown:
+        raise ValueError(f"unmatched_event_settings: unknown names {unknown}; it takes {sorted(STATE_SETTINGS)}")
+    for agg in settings.get('aggregations') or []:
+        known = AGGREGATION_PARAMS.get(agg['name'])
+        unknown = [] if known is None else sorted(set(agg.get('params', {})) - known)
+        if unknown:
+            raise ValueError(f"{agg['name']}: unknown parameters {unknown}; it takes {sorted(known)}")
+
 
 def _spillback_params(params):
     """arrival_on_green params with both spillback settings, checked. A copy, leaving the caller's dict alone."""
@@ -245,13 +282,14 @@ class SignalDataProcessor:
 
     def __init__(self, **kwargs):
         """Initializes the SignalDataProcessor with the provided keyword arguments."""
+        _check_names(kwargs)
         # Optional parameters
         self.raw_data = None
         self.detector_config = None
         self.unmatched_event_settings = None # For incremental processing of timeline, split failure, arrival on green, and yellow red)
         self.unmatched_found = False
         self.sf_unmatched_found = False  # Separate flag for split_failures unmatched file
-        self.known_detectors_settings = None # For incremental processing of actuations to track detectors with zero counts
+        self.known_detectors_settings = None # Set from the actuations params, to track detectors with zero counts
         self.known_detectors_found = False
         self.incremental_run = False
         self.event_gap_schedule = None  # Set from the timeline params when timeline runs
@@ -265,21 +303,15 @@ class SignalDataProcessor:
         for key, value in kwargs.items():
             setattr(self, key, value)
 
+        # Copies: a run changes these, and the caller may hand the same dicts to its next run
+        if self.unmatched_event_settings is not None:
+            self.unmatched_event_settings = dict(self.unmatched_event_settings)
+        if hasattr(self, 'aggregations'):
+            self.aggregations = [{**agg, 'params': dict(agg.get('params', {}))} for agg in self.aggregations]
+
         # Normalize controller_type to lowercase for consistent comparison
         if hasattr(self, 'controller_type') and self.controller_type:
             self.controller_type = str(self.controller_type).lower()
-
-        # MAXTIME-specific measures that should be skipped for non-MAXTIME controllers
-        MAXTIME_MEASURES = {'splits', 'coordination'}
-        
-        # Filter out MAXTIME-specific measures if controller_type is not 'maxtime'
-        if hasattr(self, 'aggregations') and self.aggregations and self.controller_type != 'maxtime':
-            original_count = len(self.aggregations)
-            self.aggregations = [agg for agg in self.aggregations if agg['name'] not in MAXTIME_MEASURES]
-            removed_count = original_count - len(self.aggregations)
-            if removed_count > 0:
-                removed_names = [agg['name'] for agg in kwargs.get('aggregations', []) if agg['name'] in MAXTIME_MEASURES]
-                v_print(f"Skipped {removed_count} MAXTIME-specific measure(s): {removed_names}. Set controller_type='maxtime' to enable.", self.verbose)
 
         # Validate and sort aggregations by dependency order
         if hasattr(self, 'aggregations') and self.aggregations:
@@ -292,6 +324,8 @@ class SignalDataProcessor:
         if self.remove_incomplete:
             # raise error if 'has_data' aggregation is not in aggregations
             assert any(d['name'] == 'has_data' for d in self.aggregations), "Remove_incomplete requires 'has_data' aggregation!"
+            # Every other aggregation is then joined to it, wherever it was listed
+            self.aggregations.sort(key=lambda agg: agg['name'] != 'has_data')
             # extract has_data parameters
             no_data_min = next(x['params']['no_data_min'] for x in self.aggregations if x['name'] == 'has_data')
             assert self.bin_size % no_data_min == 0, "bin_size / no_data_min must be a whole number"
@@ -356,25 +390,6 @@ class SignalDataProcessor:
                         v_print(f"Warning, df_or_path file is None or empty. This is expected only for the first run.", self.verbose)
                         self.known_detectors_found = False
                     break
-
-        # Check format of known_detectors_settings (for backward compatibility)
-        # Similar to unmatched_event_settings
-        if self.known_detectors_settings is not None and not hasattr(self, 'known_detectors_found'):
-            if not self.incremental_run:
-                self.incremental_run = True
-            self.known_detectors_found = True
-            for key, value in self.known_detectors_settings.items():
-                if key == 'max_days_old':
-                    continue
-                if isinstance(value, str):
-                    if os.path.exists(value) and value != '':
-                        self.known_detectors_settings[key] = f"'{value}'"
-                    else:
-                        v_print(f"Warning, {key} file '{value}' does not exist or is blank. This is expected only for the first run.", self.verbose)
-                        self.known_detectors_found = False
-                elif value is None:
-                    v_print(f"Warning, {key} file is None. This is expected only for the first run.", self.verbose)
-                    self.known_detectors_found = False
 
         # Check the detector_health parameters now rather than after the other aggregations have run. A copy leaves
         # the caller's list and dicts untouched.

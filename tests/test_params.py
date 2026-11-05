@@ -1,0 +1,93 @@
+"""What a run does with its settings: names are checked, the caller's dicts are left alone, and what is listed is written."""
+import os
+import re
+
+import duckdb
+import jinja2
+import pandas as pd
+import pytest
+from jinja2 import meta
+
+from src.atspm import SignalDataProcessor
+from src.atspm.signal_data_processor import AGGREGATION_PARAMS
+
+T0 = pd.Timestamp('2026-10-27 08:00:00')
+EMPTY_CONFIG = pd.DataFrame(columns=['DeviceId', 'Phase', 'Parameter', 'Function'])
+HAS_DATA = {'name': 'has_data', 'params': {'no_data_min': 15, 'min_data_points': 1}}
+TIMELINE = {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60, 'maxtime': True}}
+
+
+def events(rows):
+    """(seconds after T0, device, event, parameter) as raw_data."""
+    return pd.DataFrame([{'TimeStamp': T0 + pd.Timedelta(seconds=s), 'DeviceId': d, 'EventId': e, 'Parameter': p}
+                         for s, d, e, p in rows])
+
+
+def run(raw, aggregations, tables=(), config=EMPTY_CONFIG, **settings):
+    with SignalDataProcessor(raw_data=raw, detector_config=config, bin_size=15, verbose=0, aggregations=aggregations, **settings) as p:
+        p.load()
+        p.aggregate()
+        return {t: p.conn.sql(f'SELECT * FROM {t}').df() for t in tables}
+
+
+@pytest.mark.parametrize('settings', [
+    {'memory_limit': '4GB'},
+    {'unmatched_events_settings': {'df_or_path': 'x'}},
+    {'unmatched_event_settings': {'df_or_paths': 'x', 'max_days_old': 2}},
+    {'aggregations': [HAS_DATA, {'name': 'ped', 'params': {'seconds_between_actuation': 60}}]},
+    {'aggregations': [{'name': 'actuations', 'params': {'fill_in_mising': True}}]},
+    {'aggregations': [{'name': 'detector_health', 'params': {'stor': 'x'}}]},
+])
+def test_misspelled_name_raises_at_start(settings):
+    settings = {'aggregations': [HAS_DATA], **settings}
+    with pytest.raises(ValueError, match='unknown|Unknown'):
+        SignalDataProcessor(raw_data=events([(0, 'A', 1, 2)]), bin_size=15, verbose=0, **settings)
+
+
+def test_the_list_of_names_matches_the_queries():
+    """Every parameter a query reads is in AGGREGATION_PARAMS, unless the processor sets it itself."""
+    folder = os.path.join(os.path.dirname(__file__), '..', 'src', 'atspm', 'queries')
+    env = jinja2.Environment(loader=jinja2.FileSystemLoader(folder))
+
+    def names(template, seen):
+        if template in seen:
+            return set()
+        seen.add(template)
+        tree = env.parse(env.loader.get_source(env, template)[0])
+        found = set(meta.find_undeclared_variables(tree))
+        for other in meta.find_referenced_templates(tree):
+            found |= names(other, seen)
+        return found
+
+    set_by_processor = {'bin_size', 'from_table', 'unmatched', 'incremental_run', 'carry_bins', 'controller_type', 'remove_incomplete',
+                        'known_detectors_found', 'ped_carried', 'coord_state_found', 'event_gap_schedule', 'yellow_red_carried', 'carry_alarms'}
+    for name, known in AGGREGATION_PARAMS.items():
+        read = names(f'{name}.sql', set()) - set_by_processor
+        assert read <= known, (name, read - known)
+    assert 'live' in AGGREGATION_PARAMS['timeline']
+
+
+def test_caller_dicts_are_left_alone(tmp_path):
+    state = tmp_path / 'state.parquet'
+    pd.DataFrame({'TimeStamp': [T0], 'DeviceId': ['A'], 'EventId': [936], 'Parameter': [0], 'IsValid': [True]}).to_parquet(state)
+    settings = {'df_or_path': str(state), 'max_days_old': 2}
+    aggregations = [HAS_DATA, TIMELINE, {'name': 'actuations', 'params': {'fill_in_missing': True, 'known_detectors_df_or_path': None, 'known_detectors_max_days_old': 7}},
+                    {'name': 'arrival_on_green', 'params': {}}]
+    before = repr(settings), repr(aggregations)
+    raw = events([(i, 'A', 82, 5) for i in range(1000, 1010)])
+    for _ in range(3):  # a warm worker reusing one dict: the third run used to find its state gone
+        run(raw, aggregations, unmatched_event_settings=settings)
+        assert (repr(settings), repr(aggregations)) == before
+
+
+def test_listed_tables_are_written_whatever_the_controller_type():
+    raw = events([(i, 'A', 300 + i % 3, 5) for i in range(1000, 1060)] + [(1000, 'A', 131, 1), (1010, 'A', 132, 90)])
+    out = run(raw, [{'name': 'splits', 'params': {}}, {'name': 'coordination', 'params': {}}], tables=['splits', 'coordination'])
+    assert len(out['splits']) and len(out['coordination'])
+
+
+def test_has_data_can_be_listed_last_with_remove_incomplete():
+    raw = events([(i, 'A', 82, 5) for i in range(1000, 1010)])
+    listed = [{'name': 'actuations', 'params': {}}, HAS_DATA]
+    assert run(raw, listed, tables=['actuations'], remove_incomplete=True)['actuations'].Total.sum() == 10
+    assert run(raw, listed[::-1], tables=['actuations'], remove_incomplete=True)['actuations'].Total.sum() == 10

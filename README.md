@@ -95,7 +95,6 @@ params = {
     'to_sql': False,                        # If True, returns SQL strings instead of executing
     'controller_type': 'maxtime',           # Global: '' (default), 'maxtime' or 'siemens' (case-insensitive)
                                             # When 'maxtime': phase_wait uses ActualCycleLength
-                                            # When not 'maxtime': splits & coordination are skipped
                                             # When 'siemens': timeline invalidates intervals across hourly log restarts
 
     # --- Incremental Processing Settings ---
@@ -174,8 +173,8 @@ params = {
         {'name': 'ped_delay', 'params': {}},
         {'name': 'platoon_ratio', 'params': {}},  # Requires arrival_on_green
         {'name': 'terminations', 'params': {}},
-        {'name': 'splits', 'params': {}},        # MAXTIME-specific (skipped if controller_type != 'maxtime')
-        {'name': 'coordination', 'params': {}},  # MAXTIME-specific (skipped if controller_type != 'maxtime')
+        {'name': 'splits', 'params': {}},        # MAXTIME-specific events
+        {'name': 'coordination', 'params': {}},  # MAXTIME-specific events
         {'name': 'coordination_agg', 'params': {}} # General coordination state (Pattern, Cycle, etc.)
     ]
 }
