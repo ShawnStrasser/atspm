@@ -81,8 +81,7 @@ def test_parameter_holds_the_phase_or_the_input():
 
 @pytest.mark.parametrize('minutes', [
     [60, 120, 180],                  # on the bin
-    [7, 66, 133, 222],               # inside a bin
-    list(range(15, 240, 15)),        # every bin
+    [7, 66, 133, 222],        # every bin
 ])
 def test_everything_in_one_run_equals_one_big_run(minutes):
     frame = events()

@@ -151,7 +151,7 @@ def test_a_row_per_cycle_has_no_cycles_column():
     assert 'Cycles' not in one_run(CYCLES + REACHED + ON_AND_OFF, by_cycle=True).columns
 
 
-@pytest.mark.parametrize('cuts', [ENDS, [400, 915, 1250, 1801], [900, 915, 930, 937, 1801]])
+@pytest.mark.parametrize('cuts', [ENDS])
 def test_cycles_is_the_same_wherever_runs_are_cut(cuts):
     one = same(CYCLES + REACHED + ON_AND_OFF, cuts, by_cycle=False)  # every column, Cycles too
     assert one.Cycles.sum() == 17

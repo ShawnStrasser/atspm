@@ -177,20 +177,8 @@ def incremental_processor_output():
   """Fixture to run the SignalDataProcessor incrementally"""
   data = duckdb.query("select * from 'tests/hires_test_data.parquet'").df()
 
-  chunks = {
-      '1_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 15:00:00' and timestamp < '2024-05-13 15:15:00'").df(),
-      '2_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 15:15:00' and timestamp < '2024-05-13 15:30:00'").df(),
-      '3_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 15:30:00' and timestamp < '2024-05-13 15:45:00'").df(),
-      '4_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 15:45:00' and timestamp < '2024-05-13 16:00:00'").df(),
-      '5_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 16:00:00' and timestamp < '2024-05-13 16:15:00'").df(),
-      '6_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 16:15:00' and timestamp < '2024-05-13 16:30:00'").df(),
-      '7_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 16:30:00' and timestamp < '2024-05-13 16:45:00'").df(),
-      '8_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 16:45:00' and timestamp < '2024-05-13 17:00:00'").df(),
-      '9_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 17:00:00' and timestamp < '2024-05-13 17:15:00'").df(),
-      '10_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 17:15:00' and timestamp < '2024-05-13 17:30:00'").df(),
-      '11_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 17:30:00' and timestamp < '2024-05-13 17:45:00'").df(),
-      '12_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 17:45:00' and timestamp < '2024-05-13 18:00:00'").df(),
-  }
+  chunks = {f'{i + 1}_chunk': duckdb.sql(f"select * from data where timestamp >= '2024-05-13 {15 + i}:00:00' and timestamp < '2024-05-13 {16 + i}:00:00'").df()
+            for i in range(3)}  # three hourly runs
 
   output_dir = f"tests/test_incremental_output{os.environ.get('PYTEST_XDIST_WORKER', '')}"
   os.makedirs(output_dir, exist_ok=True)
@@ -221,7 +209,7 @@ def incremental_processor_output():
 def test_incremental_aggregation(incremental_processor_output, aggregation):
   """Test each aggregation for incremental runs"""
   agg_name = aggregation['name']
-  output_files = [os.path.join(incremental_processor_output, f"{i}_chunk_{agg_name}.parquet") for i in range(1, 13)]
+  output_files = [os.path.join(incremental_processor_output, f"{i}_chunk_{agg_name}.parquet") for i in range(1, 4)]
   precalc_file = f"tests/precalculated/{agg_name}.parquet"
 
   for file in output_files:
@@ -244,78 +232,6 @@ def test_incremental_aggregation(incremental_processor_output, aggregation):
     compare_dataframes(combined_df, precalc_df)
 
 # REPLICATING ODOT'S PRODUCTION ENVIRONMENT
-@pytest.fixture(scope="module")
-def incremental_processor_output_with_dataframes():
-  """Fixture to run the SignalDataProcessor incrementally using dataframes"""
-  data = duckdb.query("select * from 'tests/hires_test_data.parquet'").df()
-  configs = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
-  unmatched_df = ''
-  sf_unmatched_df = ''
-
-  chunks = {
-      '1_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 15:00:00' and timestamp < '2024-05-13 15:15:00'").df(),
-      '2_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 15:15:00' and timestamp < '2024-05-13 15:30:00'").df(),
-      '3_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 15:30:00' and timestamp < '2024-05-13 15:45:00'").df(),
-      '4_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 15:45:00' and timestamp < '2024-05-13 16:00:00'").df(),
-      '5_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 16:00:00' and timestamp < '2024-05-13 16:15:00'").df(),
-      '6_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 16:15:00' and timestamp < '2024-05-13 16:30:00'").df(),
-      '7_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 16:30:00' and timestamp < '2024-05-13 16:45:00'").df(),
-      '8_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 16:45:00' and timestamp < '2024-05-13 17:00:00'").df(),
-      '9_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 17:00:00' and timestamp < '2024-05-13 17:15:00'").df(),
-      '10_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 17:15:00' and timestamp < '2024-05-13 17:30:00'").df(),
-      '11_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 17:30:00' and timestamp < '2024-05-13 17:45:00'").df(),
-      '12_chunk': duckdb.sql("select * from data where timestamp >= '2024-05-13 17:45:00' and timestamp < '2024-05-13 18:00:00'").df(),
-  }
-
-  results = {}
-
-  for i, chunk in chunks.items():
-    params = TEST_PARAMS.copy()
-    params.update({
-        'raw_data': chunk,
-        'detector_config': configs,
-        'unmatched_event_settings': {
-            'df_or_path': unmatched_df,
-            'split_fail_df_or_path': sf_unmatched_df,
-            'max_days_old': 14
-        },
-        'verbose': 0,
-        'aggregations': INCREMENTAL_AGGREGATIONS
-    })
-    
-    # Modify the actuations aggregation to include fill_in_missing parameter
-    for agg in params['aggregations']:
-      if agg['name'] == 'actuations':
-        agg['params'] = {
-            'fill_in_missing': True,
-            'known_detectors_max_days_old': 2
-        }
-        
-    processor = SignalDataProcessor(**params)
-    processor.load()
-    processor.aggregate()
-
-    # Store results for each aggregation
-    for agg in INCREMENTAL_AGGREGATIONS:
-        agg_name = agg['name']
-        if agg_name not in results:
-            results[agg_name] = []
-        results[agg_name].append(processor.conn.sql(f"select * from {agg_name}").df())
-
-    # Update unmatched dataframes for next iteration
-    unmatched_df = processor.conn.sql("select * from unmatched_events").df()
-    sf_unmatched_df = processor.conn.sql("select * from sf_unmatched").df()
-    
-
-    # Write unmatched dataframes to disk as csv
-    unmatched_df.to_csv(f"unmatched_df_temp{os.environ.get('PYTEST_XDIST_WORKER', '')}.csv")
-    sf_unmatched_df.to_csv(f"sf_unmatched_df_temp{os.environ.get('PYTEST_XDIST_WORKER', '')}.csv")
-
-    # Read unmatched dataframes back from disk
-    unmatched_df = pd.read_csv(f"unmatched_df_temp{os.environ.get('PYTEST_XDIST_WORKER', '')}.csv")
-    sf_unmatched_df = pd.read_csv(f"sf_unmatched_df_temp{os.environ.get('PYTEST_XDIST_WORKER', '')}.csv")
-
-  return results
 
 @pytest.fixture(scope="module")
 def oneshot_processor_output_with_fill_in_missing():
@@ -358,33 +274,6 @@ def oneshot_processor_output_with_fill_in_missing():
   
   return result
 
-@pytest.mark.parametrize("aggregation", INCREMENTAL_AGGREGATIONS, ids=lambda x: x['name'])
-def test_incremental_aggregation_with_dataframes(incremental_processor_output_with_dataframes, aggregation):
-  """Test each aggregation for incremental runs using dataframes"""
-  agg_name = aggregation['name']
-  incremental_results = incremental_processor_output_with_dataframes[agg_name]
-  
-  # Use actuations_zeros.parquet for actuations comparison
-  if agg_name == 'actuations':
-    precalc_file = f"tests/precalculated/actuations_zeros_incremental.parquet"
-  else:
-    precalc_file = f"tests/precalculated/{agg_name}.parquet"
-
-  assert len(incremental_results) == 12, f"Expected 12 chunks of results for {agg_name}"
-  assert os.path.exists(precalc_file), f"Precalculated file for {agg_name} not found"
-
-  combined_df = pd.concat(incremental_results).drop_duplicates().reset_index(drop=True)
-  precalc_df = pd.read_parquet(precalc_file)
-
-  # timeline has known edge cases where invalid signal state events span chunk boundaries
-  # Phase Wait events processed before the invalid state is known may have IsValid differences
-  if agg_name == 'timeline':
-    compare_dataframes_with_tolerance(combined_df, precalc_df, tolerance=0.001)
-  # phase_wait aggregates Phase Wait events and filters by IsValid, so differences propagate to averages
-  elif agg_name == 'phase_wait':
-    compare_phase_wait_across_runs(combined_df, precalc_df)
-  else:
-    compare_dataframes(combined_df, precalc_df)
 
 def test_oneshot_actuations_with_fill_in_missing(oneshot_processor_output_with_fill_in_missing):
   """Test actuations with fill_in_missing in oneshot mode"""

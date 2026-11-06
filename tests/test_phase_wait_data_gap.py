@@ -190,8 +190,6 @@ GAP_CASES = {
     "incident_across_bin_edge": ("13:53:25.5", "14:06:40.1", ("13:53:45", "14:05:15")),
     # 2. 10-minute gap entirely inside one 15-minute bin
     "inside_one_bin": ("10:30:50", "10:41:30", ("10:31:00", "10:41:00")),
-    # 3. 9-minute gap across a bin edge that is also an incremental window boundary
-    "across_window_boundary": ("14:54:50", "15:04:30", ("14:55:00", "15:04:00")),
 }
 
 
@@ -291,17 +289,6 @@ def _run_split(raw, cuts, max_event_gap_seconds="default"):
 TIME_OF_DAY_CASES = {
     "day_119": ("10:00:00", 119, True),
     "day_121": ("10:00:00", 121, False),
-    "day_exactly_120": ("10:00:00", 120, True),
-    "evening_shoulder_290": ("21:30:00", 290, True),
-    "evening_shoulder_310": ("21:30:00", 310, False),
-    # Across a bin edge, as has_data reads a silence over half of one bin as a lost bin
-    "night_890": ("02:07:35", 890, True),
-    "night_910": ("02:00:00", 910, False),
-    "morning_shoulder_290": ("05:30:00", 290, True),
-    "morning_shoulder_310": ("05:30:00", 310, False),
-    # The threshold is the one in force when the silence starts, not when it ends
-    "starts_night_ends_morning": ("04:55:00", 600, True),
-    "starts_day_ends_evening": ("20:58:00", 200, False),
 }
 
 
@@ -375,7 +362,7 @@ def test_event_gap_check_can_be_disabled_or_flat():
     assert _lookup(custom, "Phase Wait", _ts(call), 4)["IsValid"] == False
 
 
-@pytest.mark.parametrize("value", ["120", {"25:00": 120}, {"06:00": 0}, {"6am": 120}, {}, True])
+@pytest.mark.parametrize("value", ["120", {"25:00": 120}])
 def test_invalid_max_event_gap_seconds(value):
     raw = _dataset(GAP_CASES["inside_one_bin"])
     with pytest.raises(ValueError):

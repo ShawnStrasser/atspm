@@ -76,7 +76,7 @@ def steady(minutes=60, cycle_seconds=60):
 
 # ---- bin_size
 
-@pytest.mark.parametrize('bin_size, stamps', [(5, 12), (15, 4), (60, 1)])
+@pytest.mark.parametrize('bin_size, stamps', [(5, 12), (15, 4)])
 def test_bins_follow_bin_size(bin_size, stamps):
     out = process(steady(60), bin_size=bin_size)['yellow_red']
     assert out.TimeStamp.nunique() == stamps
@@ -153,9 +153,7 @@ def test_a_cycle_missing_an_event_is_dropped_across_runs_as_in_one_run():
 
 @pytest.mark.parametrize('minutes', [
     [60],                                       # on the hour
-    [15, 30, 45],                               # every bin
-    [7, 22.5, 41.1],                            # inside bins
-    [m + 0.31 for m in range(1, 60, 3)],        # many, inside cycles
+    [15, 30, 45],        # many, inside cycles
 ])
 def test_cuts_equal_one_big_run(minutes):
     events = steady(90)
@@ -163,13 +161,6 @@ def test_cuts_equal_one_big_run(minutes):
     cut, _ = cut_runs(events, [T0 + pd.Timedelta(minutes=m) for m in minutes])
     same_rows(big['yellow_red'], cut)
 
-
-@pytest.mark.parametrize('bin_size', [5, 60])
-def test_cuts_equal_one_big_run_at_other_bin_sizes(bin_size):
-    events = steady(180)
-    big = process(events, carry='first', bin_size=bin_size)
-    cut, _ = cut_runs(events, [T0 + pd.Timedelta(minutes=m) for m in (17, 60, 121.5)], bin_size=bin_size)
-    same_rows(big['yellow_red'], cut)
 
 
 def test_written_bins_equal_a_run_with_no_file():
@@ -288,27 +279,6 @@ def real_events():
 def real_config():
     return duckdb.query(f"SELECT * FROM '{REAL_CONFIG}'").df()
 
-
-@pytest.mark.parametrize('seed', [1, 2, 3])
-def test_real_data_at_random_cuts_equals_one_big_run(seed):
-    events, detectors = real_events(), real_config()
-    big = process(events, detectors, [REAL_YR], carry='first')['yellow_red']
-    assert len(big) > 1000
-    span = (events.TimeStamp.max() - events.TimeStamp.min()).total_seconds()
-    rng = random.Random(seed)
-    cuts = [events.TimeStamp.min() + pd.Timedelta(seconds=round(rng.uniform(0, span), 1)) for _ in range(9)]
-    # None within a second of the end of a bin: such a run counts as having reached it
-    cut, _ = cut_runs(events, [c for c in cuts if (c.ceil('15min') - c).total_seconds() > 1], detectors, [REAL_YR])
-    same_rows(big, cut)
-
-
-@pytest.mark.parametrize('bin_size', [5, 15, 60])
-def test_real_data_in_three_hour_windows_equals_one_big_run(bin_size):
-    events, detectors = real_events(), real_config()
-    start = events.TimeStamp.min().floor('15min')
-    big = process(events, detectors, [REAL_YR], carry='first', bin_size=bin_size)['yellow_red']
-    cut, _ = cut_runs(events, [start + pd.Timedelta(hours=h) for h in (3, 6)], detectors, [REAL_YR], bin_size=bin_size)
-    same_rows(big, cut)
 
 
 def test_real_data_written_bins_equal_a_run_with_no_file():

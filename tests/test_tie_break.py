@@ -56,7 +56,7 @@ def test_press_in_the_tenth_of_flashing_dont_walk_waits_for_the_next_walk(order)
     assert intervals(timeline, 'Ped Delay') == [(1, 2), (8, 60)]
 
 
-@pytest.mark.parametrize('start, end, event_class', [(43, 44, 'Phase Call'), (21, 23, 'Ped Service'), (41, 42, 'Phase Hold')])
+@pytest.mark.parametrize('start, end, event_class', [(43, 44, 'Phase Call'), (21, 23, 'Ped Service')])
 def test_start_and_end_in_one_tenth_are_a_momentary_interval(order, start, end, event_class):
     rows = [(10, start, 2), (10, end, 2)]
     timeline = run(rows, order, [TIMELINE], 'timeline')

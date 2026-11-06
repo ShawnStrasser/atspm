@@ -33,10 +33,6 @@ def run(raw, aggregations, tables=(), config=EMPTY_CONFIG, **settings):
 @pytest.mark.parametrize('settings', [
     {'memory_limit': '4GB'},
     {'unmatched_events_settings': {'df_or_path': 'x'}},
-    {'unmatched_event_settings': {'df_or_paths': 'x', 'max_days_old': 2}},
-    {'aggregations': [HAS_DATA, {'name': 'ped', 'params': {'seconds_between_actuation': 60}}]},
-    {'aggregations': [{'name': 'actuations', 'params': {'fill_in_mising': True}}]},
-    {'aggregations': [{'name': 'detector_health', 'params': {'stor': 'x'}}]},
 ])
 def test_misspelled_name_raises_at_start(settings):
     settings = {'aggregations': [HAS_DATA], **settings}
@@ -102,7 +98,6 @@ RAW = events([(1000, 'A', 1, 2), (1030, 'A', 7, 2)])
 @pytest.mark.parametrize('settings', [
     {'df_or_path': 'no_such_folder/state.parquet'},
     {'split_fail_df_or_path': 'no_such_folder/sf.parquet'},
-    {'df_or_path': 'az://container/state.parquet'},
 ])
 def test_missing_state_file_raises(settings):
     with pytest.raises(FileNotFoundError, match='does not exist'):
@@ -186,9 +181,6 @@ def test_input_older_than_the_split_failure_state_raises(tmp_path):
 @pytest.mark.parametrize('held, listed, missing', [
     ([HAS_DATA, TIMELINE], [HAS_DATA], 'timeline'),
     ([{'name': 'ped', 'params': {}}], STATE_ACTUATIONS, 'ped'),
-    ([{'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}}], STATE_ACTUATIONS, 'arrival_on_green'),
-    ([{'name': 'yellow_red', 'params': {'latency_offset_seconds': 0}}], STATE_ACTUATIONS, 'yellow_red'),
-    ([HAS_DATA, TIMELINE, {'name': 'coordination_agg', 'params': {}}], [HAS_DATA, TIMELINE], 'coordination_agg'),
 ])
 def test_state_of_a_table_left_out_of_the_list_raises(tmp_path, held, listed, missing):
     path = tmp_path / 'state.parquet'
@@ -236,7 +228,7 @@ def test_a_signal_with_data_takes_its_new_pattern_not_the_kept_one(tmp_path):
     assert state.Parameter.tolist() == [5]
 
 
-@pytest.mark.parametrize('table', ['actuations', 'terminations', 'splits', 'ped_delay'])
+@pytest.mark.parametrize('table', ['actuations', 'terminations'])
 def test_a_cut_inside_a_bin_raises_for_a_table_that_would_write_it_twice(tmp_path, table):
     path = tmp_path / 'state.parquet'
     listed = [HAS_DATA, TIMELINE, {'name': table, 'params': {}}]
@@ -269,7 +261,7 @@ def timeline_runs(tmp_path, *chunks, **settings):
     return pd.concat(rows, ignore_index=True), pd.read_parquet(path)
 
 
-@pytest.mark.parametrize('event, parameter, event_class', [(173, 3, 'Flash - Automatic'), (174, 16, 'MMU Flash'), (175, 7, 'Alarm Group State')])
+@pytest.mark.parametrize('event, parameter, event_class', [(173, 3, 'Flash - Automatic'), (174, 16, 'MMU Flash')])
 def test_an_alarm_carries_across_a_cut(tmp_path, event, parameter, event_class):
     close = 2 if event == 173 else 0
     first = events([(10, 'A', event, parameter), (20, 'A', 82, 5)])

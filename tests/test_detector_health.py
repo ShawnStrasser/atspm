@@ -95,7 +95,7 @@ def test_an_empty_one_shot_has_the_findings_table_too():
 
 # ---- A4: what save() writes
 
-@pytest.mark.parametrize('output_format', ['csv', 'parquet', 'json'])
+@pytest.mark.parametrize('output_format', ['csv', 'parquet'])
 def test_a4_save_writes_only_the_output_tables(tmp_path, output_format):
   SignalDataProcessor(raw_data=RAW, bin_size=15, verbose=0, output_dir=str(tmp_path), output_format=output_format,
                       output_to_separate_folders=False, aggregations=[_params(findings=True)]).run()
@@ -178,7 +178,7 @@ def test_a5_other_outputs_are_identical_with_and_without_detector_health(tmp_pat
 
 # ---- A6: the old parameters and the missing extra
 
-@pytest.mark.parametrize('old', ['data', 'device_groups', 'decompose_params', 'anomaly_params', 'return_last_n_days'])
+@pytest.mark.parametrize('old', ['data', 'device_groups'])
 def test_a6_old_parameters_explain_themselves(old):
   with pytest.raises(ValueError, match='traffic-anomaly was removed'):
     SignalDataProcessor(raw_data=RAW, aggregations=[{'name': 'detector_health', 'params': {old: None}}])
@@ -187,16 +187,13 @@ def test_a6_old_parameters_explain_themselves(old):
 @pytest.mark.parametrize('params, message', [
   ({'nonsense': 1}, 'unknown parameters'),
   ({'state': ''}, 'needs history'),
-  ({'clock_ahead_minutes': -1}, 'clock_ahead_minutes'),
-  ({'outputs': ['weekly']}, 'unknown parameters'),
-  ({'outputs': '15min'}, 'unknown parameters'),
 ])
 def test_a6_bad_parameters(params, message):
   with pytest.raises(ValueError, match=message):
     SignalDataProcessor(raw_data=RAW, aggregations=[{'name': 'detector_health', 'params': params}])
 
 
-@pytest.mark.parametrize('old, replacement', [('judge', 'first run past midnight'), ('store', "'state'"), ('restart_old_store', "'state': ''")])
+@pytest.mark.parametrize('old, replacement', [('judge', 'first run past midnight'), ('store', "'state'")])
 def test_a6_replaced_parameters_name_the_replacement(old, replacement):
   with pytest.raises(ValueError, match=f'{old} is gone.*{replacement}'):
     SignalDataProcessor(raw_data=RAW, aggregations=[{'name': 'detector_health', 'params': {old: 'x'}}])

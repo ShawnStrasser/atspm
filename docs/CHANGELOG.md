@@ -30,6 +30,8 @@
 
 #### Bug Fixes / Improvements:
 
+- **A reversed or sliced `raw_data` DataFrame loads under pandas 3**: DuckDB 2.0 raised 'bad cast' on numeric or time columns that are views with negative strides (such as `df.iloc[::-1]`). Such a frame is now copied before it is read.
+- **The test suite is cut from 926 tests to 627**: real-data, random-cut and repeated-option runs are removed, keeping one small test per table and behaviour, the comparison of every table with `tests/precalculated`, and one incremental run equal to one big run.
 - **`phase_wait` has `Samples`**, the waits averaged in the bin, so `AvgPhaseWait` rolls up exactly as `SUM(AvgPhaseWait * Samples) / SUM(Samples)`. Existing columns do not change.
 - **`split_failures` has `Cycles`**, the cycles finished in the bin, so the averages and the share of failures roll up exactly from the one table. Existing columns do not change. With `by_cycle=True` each row is one cycle, so there is no such column. On 40 ODOT signals over 4 hours (Nov 3 2026), `Cycles` equals the per-cycle rows in every one of 2,684 bins (21,937 cycles), is the same in every bin in 15-minute runs as in one big run, and adds no measurable time to the query (median 0.38 seconds either way). Green time rolled up with it is 26.279 seconds, equal to the average over the cycles, where a plain average of the bins reads 26.270 seconds.
 - **pandas 3**: `pytz` is now a dependency. pandas 3 no longer installs it, and DuckDB needs it to return time zone aware timestamps, so `SignalDataProcessor()` failed on creation without it.

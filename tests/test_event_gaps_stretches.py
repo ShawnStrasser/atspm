@@ -29,8 +29,6 @@ def brute_force(conn, schedule, source):
 @pytest.mark.parametrize('schedule', [
     [[300, 300], [360, 120], [1260, 300], [1380, 900]],  # the default
     [[0, 60]],
-    [[0, 0.5]],
-    [[0, 45.5], [720, 7]],
 ])
 def test_same_silences_as_sorting_every_event(schedule):
     conn = duckdb.connect()

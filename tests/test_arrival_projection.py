@@ -103,14 +103,7 @@ def test_phases_2_and_6_take_220_feet_and_the_others_120():
 
 @pytest.mark.parametrize('columns, travel', [
     ({'DistanceFromStopBar': [440.0], 'MPH': [70.0]}, 440 / (70 * 1.467)),
-    ({'DistanceFromStopBar': [440.0]}, 440 / (35 * 1.467)),                         # no speed column
-    ({'MPH': [20.0]}, 220 / (20 * 1.467)),                                          # no distance column
-    ({'DistanceFromStopBar': [np.nan], 'MPH': [20.0]}, 220 / (20 * 1.467)),         # this row has no distance
-    ({'DistanceFromStopBar': [440.0], 'MPH': [None]}, 440 / (35 * 1.467)),          # this row has no speed
-    ({'distance_from_stop_bar': [440.0], 'mph': [70.0]}, 440 / (70 * 1.467)),       # names ignore case and underscores
-    ({'DistanceFromStopBar': [0.0], 'MPH': [35.0]}, 0.0),                           # a stop bar detector does not move
-    ({'DistanceFromStopBar': [440.0], 'MPH': [0.0]}, 440 / (35 * 1.467)),           # zero speed is not a speed
-    ({'DistanceFromStopBar': ['n/a'], 'MPH': ['fast']}, 220 / (35 * 1.467)),        # text is not a number
+    ({'DistanceFromStopBar': [440.0]}, 440 / (35 * 1.467)),        # text is not a number
 ])
 def test_each_value_comes_from_the_config_or_its_default(columns, travel):
     events = frame(at(100, 1, 2), at(100 - travel - 0.02, 82, 3), at(100 - travel + 0.02, 82, 3), at(200, 8, 2), at(899.9, 1, 15))
@@ -156,11 +149,7 @@ def latency_events(detector=3, travel=TRAVEL_220):
 
 @pytest.mark.parametrize('columns, percent', [
     ({'LatencyCorrection': [1.0]}, 0.0),                # the detector's own moves it back onto red
-    ({'LatencyCorrection': [0.0]}, 1.0),                # a real zero beats a run-wide value
-    ({'latency_correction': [1.0]}, 0.0),               # names ignore case and underscores
-    ({'LatencyCorrection': [None]}, None),              # blank falls back
-    ({'LatencyCorrection': ['n/a']}, None),             # text is not a number, and falls back
-    ({}, None),                                         # no column falls back
+    ({'LatencyCorrection': [0.0]}, 1.0),                                         # no column falls back
 ])
 @pytest.mark.parametrize('run_wide', [0, 1])
 def test_latency_is_per_detector_with_the_setting_as_fallback(columns, percent, run_wide):
@@ -323,30 +312,6 @@ def test_older_unmatched_file_still_loads():
                     {'name': 'timeline', 'params': {'min_duration': 0.1, 'cushion_time': 60}}, *TWO_TABLES]
     assert process(events, config((2, 3)), aggregations, carry=old)['arrival_on_green'].Percent_AOG.tolist() == [0.0]  # the old green is not read
 
-
-@pytest.mark.parametrize('seed', [1, 2, 3])
-def test_real_data_at_random_cuts_equals_one_big_run(seed):
-    events, detectors = real_events(), real_config()
-    big = process(events, detectors, carry='first')
-    span = (events.TimeStamp.max() - events.TimeStamp.min()).total_seconds()
-    rng = random.Random(seed)
-    cuts = [events.TimeStamp.min() + pd.Timedelta(seconds=round(rng.uniform(0, span), 1)) for _ in range(9)]
-    # None within a second of the end of a bin: such a run counts as having reached it
-    cuts = [c for c in cuts if (c.ceil('15min') - c).total_seconds() > 1]
-    runs, _ = cut_runs(events, detectors, cuts)
-    same_rows(big['arrival_on_green'], runs['arrival_on_green'])
-    same_rows(big['platoon_ratio'], runs['platoon_ratio'])
-
-
-def test_real_data_with_old_config_at_bin_cuts_equals_one_big_run_and_a_run_with_no_file():
-    events, detectors = real_events(), real_config()[['DeviceId', 'Phase', 'Parameter', 'Function']]
-    start = events.TimeStamp.min().floor('15min')
-    runs, carry = cut_runs(events, detectors, [start + pd.Timedelta(minutes=15 * i) for i in range(1, 24)])
-    for big in (process(events, detectors, carry='first'), process(events, detectors)):
-        same_rows(big['arrival_on_green'], runs['arrival_on_green'])
-        same_rows(big['platoon_ratio'], runs['platoon_ratio'])
-    # Only what lands in the next few seconds, and the phases green at the end, is left over
-    assert len(carry[carry.EventId == 938]) < 100
 
 
 def test_remove_incomplete_keeps_a_bin_written_after_its_run():

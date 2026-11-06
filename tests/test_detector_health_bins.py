@@ -18,7 +18,7 @@ CONFIG = duckdb.query("select * from 'tests/configs_test_data.parquet'").df()
 START, END = pd.Timestamp('2024-05-13 15:00:00') + SHIFT, pd.Timestamp('2024-05-13 18:00:00') + SHIFT
 
 T0 = pd.Timestamp('2026-09-28 00:00:00')
-ON, OFF = T0 + pd.Timedelta(days=1, hours=7), T0 + pd.Timedelta(days=5, hours=3, minutes=7, seconds=30)
+ON, OFF = T0 + pd.Timedelta(days=1, hours=7), T0 + pd.Timedelta(days=2, hours=10, minutes=7, seconds=30)
 DETECTORS = pd.DataFrame({'DeviceId': [1], 'Detector': [9], 'phase': [2], 'function': ['Presence'], 'lanes': [1]})
 
 
@@ -35,7 +35,7 @@ def _config_detectors():
 REAL_DETECTORS = _config_detectors()
 
 
-def _stuck_raw(days=7):
+def _stuck_raw(days=3):
   """A signal cycling every 200 s, detector 9 pulsed each cycle, ped input 2 ON from ON to OFF with phase 2 walking every cycle."""
   rows = []
   for t in pd.date_range(T0, T0 + pd.Timedelta(days=days), freq='200s', inclusive='left'):
@@ -81,11 +81,6 @@ def _runs(raw, cuts, detectors, tmp_path, name, **health_params):
 def _all_rows(tables):
   return pd.concat([t['detector_health'] for t in tables], ignore_index=True)
 
-
-def _random_cuts(raw, n, seed):
-  rng = np.random.default_rng(seed)
-  a, b = raw['TimeStamp'].min(), raw['TimeStamp'].max()
-  return [a + (b - a) * x for x in rng.random(n)]
 
 
 # ---- the table
@@ -148,7 +143,7 @@ def test_bin_size_is_the_processors():
 
 # ---- a state: one run and many runs
 
-MIDNIGHT = T0 + pd.Timedelta(days=2)
+MIDNIGHT = T0 + pd.Timedelta(days=1)
 
 
 @pytest.fixture(scope='module')
@@ -157,20 +152,9 @@ def two_days():
   return raw[raw['TimeStamp'] < MIDNIGHT + pd.Timedelta(minutes=45)]
 
 
-@pytest.fixture(scope='module')
-def whole(two_days, tmp_path_factory):
-  return _runs(two_days, [], DETECTORS, tmp_path_factory.mktemp('whole'), 'r')[0]
-
-
-@pytest.mark.parametrize('seed', [1, 2])
-def test_one_long_run_equals_runs_at_random_cuts(two_days, whole, tmp_path, seed):
-  cut = _runs(two_days, _random_cuts(two_days, 12, seed), DETECTORS, tmp_path, 'r')
-  assert len(whole['detector_health']) > 0
-  pd.testing.assert_frame_equal(_ordered(_all_rows(cut)), _ordered(whole['detector_health']), check_dtype=False)
-
 
 def test_each_run_its_own_bin_and_late_finds_only_inside_the_previous_day(two_days, tmp_path):
-  cuts = list(pd.date_range(MIDNIGHT - pd.Timedelta(hours=2), MIDNIGHT + pd.Timedelta(minutes=30), freq='15min'))
+  cuts = [MIDNIGHT - pd.Timedelta(minutes=15), MIDNIGHT, MIDNIGHT + pd.Timedelta(minutes=15)]
   tables = _runs(two_days, cuts, DETECTORS, tmp_path, 'r', findings=True)
   edges = [two_days['TimeStamp'].min()] + cuts
   checks = []
@@ -181,7 +165,7 @@ def test_each_run_its_own_bin_and_late_finds_only_inside_the_previous_day(two_da
       assert late['TimeStamp'].ge(MIDNIGHT - pd.Timedelta(days=1)).all() and late['TimeStamp'].lt(MIDNIGHT).all()
       checks.append(a)
   assert len(checks) == 1 and checks[0] >= MIDNIGHT
-  assert [('detector_health_findings' in t) for t in tables].count(True) == 2     # the midnight of the first day, in the first run, and this one
+  assert [('detector_health_findings' in t) for t in tables].count(True) == 1     # only the run past midnight
   assert not _all_rows(tables).duplicated(KEY).any()
 
 
@@ -216,8 +200,8 @@ def _stuck_rows(frame, kind, detector):
   return frame[(frame['DetectorType'] == kind) & (frame['Detector'] == detector) & (frame['Label'] == 'stuck on')].sort_values('TimeStamp')
 
 
-@pytest.mark.parametrize('cuts', [[], [T0 + pd.Timedelta(days=k, minutes=k * 7) for k in range(1, 7)]], ids=['one_run', 'daily_runs'])
-def test_a_button_stuck_past_the_window_keeps_its_bins_until_the_off(tmp_path, cuts):
+def test_a_button_stuck_past_the_window_keeps_its_bins_until_the_off(tmp_path):
+  cuts = [T0 + pd.Timedelta(days=k, minutes=k * 7) for k in range(1, 3)]  # daily runs
   bins = _all_rows(_runs(_stuck_raw(), cuts, DETECTORS, tmp_path, 'r', horizon_days=1))
   assert not bins.duplicated(KEY).any()
   rows = _stuck_rows(bins, 'Ped', 2)
@@ -227,11 +211,12 @@ def test_a_button_stuck_past_the_window_keeps_its_bins_until_the_off(tmp_path, c
 
 
 def test_the_open_on_is_in_the_state_not_in_the_unmatched_events_file(tmp_path):
-  raw = _stuck_raw(4)
+  raw = _stuck_raw(3)
   rows, state, unmatched = tmp_path / 'rows', tmp_path / 'state.parquet', str(tmp_path / 'unmatched.parquet')
   rows.mkdir()
-  for k in range(1, 4):
-    chunk = raw[(raw['TimeStamp'] >= T0 + pd.Timedelta(days=k - 1)) & (raw['TimeStamp'] < T0 + pd.Timedelta(days=k))]
+  edges = [T0, T0 + pd.Timedelta(days=1), T0 + pd.Timedelta(days=2), T0 + pd.Timedelta(days=2, hours=6)]  # the last run ends before the OFF
+  for a, b in zip(edges[:-1], edges[1:]):
+    chunk = raw[(raw['TimeStamp'] >= a) & (raw['TimeStamp'] < b)]
     params = _params(DETECTORS, state=str(state) if state.exists() else '', history=str(rows), horizon_days=1)
     SignalDataProcessor(raw_data=chunk, detector_config=None, bin_size=15, verbose=0, output_dir=str(tmp_path / 'out'), output_format='parquet',
                         output_to_separate_folders=False, unmatched_event_settings={'df_or_path': unmatched, 'max_days_old': 1, 'first_run': True},

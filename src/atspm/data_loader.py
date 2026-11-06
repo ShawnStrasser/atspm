@@ -44,6 +44,20 @@ def _strip_wrapping_quotes(path):
     return value
 
 
+def _contiguous_frame(frame):
+    """A pandas frame whose numeric or time columns are views with negative strides (df.iloc[::-1], say) is copied first.
+    DuckDB 2.0 cannot scan those columns under pandas 3 and raises 'bad cast'."""
+    columns = getattr(frame, 'dtypes', None)
+    if not hasattr(columns, 'items') or not hasattr(frame, 'copy'):
+        return frame
+    for name, dtype in columns.items():
+        if getattr(dtype, 'kind', None) in tuple('biufmM'):
+            values = frame[name].to_numpy(copy=False)
+            if getattr(values, 'flags', None) is not None and not values.flags['C_CONTIGUOUS']:
+                return frame.copy()
+    return frame
+
+
 def _get_columns_from_dataframe_like(source):
     # Arrow tables also have .columns, but it holds the column arrays rather than their names
     if hasattr(source, 'column_names'):
@@ -160,6 +174,7 @@ def load_data(conn,
             source_label = raw_path
         else:
             v_print("Loading raw data from DataFrame", verbose, 2)
+            raw_data = _contiguous_frame(raw_data)
             source_reference = "raw_data"
             source_columns = _get_columns_from_dataframe_like(raw_data)
             source_label = "raw_data DataFrame"

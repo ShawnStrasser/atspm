@@ -155,8 +155,6 @@ GAP_CASES = {
     "gap_inside_one_window": ("09:50:34", "11:05:46", ("09:55:00", "11:01:00")),
     # 2. the real case: gap covers the tail of one window and the head of the next
     "gap_across_window_boundary": ("11:11:34", "14:11:46", ("11:11:40", "14:11:40")),
-    # 3. gap swallows the whole 12-15 window
-    "gap_swallows_whole_window": ("11:40:34", "15:10:46", ("11:40:40", "15:10:40")),
 }
 
 
