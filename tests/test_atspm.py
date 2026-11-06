@@ -177,8 +177,11 @@ def incremental_processor_output():
   """Fixture to run the SignalDataProcessor incrementally"""
   data = duckdb.query("select * from 'tests/hires_test_data.parquet'").df()
 
-  chunks = {f'{i + 1}_chunk': duckdb.sql(f"select * from data where timestamp >= '2024-05-13 {15 + i}:00:00' and timestamp < '2024-05-13 {16 + i}:00:00'").df()
-            for i in range(3)}  # three hourly runs
+  # three hourly runs (a pandas filter: DuckDB can't see `data` from inside a comprehension on Python 3.11)
+  chunks = {}
+  for i in range(3):
+    lo, hi = pd.Timestamp(f'2024-05-13 {15 + i}:00:00'), pd.Timestamp(f'2024-05-13 {16 + i}:00:00')
+    chunks[f'{i + 1}_chunk'] = data[(data['TimeStamp'] >= lo) & (data['TimeStamp'] < hi)].reset_index(drop=True)
 
   output_dir = f"tests/test_incremental_output{os.environ.get('PYTEST_XDIST_WORKER', '')}"
   os.makedirs(output_dir, exist_ok=True)
