@@ -150,12 +150,22 @@ def test_atspm_samples(raw, cfgp):
     assert t["split_failures"].Red_Occupancy.between(0, 1).all()
 
 
+def _detector_version():
+    return tuple(int(x) for x in getattr(dc, "__version__", "0").split(".")[:2])
+
+
+@pytest.mark.skipif(_detector_version() < (2, 1), reason="atspm-detector 2.1 adds Lanes and TravelTime to to_atspm_config")
+def test_to_atspm_config_exports_lanes_and_travel_time(sample_pred):
+    assert {"Lanes", "TravelTime"} <= set(dc.to_atspm_config(sample_pred).columns)
+
+
 def test_queue_model_reads_lanes_and_travel_time(sample_pred):
-    """to_atspm_config carries Lanes ("1,2") and TravelTime; the queue model reads them: two lanes clear a queue faster,
-    and a measured travel time moves arrivals, without changing the vehicle counts."""
+    """The queue model reads Lanes ("1,2") and TravelTime: two lanes clear a queue faster, and a measured travel time moves
+    arrivals, without changing the vehicle counts. The columns are set here, so any atspm-detector version tests it."""
     ev = atspm_events(SAMPLE)
-    cfg = dc.to_atspm_config(sample_pred)
-    assert {"Lanes", "TravelTime"} <= set(cfg.columns)
+    cfg = dc.to_atspm_config(sample_pred).drop(columns=["Lanes", "TravelTime", "RedDepartures"], errors="ignore")
+    advance = cfg.Function.eq("Advance")
+    cfg = cfg.assign(Lanes=np.where(advance, "1,2", None), TravelTime=np.where(advance, 4.0, np.nan))
 
     def aog(config):
         with SignalDataProcessor(raw_data=ev, detector_config=config, bin_size=15, remove_incomplete=False, verbose=0,

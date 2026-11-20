@@ -1,6 +1,6 @@
 # Release Notes
 
-### Version 3.0.1 (November 19, 2026)
+### Version 3.1.0 (November 19, 2026)
 
 #### Breaking Changes:
 
