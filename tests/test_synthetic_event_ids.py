@@ -20,7 +20,7 @@ ALL_TOGETHER = [HAS_DATA, TIMELINE, *ARRIVALS, *PED]
 KEYS = ['TimeStamp', 'DeviceId', 'Phase']
 TABLES = ('arrival_on_green', 'platoon_ratio', 'ped')
 ARRIVAL_CODES = {938, 939, 940, 941, 948}
-SPILLBACK_CODES = {949, 950}  # Parameter holds the detector
+SPILLBACK_CODES = {949, 950}  # Parameter holds the detector, plus 1000 on a 950 whose vehicle is not counted yet
 PED_CODES = {937, 943, 944, 945, 946, 947}
 SRC = os.path.join(os.path.dirname(__file__), '..', 'src', 'atspm')
 
@@ -75,7 +75,8 @@ def test_each_family_writes_only_its_own_codes():
 
 def test_parameter_holds_the_phase_or_the_input():
     carry = run(events(60), [*ARRIVALS, *PED])['unmatched_events']
-    assert set(carry[carry.EventId.isin(ARRIVAL_CODES)].Parameter) == {PHASE}
+    assert set(carry[carry.EventId.isin(ARRIVAL_CODES)].Parameter) <= {PHASE}
+    assert set(carry[carry.EventId.isin(SPILLBACK_CODES)].Parameter % 1000) == {DETECTOR}  # plus 1000 on a vehicle not counted yet
     assert set(carry[carry.EventId.isin(PED_CODES)].Parameter) == {PED_INPUT}
 
 

@@ -36,6 +36,7 @@ This project focuses only on transforming event logs into performance measures a
 - [Quick Start](#quick-start)
 - [Usage Example](#usage-example)
 - [Performance Measures](#performance-measures)
+- [Integrating atspm into an app](docs/APP_INTEGRATION.md)
 - [Release Notes](docs/CHANGELOG.md)
 - [Future Plans](#future-plans)
 - [Contributing](#contributing)
@@ -100,6 +101,13 @@ params = {
         'first_run': True                        # First run only: these files are not there yet. Without it a missing file raises
     },
 
+    # --- Or run on your app's DuckDB connection (see Running on your app's DuckDB connection) ---
+    # 'conn': app_connection,               # raw_data and detector_config found in its tables; outputs and state go to tables there
+    # 'start': '2026-11-19 08:00',          # with conn: the window, start <= TimeStamp < end, on bin boundaries
+    # 'end': '2026-11-19 08:15',
+    # 'devices': None,                      # with conn: every device, or a list of DeviceIds
+    # 'schema': 'atspm',                    # with conn: the schema for outputs and state
+
     # --- Performance Measures (Aggregations) ---
     'aggregations': [
         {'name': 'has_data', 'params': {}},
@@ -115,7 +123,8 @@ params = {
             'params': {
                 'latency_offset_seconds': 0, # Taken off each arrival time for detectors with no LatencyCorrection
                 'spillback_on_seconds': 6,   # A detector ON for more than this has a queue over it (default shown), None to turn this off
-                'spillback_gap_seconds': 5   # and its actuations count as on red until it has been OFF for this long (default shown)
+                'spillback_gap_seconds': 4,  # and that actuation and the ones after it count as on red until it has been OFF for this long (default shown)
+                'queue_model': False         # True (recommended) also counts vehicles that stop behind a queue short of the detector as on red (default shown)
             }
         },
         {
@@ -123,7 +132,8 @@ params = {
             'params': {
                 'latency_offset_seconds': 0, # The same three settings as arrival_on_green. Give both the same values
                 'spillback_on_seconds': 6,   # None gives UDOT's method alone, and Queued_Delay_Seconds reads 0
-                'spillback_gap_seconds': 5
+                'spillback_gap_seconds': 4,
+                'queue_model': False         # True (recommended) adds Queue_Delay_Seconds, the delay by the Queue Model (default shown)
             }
         },
         {
@@ -208,6 +218,35 @@ print(results.head())
 processor.conn.close() # Manually close if not using 'with'
 ```
 
+### Running on your app's DuckDB connection
+An app that keeps its data in DuckDB can pass its connection; [docs/APP_INTEGRATION.md](docs/APP_INTEGRATION.md) covers scheduling, the schema and moving from file state. `atspm` reads the raw events and the detector config where they are, writes the results and its state to tables there, and finds that state again the next run:
+```python
+import duckdb
+from atspm import SignalDataProcessor
+
+app = duckdb.connect('app.duckdb')
+SignalDataProcessor(
+    conn=app,
+    start='2026-11-19 08:00', end='2026-11-19 08:15',  # events start <= TimeStamp < end, on bin boundaries
+    devices=None,                 # every device, or a list of DeviceIds
+    schema='atspm',               # where the results and state go (the default)
+    bin_size=15,
+    remove_incomplete=True,
+    controller_type='maxtime',
+    aggregations=[...],           # as above
+).run()
+```
+- **Inputs:** with `raw_data` and `detector_config` left out, it uses the table or view named `raw_data` or `detector_config` if one has the columns, else the only one that has them (raw events: `TimeStamp`, `DeviceId`, `EventId`, `Parameter`; config: `DeviceId`, `Phase`, `Parameter`, `Function`). If several fit, it raises and names them: pass `raw_data='my_events'` or `detector_config='main.my_config'`. A DataFrame or a file path still works.
+- **Outputs:** each table is added to `schema.<table>`, made the first time with the same columns and types as the DataFrame mode.
+- **State:** `unmatched_events`, `sf_unmatched` and `detector_health`'s `health_state` live in the schema. No state table means a first run. Each run replaces only its own devices' rows. `detector_health`'s `health_rows` are kept there too, for the runs `health_state` lists. Rerunning a window already run raises `raw_data is older than the state`. `unmatched_event_settings` takes only `max_days_old` (default 14).
+- **All or nothing:** a run adds its outputs and replaces its state in one transaction, so a run that fails writes nothing and can simply be run again.
+- **Your connection is left as it was:** the run works in an in-memory database of its own on a cursor of your connection, and detaches it at the end. Your tables, settings and default database are untouched, and your connection stays open.
+- **Limits:**
+  - Run one `atspm` run at a time per database.
+  - Keep one `aggregations` list per schema: a run raises if the state holds rows of a measure it does not run.
+  - `detector_health` runs over all devices, so leave `devices` out when it is in the list.
+  - Set `end` behind your ingest lag: an event that arrives after its window has run is not read.
+
 ### Visualization Options
 The data produced by `atspm` can be visualized using Power BI, Plotly, or other platforms. For example, see the [Oregon DOT ATSPM Dashboard](https://app.powerbigov.us/view?r=eyJrIjoiNzhmNTUzNDItMzkzNi00YzZhLTkyYWQtYzM1OGExMDk3Zjk1IiwidCI6IjI4YjBkMDEzLTQ2YmMtNGE2NC04ZDg2LTFjOGEzMWNmNTkwZCJ9).
 
@@ -228,7 +267,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Actuations** (`actuations`): Detector actuations per detector and interval (with optional zero-filling of missing intervals).
 - **Arrival on Green** (`arrival_on_green`): Percentage of vehicles reaching the stop bar during green by phase, with each advance detector actuation projected to the stop bar. See [Arrival on Green](#arrival-on-green).
 - **Platoon Ratio** (`platoon_ratio`): HCM platoon ratio by phase and interval, `Rp = Percent_AOG / (g/C)`, with the green ratio estimated from phase green time within each bin and the HCM arrival type (1–6). Unlike arrival on green, it is comparable across phases with different splits. Requires `arrival_on_green`.
-- **Approach Delay** (`approach_delay`): Seconds vehicles wait by phase and interval, with `Delay_Seconds` measured by UDOT's method and `Queued_Delay_Seconds` estimated for queues over the advance detector. See [Approach Delay](#approach-delay).
+- **Approach Delay** (`approach_delay`): Seconds vehicles wait by phase and interval, with `Delay_Seconds` measured by UDOT's method and `Queued_Delay_Seconds` estimated for queues over the advance detector, and with `queue_model=True` `Queue_Delay_Seconds`, the delay by the Queue Model. See [Approach Delay](#approach-delay).
 - **Left-Turn Gaps** (`left_turn_gaps`): Gaps in the traffic on each through phase by length, so a dashboard can pick any critical gap for the left turn across it. See [Left-Turn Gaps](#left-turn-gaps).
 - **Yellow and Red Actuations** (`yellow_red`): Distribution of detector actuations relative to the start of red, including red offset and signal state. A row belongs to the `bin_size` bin of its cycle's red begin. Incremental runs give the same rows as one big run: a bin is written once the last cycle with a red in it has finished, so with runs cut on the bin each one comes out a run later, and the events it waits for are kept in `unmatched_events` (synthetic `EventId` 951 to 954).
 - **Arrival Pattern** (`arrival_pattern`): `yellow_red` for `Advance` detectors: each vehicle is moved forward to the stop bar the way `arrival_on_green` does it (`DistanceFromStopBar`, `MPH`, `LatencyCorrection` and their defaults), and counted by the seconds from the red begin of the cycle it arrives in. `Red_Offset` is rounded to the nearest `offset_slice_seconds` (5 unless given). On 150 ODOT signals over one day that is about 5,400 rows per signal, or 1,445 per phase. There is no spillback handling. Incremental runs give the same rows as one big run, by the same rule as `yellow_red` (synthetic `EventId` 960 to 963).
@@ -239,7 +278,7 @@ All of the following tables include a `TimeStamp` column aligned to the start of
 - **Coordination Aggregate** (`coordination_agg`): Binned coordination state per interval. Provides the active Pattern, Cycle Length, Actual Cycle Length (MAXTIME), and Actual Offset (MAXTIME) for every bin using fill-forward logic.
 - **Pedestrian** (`ped`): Pedestrian services, push-button presses, unique presses and estimated pedestrian volumes, all in one row per phase and interval. `return_volumes=False` (default True) leaves out `Estimated_Volumes` and the rows of quiet bins. A press is a unique actuation if it comes more than `seconds_between_actuations` (default 15) after the previous press on that input, or if no earlier press is known. See [Pedestrian counts and volumes](#pedestrian-counts-and-volumes).
 - **Ped Delay** (`ped_delay`): Average pedestrian delay and sample counts per phase and interval, derived from `timeline`.
-- **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). A wait is left out when the device logged no call on any phase during it or in the 15 minutes before it ended, since the call state is then unknown. For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
+- **Phase Wait** (`phase_wait`): Average wait time for a phase to turn green after a call, with filtering for preempts and skipped phases (wait > 1.5x cycle length). A wait is left out when the device logged no call on any phase during it or in the 15 minutes before it ended, since the call state is then unknown. A data gap (the device logging nothing) drops every call, since the event ending a call may have been lost in it. For MAXTIME controllers, set `controller_type='maxtime'` globally to use the more accurate ActualCycleLength.
 - **Detector Health** (`detector_health`): How much of each `bin_size` interval each vehicle detector and ped button was failing, and with what problem, from `atspm-detector`. See [Detector health](#detector-health).
 
 ### Arrival on Green
@@ -261,14 +300,26 @@ Distance, speed and latency come from three optional `detector_config` columns, 
 | `DistanceFromStopBar` | Feet from the leading edge of the detector to the stop bar | 220 for phases 2 and 6, 120 for all others |
 | `MPH` | Speed in miles per hour. UDOT uses the speed limit | 35 |
 | `LatencyCorrection` | Seconds from the vehicle crossing the detector to the controller logging it | `latency_offset_seconds`, or 0 without it |
+| `Lanes` | The lane numbers the detector covers, as atspm-detector writes them: "1,2" is two lanes, "2" is one (lane 2). For `queue_model` only. Not one of UDOT's | 1 lane |
+| `TravelTime` | Seconds a free-flowing car takes from the detector to the stop line, measured (atspm-detector exports it). For `queue_model` only. Not one of UDOT's | see below |
+| `RedDepartures` | Share of the offs of the stop bar count zones in the lanes the detector covers that come 2 seconds or more after red starts: cars leaving on red (atspm-detector exports it). Over 0.25, the Queue Model is turned off for the detector. Not one of UDOT's | the Queue Model runs |
 
-Each value is judged row by row: a row may have one and not the others, and whatever is blank, not a number, a negative distance or a speed of zero takes its default. A latency of 0 in the column is a real 0, and beats `latency_offset_seconds`. A config with only `DeviceId`, `Phase`, `Parameter` and `Function` keeps working and takes the defaults for every detector. Column names ignore case, spaces and underscores. With `to_sql=True` your own `detector_config` table needs all three columns, which may be NULL.
+Each value is judged row by row: a row may have one and not the others, and whatever is blank, not a number, a negative distance or a speed of zero takes its default. A latency of 0 in the column is a real 0, and beats `latency_offset_seconds`. A config with only `DeviceId`, `Phase`, `Parameter` and `Function` keeps working and takes the defaults for every detector. Column names ignore case, spaces and underscores. With `to_sql=True` your own `detector_config` table needs all three columns, which may be NULL, and `Lanes`, `TravelTime` and `RedDepartures` too with `queue_model`.
 
-**Queues over the detector.** UDOT's method has no step for a queue that reaches the advance detector. Vehicles stop on it while the phase is red. When the phase turns green the queue moves, and its vehicles begin actuating the detector on green, so they read as arriving on green although they all arrived on red. So an advance detector that stays ON for more than `spillback_on_seconds` (default 6) gets a flag, and every actuation that begins while it holds the flag counts as an arrival on red, whatever the phase shows. `Total_Actuations` does not change, and `platoon_ratio` follows through `Percent_AOG`.
+**Spillback Flag: queues over the detector.** Arrival on green is read here as the share of vehicles that did not have to stop, and a stop is a vehicle's speed falling below 5 mph, the threshold Emtenan and Day used for their ground truth ("Impact of Detector Configuration on Performance Measurement and Signal Operations," TRR 2674(4), 2020). The Spillback Flag below corrects for queues that reach the detector, and the Queue Model (`queue_model`) for queues short of it. UDOT's method has no step for a queue that reaches the advance detector. Vehicles stop on it while the phase is red. When the phase turns green the queue moves, and its vehicles begin actuating the detector on green, so they read as arriving on green although they all arrived on red. The error is documented: in Emtenan and Day's simulation, arrivals on red count fewer stops than really happen as queues reach the detector, most of all for detectors close to the stop bar. On 52 Utah signals, detector-based AOG ran about 40% above AOG from connected vehicle trajectories, which counts a vehicle as on green only if it did not stop, where queues passed the advance detector and splits failed, and agreed closely where queues were short (Saldivar-Carranza et al., "Comparison of Arrivals on Green Estimations from Vehicle Detection and Connected Vehicle Data," TRR 2677(12), 2023). So an advance detector that stays ON for more than `spillback_on_seconds` (default 6) gets the Spillback Flag. That actuation is a car stopped on the detector, so it counts as an arrival on red, and so does every actuation that begins while the detector holds the flag, whatever the phase shows. `Total_Actuations` does not change, and `platoon_ratio` follows through `Percent_AOG`.
 
-The flag goes only when the detector has been OFF for `spillback_gap_seconds` (default 5), measured from off to the next on, not when traffic starts moving, because the queue clears at about one vehicle every 2 seconds. Each detector has its own flag. The flag begins when the detector has been ON long enough, so the actuation that trips it keeps its own reading. A detector with no off events never gets the flag. `spillback_on_seconds=None` turns all of this off and gives UDOT's method alone. The two defaults come from three days of real events on 846 signals, with no ground truth to tune against: more than 6 seconds on is a car at walking pace or stopped, and 5 seconds of empty lane is well past the gap between vehicles in a queue that is clearing.
+The flag goes only when the detector has been OFF for `spillback_gap_seconds` (default 4), measured from off to the next on, not when traffic starts moving, because the queue clears at about one vehicle every 2 seconds. Each detector has its own flag. An actuation ON for more than 360 seconds is a detector fault more than a car, so it keeps its own reading, and the actuations after it are still flagged. A detector with no off events never gets the flag. `spillback_on_seconds=None` turns all of this off and gives UDOT's method alone. The 6 seconds come from three days of real events on 846 signals, with no ground truth to tune against: more than 6 seconds on is a car at walking pace or stopped. The gap was 5 seconds until a study of 57 lanes, with a second detector upstream as ground truth, found that 5 seconds keeps the flag on free-flowing cars behind the queue. 4 seconds did as well or better in every case.
 
-**Incremental runs** give the same rows as one big run wherever the runs are cut, for both measures. A bin is written once, whole, by the first run whose data reaches the end of it, and that is a run whose last event, across all signals, is within a second of the end of the bin. A run that stops short of that leaves the bin it stopped in for the next run. Vehicles that arrive after results stop, the phase events from there on, the phases still green, the detectors holding the flag and the detectors still on are kept in `unmatched_events` (synthetic `EventId` 938 to 941 and 948 to 950, and 942 with `remove_incomplete`), so `unmatched_event_settings` with `df_or_path` is all that is needed, with or without `timeline`. With runs cut on the bin and enough signals to fill the last second, every bin is written by the run that reaches it. With a few quiet signals the last event can be short of the end of the bin, and that bin is written one run later, with the same values. A run with no unmatched settings has nothing after it, so it writes all it has, up to its last event. Arrivals past that are not counted.
+**Queue Model: queues short of the detector** (`queue_model=True`, off by default; **recommended on**, ideally with atspm-detector's `Lanes`, `TravelTime` and `RedDepartures` in `detector_config`). A vehicle can cross the detector at speed on green and still stop behind cars leaving the stop bar. The Spillback Flag cannot see that queue, so the Queue Model counts it. Each detector's vehicles are queued at the stop bar in the order they arrive. Service starts 5 seconds after green begins and ends 3 seconds after that green ends, at 2 seconds a car per lane: the standard 2n + 5 queue clearance. A car that waits 4 seconds or more counts as an arrival on red, as does one not served before service ends. Each green is its own queue. A car's arrival is its on plus its travel time, with no latency taken off: the travel time was measured between logged events, so any latency is already in it. The travel time is the detector's `TravelTime` where the config has one. Without one, it is at least 2 seconds plus the distance at 70 feet a second: a line fitted to the time free-flowing cars took from the detector to the stop bar at 277 ODOT lanes with a stop bar count. Cars slow near the stop bar, most of all to turn, so distance at 35 MPH puts them there too early: at 75 feet the line gives 3.1 seconds where 35 MPH gives 1.5, and at 150 feet 4.1 against 2.9. Past 385 feet the `MPH` time is the longer and is used. The lanes between the detector and the stop bar hold lanes x `DistanceFromStopBar` / 25 feet cars, the lanes counted from `Lanes`. Of the cars that arrive before service starts, only that many join the queue. A car whose queue would reach past the detector, but that did not sit on the detector more than `spillback_on_seconds`, is not queued. A queue longer than its space is one the controller served without logging it, such as a permissive left turn or a right turn on red. Where that is common the Queue Model is turned off: for a detector whose `RedDepartures` is over 0.25 only the Spillback Flag runs. The Queue Model needs the Spillback Flag on.
+
+The model was checked against the same two kinds of ground truth as the flag:
+- **Stop bar counts at 277 lanes, 903,554 vehicles counted on green.** Wrong calls fall from 74 to 41.2 per 1,000. Left turns at 100 to 149 feet go from 166 to 95. Under 100 feet they go from 76 to 46 at six lanes; the seventh, where 58% of the vehicles left on red, takes all seven from 71 to 71. Distance at 35 MPH alone would give 45 overall and make short left turns worse than no model. 24 lanes come out worse than with no model, 14 of them by under 10 per 1,000. Of the 7 worse by more than 20, 6 are lanes where more than a tenth of the vehicles left on red, and one is a slow left turn. Each lane's own measured travel time, taken from other days, in place of the fitted line gives 40.6, helping most at left turn and minor street lanes 100 to 199 feet back (left turns at 100 to 149 feet: 84; the slow left turn: 84 to 31). In cycles where no queue reaches the detector, which hold most vehicles, the flag changes nothing.
+- **Lanes where cars leave on red, and advance detectors over two or three lanes.** 438 advance detectors with a stop bar count zone in every lane they cover, 1.23 million vehicles counted on green, with atspm-detector's `TravelTime` and `RedDepartures`. At 254 single-lane advance detectors the Queue Model takes wrong calls from 73.0 to 39.3 per 1,000. At 184 over two or three lanes it takes them from 67.1 to 53.8; there the stop bar counts give a travel time for only 15% (two lanes) and 7% (three) of the vehicles counted on green, mostly in light traffic, so that figure is less sure. Turning the Queue Model off where `RedDepartures` is over 0.25 turns it off at 7 advance detectors, 6 better and 1 worse: 43.3 to 43.1 overall, and 39.3 to 38.9 at single lanes. Cutoffs from 0.15 to 0.25 scored the same; 0.25 turns it off at the fewest detectors with the fewest made worse. The share pools every stop bar count zone in the detector's lanes; the highest single zone instead turned the Queue Model off at 25 detectors, 13 of them made worse. It counts from 2 seconds after red starts, so yellow and red clearance lengths do not matter; 1, 2 or 3 seconds after red, or 6 after green ends, scored the same. Stop bar presence zones are not used: their share ran higher than the count zones' (mean 0.066 against 0.043, correlation 0.35), and at 0.25 they turned the Queue Model off at 28 detectors, 22 of them made worse. 14.5% of ODOT advance detectors have a stop bar count zone in a lane they cover; the rest have no `RedDepartures`, and the Queue Model runs. The package's own SQL was checked against the study's Queue Model on a full day of real events at 12 of these advance detectors (one to three lanes, with and without `TravelTime`, two over 0.25): all 1,140 bins match.
+- **A second detector upstream at 152 lanes, cycles where the flag trips.** Wrong calls are 293 per 1,000 with no correction, 252 with the flag, 269 with the model alone and 258 with both. Some cars crossed the upstream detector after the queue had reached it and cannot be told apart. Counted as queued instead of free, those figures are 641, 292, 607 and 294. The model cannot see past the detector, so the flag does that work.
+
+The weak spot is service the controller does not log, at lanes with no stop bar count zone to measure it. ODOT's controllers log no permissive or flashing yellow arrow intervals. `Total_Actuations` does not change. On one day of 100 signals run every 15 minutes with 12 measures, the Queue Model takes the run time from 112–113 to 119–123 seconds (three runs each).
+
+**Incremental runs** give the same rows as one big run wherever the runs are cut, for both measures. A bin is written once, whole, by the first run whose data reaches the end of it, and that is a run whose last event, across all signals, is within a second of the end of the bin. A run that stops short of that leaves the bin it stopped in for the next run. Vehicles that arrive after results stop, the phase events from there on, the phases still green, the detectors holding the flag and the detectors still on are kept in `unmatched_events` (synthetic `EventId` 938 to 941 and 948 to 950, 964 and 965 with `queue_model`, and 942 with `remove_incomplete`), so `unmatched_event_settings` with `df_or_path` is all that is needed, with or without `timeline`. A vehicle whose detector is still on when a run ends may yet trip the flag. It waits for the run that sees the detector turn off, or whose data reach 360 seconds past its on, kept as its detector's 950 plus 1000. If it reaches the stop bar on green before results stop, its phase's results stop at the start of its bin, so that bin comes out one run later, with the same values. On 9 hours of two signals, one with queues over its detectors, cut every 15 minutes, that was 4 of 210 bins. With `queue_model`, a vehicle is known once the data reach 6 seconds past its departure, or past the end of service of a green that has ended. Until then it waits for the next run as a 965, with the cars ahead of it back to the last empty queue, and its phase's results stop at the start of its bin. A green with no end yet does not hold results back, since each car in it is known 6 seconds after it leaves. With runs cut on the bin and enough signals to fill the last second, every other bin is written by the run that reaches it. With a few quiet signals the last event can be short of the end of the bin, and that bin is written one run later, with the same values. A run with no unmatched settings has nothing after it, so it writes all it has, up to its last event. Arrivals past that are not counted.
 
 Two limits: a run that really stops inside the last second of a bin is taken as having reached the end of it, and a latency larger than the travel time can move an arrival back into a bin already written.
 
@@ -279,7 +330,7 @@ Two limits: a run that really stops inside the last second of a bin is taken as 
 | Column | Which vehicles | Seconds |
 | --- | --- | --- |
 | `Delay_Seconds` | Arrived on red, under the flag or not | Measured: from arrival to the next green, added up |
-| `Queued_Delay_Seconds` | Crossed on green or yellow under the flag | Estimated: half the time from the later of red start and flag start to their green, added up. 0 if the flag began after the green did |
+| `Queued_Delay_Seconds` | Crossed on green or yellow under the flag, including the vehicle that trips it | Estimated: half the time from the later of red start and flag start to their green, added up. The flag starts when the vehicle that trips it turns the detector on. 0 if the flag began after the green did |
 
 Any other vehicle on green or yellow adds nothing, as in UDOT's method. A vehicle with no green within 360 seconds, or with an estimate over 360 seconds, is in neither column. UDOT states no such limit. Red starts at red clearance begin (10), or at end of yellow (9), which is UDOT's own event and is all that a signal logging no 10 has.
 
@@ -293,7 +344,21 @@ Seconds per vehicle, with both tables listed with the same `bin_size` and settin
 
 It holds at any roll-up, since the vehicles are in the same bins. `SUM(Delay_Seconds) / SUM(Total_Actuations)` is the measured part alone, and the top number over 3,600 is vehicle-hours. UDOT's average is written two ways, over arrivals on red and over all actuations, and this table has no count of arrivals on red. `approach_delay` runs without `arrival_on_green`.
 
-**Incremental runs** give the same rows as one big run wherever the runs are cut. A bin is written once and never changes, by the first run whose data reach 360 seconds past its end, across all signals, when none of its vehicles can still be waiting. With runs cut on a 15-minute bin that is one run after `arrival_on_green`, so the newest bin of `arrival_on_green` has no row here yet, and a chart should stop at the newest bin here. A run with no unmatched settings writes all it has. Sums of the bins not written yet, waiting vehicles, the signal events they need and the detectors holding the flag are kept in `unmatched_events` (synthetic `EventId` 957 to 959, and 942 with `remove_incomplete`).
+**Queue Model delay** (`queue_model=True`, off by default; **recommended on**). UDOT's method undercounts delay twice over: a car arriving on red waits only until green begins, although the tenth car in line leaves about 20 seconds later, and a car arriving on green behind a queue short of the advance detector waits nothing. With `queue_model`, `Queue_Delay_Seconds` gives each vehicle its wait by the Queue Model of [Arrival on Green](#arrival-on-green): its departure from the queue less its arrival there, or, if service ends before its turn, the start of the next green's service less its arrival. Where the model does not answer, the vehicle takes its `Delay_Seconds` plus `Queued_Delay_Seconds` instead: under the Spillback Flag, at a detector whose `RedDepartures` is over 0.25, where the model drops the car or calls its queue impossible, or where the wait would pass 360 seconds. `Queue_Delay_Seconds` is the whole delay, not a part to add to the other two, which stay exactly as above, so seconds per vehicle are `SUM(Queue_Delay_Seconds) / SUM(Total_Actuations)`. A vehicle is in the same bin as in the other columns. The setting needs the Spillback Flag on, and the `detector_config` columns of the Queue Model help it as they do `arrival_on_green`.
+
+Measured against the stop bar count zones at 438 ODOT advance detectors (254 over one lane, 184 over two or three) on 3 days, with 1.57 million cars matched from the advance detector to the stop bar count zone and each car's true delay its crossing at the stop bar less its free-flow crossing:
+
+| Delay of a 15-minute bin, against the truth | UDOT's method + the estimate | Queue Model |
+| --- | --- | --- |
+| Bias, all | −33.9% | +3.1% |
+| Error, all | 39.8% | 20.1% |
+| Error, one lane / two or three | 38.2% / 45.7% | 18.7% / 25.0% |
+| Error, the busiest quarter of bins | 48.3% | 20.9% |
+| Error per car | 2.35 s | 1.56 s |
+
+It was closer at 398 of the 438 detectors and on each of the 3 days. The matched cars lean to light traffic: 71% of cars are matched in the quietest quarter of bins and 17% in the busiest, where the Queue Model reads 4.5% low (14.1% high in the quietest). At the 7 detectors over the `RedDepartures` cutoff, where cars leave on red, UDOT's method reads 45% high, and the Queue Model is off there. Like the estimate, this is not UDOT's method.
+
+**Incremental runs** give the same rows as one big run wherever the runs are cut. A bin is written once and never changes, by the first run whose data reach 360 seconds past its end, across all signals, when none of its vehicles can still be waiting. With runs cut on a 15-minute bin that is one run after `arrival_on_green`, so the newest bin of `arrival_on_green` has no row here yet, and a chart should stop at the newest bin here. A run with no unmatched settings writes all it has. Sums of the bins not written yet, waiting vehicles, the signal events they need and the detectors holding the flag are kept in `unmatched_events` (synthetic `EventId` 957 to 959, and 942 with `remove_incomplete`). A vehicle whose detector is still on, and that would get the estimate if it trips the flag, waits until that is known, as in [Arrival on Green](#arrival-on-green), and its bin waits with it. With `queue_model` every vehicle whose detector is still on waits, and so does a vehicle whose wait by the model is not known yet: it is carried whole, with the cars ahead of it back to the last empty queue, as 959 plus 5000 and up, and its bin waits for it. Turning `queue_model` on or off between runs keeps `Delay_Seconds` and `Queued_Delay_Seconds` whole.
 
 ### Left-Turn Gaps
 
@@ -545,7 +610,8 @@ The following tables are produced by the aggregation process, depending on the c
 *   `DeviceId` (INTEGER or TEXT): Unique identifier for the controller (type depends on input).
 *   `Phase` (INT16): Phase number.
 *   `Delay_Seconds` (FLOAT): Measured. Seconds from arrival to the next green, added up over the vehicles arriving on red in this bin, including those under the spillback flag.
-*   `Queued_Delay_Seconds` (FLOAT): Estimated, with no published method. Half the time from the later of red start and flag start to their green, added up over the vehicles of this bin crossing on green or yellow under the flag.
+*   `Queued_Delay_Seconds` (FLOAT): Estimated, with no published method. Half the time from the later of red start and flag start to their green, added up over the vehicles of this bin crossing on green or yellow under the flag, including the vehicle that trips it.
+*   `Queue_Delay_Seconds` (FLOAT): Only with `queue_model=True`. The whole delay of the bin's vehicles by the Queue Model, each falling back to its `Delay_Seconds` plus `Queued_Delay_Seconds` where the model does not answer.
 
 A vehicle with no green within 360 seconds, or an estimate over 360 seconds, is in neither. See [Approach Delay](#approach-delay).
 
@@ -752,16 +818,18 @@ Rows with `EventId` 927 to 959 are state carried between runs, not controller ev
 | 943 | `ped` | One unique actuation, stamped with its bin, in a bin not written yet or the last 3 written | Input |
 | 944, 945 | `ped` | Each input's next bin to write, and its last activity | Input |
 | 946, 947 | `ped` | One press, or one ped service, stamped with its bin, in a bin not written yet | Input |
-| 948 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped that began while its detector held the spillback flag | Phase |
+| 948 | `arrival_on_green`, `platoon_ratio` | A vehicle arriving after results stopped under the spillback flag | Phase |
 | 949 | `arrival_on_green`, `platoon_ratio` | A detector holding the spillback flag, stamped when it last turned off, or when it turned on if it is on | Detector |
-| 950 | `arrival_on_green`, `platoon_ratio` | A detector on at the end of the data, stamped when it turned on | Detector |
+| 950 | `arrival_on_green`, `platoon_ratio` | A detector on at the end of the data, stamped when it turned on. Plus 1000 when its vehicle is not counted yet, since it may yet trip the flag | Detector, or detector + 1000 |
+| 964 | `arrival_on_green`, `platoon_ratio` with `queue_model` | A vehicle arriving after results stopped that the queue model queued | Phase |
+| 965 | `arrival_on_green`, `platoon_ratio` with `queue_model` | A vehicle in a queue the model has not finished, or one ahead of it in that queue, stamped at its on | Detector, + 1000 if flagged, + 2000 if it sat on the detector, + 4000 if its detector was still on, + 8000 if already counted |
 | 951, 952, 953 | `yellow_red` | Green, yellow and red clearance begins of a cycle not finished writing | Phase |
 | 954 | `yellow_red` | An actuation of a cycle not finished writing, already moved back by the latency | Phase |
 | 955 | `timeline` | The last phase call event of each device | 0 |
 | 956 | `actuations` with `fill_in_missing` | Each detector's last on event, for the zero rows of one silent for a whole run | Detector |
-| 957 | `approach_delay` | A sum of a bin not written yet, stamped with its bin plus one microsecond for each unit. A sum too big for its bin takes more rows | Phase for `Delay_Seconds` in milliseconds, phase + 1000 for `Queued_Delay_Seconds` in half milliseconds |
+| 957 | `approach_delay` | A sum of a bin not written yet, stamped with its bin plus one microsecond for each unit. A sum too big for its bin takes more rows | Phase for `Delay_Seconds` in milliseconds, phase + 1000 for `Queued_Delay_Seconds` and phase + 2000 for `Queue_Delay_Seconds` in half milliseconds |
 | 958 | `approach_delay` | A vehicle still waiting, at its arrival, or a green, yellow or red begin a vehicle may need | Phase for a vehicle, phase + 1000 times 1, 8 or 10 for an event |
-| 959 | `approach_delay` | A detector on at the end of the data, one holding the flag, when a flag began, or the on of a vehicle under the flag not at every stop bar of its detector yet | Detector, detector + 1000, + 2000 or + 3000 |
+| 959 | `approach_delay` | A detector on at the end of the data, one holding the flag, when a flag began, the on of a vehicle under the flag not at every stop bar of its detector yet, or a detector on at the end of the data whose vehicle is not counted yet. With `queue_model`, a vehicle the Queue Model needs again, at its on | Detector, detector + 1000, + 2000, + 3000 or + 4000; for a vehicle, detector + 5000, plus 1000 if flagged, 2000 if it sat on the detector, 4000 if its detector was still on, 8000 if it is counted already |
 | 960, 961, 962 | `arrival_pattern` | Green, yellow and red clearance begins of a cycle not finished writing | Phase |
 | 963 | `arrival_pattern` | A vehicle of a cycle not finished writing, or one that may arrive after a first green still to come, at its arrival at the stop bar | Phase |
 | 970 | `has_data` | The signal's last event | 0 |

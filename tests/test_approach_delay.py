@@ -404,6 +404,39 @@ def test_a_vehicle_under_the_flag_arriving_after_the_cut_keeps_its_flag_start():
     assert rows.Delay_Seconds.sum() == pytest.approx(905 - 810)
 
 
+def test_the_vehicle_that_trips_the_flag_gets_the_estimate_from_its_own_on():
+    """On at 890 s on red, a green at 895 s, at the stop bar at 900 s on green, and on the detector until 905 s."""
+    detectors = config((PHASE, DETECTOR), DistanceFromStopBar=10 * 35 * 1.467)
+    events = frame(at(0, 10, PHASE), at(895, 1, PHASE), at(960, 8, PHASE), at(964, 10, PHASE), *actuation(890, 905), *end_at(2400))
+    assert one_row(events, detectors) == (0, 2.5)
+    off = {'name': 'approach_delay', 'params': {'spillback_on_seconds': None}}
+    assert one_row(events, detectors, aggregations=[off]) == (0, 0)
+
+
+@pytest.mark.parametrize('cut', [892, 898, 900, 903, 906])
+def test_a_cut_while_the_tripping_detector_is_still_on_equals_one_big_run(cut):
+    """Cuts with it on for less and more than 6 s, before and after it reaches the stop bar, and after its off."""
+    detectors = config((PHASE, DETECTOR), DistanceFromStopBar=10 * 35 * 1.467)
+    events = frame(at(0, 10, PHASE), at(895, 1, PHASE), at(960, 8, PHASE), at(964, 10, PHASE), *actuation(890, 905),
+                   *actuation(906, 906.5), *end_at(2400))
+    big = sort(process(events, detectors)['approach_delay'])
+    assert big.Queued_Delay_Seconds.sum() == pytest.approx(2 * 2.5)
+    rows = sort(written(cut_runs(events, [cut], detectors)))
+    pd.testing.assert_frame_equal(rows, big, check_dtype=False)
+
+
+@pytest.mark.parametrize('cut', [1000, 1260, 1300])
+def test_a_vehicle_on_for_over_360_s_gets_no_estimate_and_its_follower_does(cut):
+    """On at 890 s, green at 895 s, at the stop bar at 900 s, off at 1300 s: a fault, not a car. The one after it is flagged."""
+    detectors = config((PHASE, DETECTOR), DistanceFromStopBar=10 * 35 * 1.467)
+    events = frame(at(0, 10, PHASE), at(895, 1, PHASE), at(1400, 8, PHASE), at(1404, 10, PHASE), *actuation(890, 1300),
+                   *actuation(1301, 1301.5), *[at(t, 1, 15) for t in range(900, 2700, 10)], *end_at(2700))
+    big = sort(process(events, detectors)['approach_delay'])
+    assert big.Queued_Delay_Seconds.sum() == pytest.approx((895 - 890) / 2)  # the follower alone
+    rows = sort(written(cut_runs(events, [cut], detectors)))
+    pd.testing.assert_frame_equal(rows, big, check_dtype=False)
+
+
 def test_a_detector_on_two_phases_counts_once_on_each_across_a_cut():
     """It reaches phase 2's stop bar before the cut and phase 6's after it, under the flag."""
     detectors = config((2, DETECTOR), (6, DETECTOR), DistanceFromStopBar=[0.0, 10 * 35 * 1.467])
@@ -548,7 +581,7 @@ def two_devices(seed):
         pd.concat([STREAM_DETECTORS, STREAM_DETECTORS.assign(DeviceId='B')], ignore_index=True)
 
 
-def by_hand(events, detectors, on_ms=6000, gap_ms=5000, bin_ms=BIN * 1000, limit_ms=LIMIT * 1000):
+def by_hand(events, detectors, on_ms=6000, gap_ms=4000, bin_ms=BIN * 1000, limit_ms=LIMIT * 1000, own_limit_ms=360_000):
     """Every vehicle, from the rules. Times in milliseconds from T0. Results stop at the end of the data, or the end of its
     bin if that is within a second, as in arrival_on_green."""
     ms = lambda t: round((t - T0).total_seconds() * 1000)
@@ -573,6 +606,8 @@ def by_hand(events, detectors, on_ms=6000, gap_ms=5000, bin_ms=BIN * 1000, limit
                 elif on_at is not None:
                     if t - on_at > on_ms and flag_start is None:
                         flag_start = on_at
+                        if t - on_at <= own_limit_ms:  # the vehicle that trips the flag is under it too, unless on past the limit
+                            vehicles[-1] = (*vehicles[-1][:2], flag_start)
                     on_at, last_end = None, t
         for arrival, phase, flag_start in vehicles:
             if arrival >= results_end:

@@ -2,7 +2,9 @@
 --unmatched_events. has_data only sees the current run, and a later run writes these bins. yellow_red and arrival_pattern can write a bin
 --from before results stopped, once the last cycle with a red in it has finished, so a device keeps its bins from its
 --first red not written yet. approach_delay writes a bin once data reach 360 seconds past its end, so it keeps those too,
---and left_turn_gaps once its device's data reach 10 seconds past the end.
+--and left_turn_gaps once its device's data reach 10 seconds past the end. arrival_on_green can hold a phase's bin before
+--results stopped for a vehicle whose detector is still on, or one its queue model has not finished with, so a device keeps
+--its bins from the bin before that vehicle's on.
 --A run with no raw data has no results_end and keeps everything it was given.
 --Written in SQL for DuckDB. This is a jinja2 template, with variables inside curly braces.
 
@@ -27,6 +29,14 @@ LEFT JOIN (
     GROUP BY DeviceId
 ) h ON b.DeviceId = h.DeviceId
 {%- endif %}
+{%- if arrival_held %}
+LEFT JOIN (
+    SELECT DeviceId, MIN(time_bucket(INTERVAL '{{bin_size}} minutes', TimeStamp)) - INTERVAL '{{bin_size}} minutes' AS First_Arrival_Held
+    FROM unmatched_events
+    WHERE (EventId = 950 AND Parameter >= 1000) OR (EventId = 965 AND (Parameter // 8000) % 2 = 0)
+    GROUP BY DeviceId
+) a ON b.DeviceId = a.DeviceId
+{%- endif %}
 {%- if left_turn_gaps_carried %}
 LEFT JOIN (
     SELECT DeviceId, MAX(TimeStamp) AS Last_Event
@@ -43,6 +53,9 @@ LEFT JOIN (
 WHERE Results_End IS NULL OR b.TimeStamp >= Results_End
 {%- if red_cycles_carried %}
    OR b.TimeStamp >= h.First_Held
+{%- endif %}
+{%- if arrival_held %}
+   OR b.TimeStamp >= a.First_Arrival_Held
 {%- endif %}
 {%- if approach_delay_carried %}
    OR b.TimeStamp + INTERVAL '{{bin_size}} minutes' + INTERVAL 360 SECOND > (SELECT MAX(TimeStamp) FROM raw_data)

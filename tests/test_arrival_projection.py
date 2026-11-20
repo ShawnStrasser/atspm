@@ -249,8 +249,9 @@ def test_arrival_past_the_end_is_held_and_written_by_the_next_run():
     run1 = process(first, config((2, 3)), carry='first')
     assert len(run1['arrival_on_green']) == 0
     state = run1['unmatched_events'].set_index('EventId')
-    assert state.loc[938, 'Parameter'] == 2  # held, with its phase
-    assert state.loc[938, 'TimeStamp'] == T0 + pd.Timedelta(seconds=897.9 + round(TRAVEL_220, 3))
+    # Its detector logged no off, so it may yet trip the spillback flag: it is held as its detector's on, not counted yet
+    assert state.loc[950, 'Parameter'] == 3 + 1000
+    assert state.loc[950, 'TimeStamp'] == T0 + pd.Timedelta(seconds=897.9)
     assert state.loc[939, 'TimeStamp'] == T0 + pd.Timedelta(minutes=15)  # green when results stopped
     run2 = process(second, config((2, 3)), carry=run1['unmatched_events'])
     out = run2['arrival_on_green']
@@ -275,7 +276,7 @@ def test_a_run_short_of_the_end_of_its_bin_leaves_that_bin_for_the_next_run():
     cut = T0 + pd.Timedelta(seconds=1250)
     run1 = process(events[events.TimeStamp < cut], config((2, 3)), carry='first')
     assert run1['arrival_on_green'].TimeStamp.tolist() == [T0]
-    assert set(run1['unmatched_events'].EventId) >= {938, 939, 940}
+    assert set(run1['unmatched_events'].EventId) >= {939, 940, 950}  # 950: the vehicle at 1000 s, its detector still on
     run2 = process(events[events.TimeStamp >= cut], config((2, 3)), carry=run1['unmatched_events'])
     assert run2['arrival_on_green'].TimeStamp.tolist() == [T0 + pd.Timedelta(minutes=15)]
     same_rows(process(events, config((2, 3)), carry='first')['platoon_ratio'],

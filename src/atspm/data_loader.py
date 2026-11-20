@@ -67,6 +67,21 @@ def _get_columns_from_dataframe_like(source):
     raise ValueError("Unable to determine columns from the provided DataFrame-like source.")
 
 
+class TableSource:
+    """A table, view or subquery already on the connection, given by the SQL that names it: read where it is, with no copy
+    through Python. conn mode hands the app's tables over as these."""
+    def __init__(self, ref, label=None):
+        self.ref = ref
+        self.label = label or ref
+
+    def __repr__(self):
+        return f"TableSource({self.label})"
+
+
+def _get_columns_from_relation(conn, ref):
+    return [col[0] for col in conn.execute(f"SELECT * FROM {ref} LIMIT 0").description]
+
+
 def _get_columns_from_path(conn, path):
     reference = _quote_path(path)
     cursor = conn.execute(f"SELECT * FROM {reference} LIMIT 0")
@@ -121,18 +136,20 @@ def _build_column_expression(mapping, key, use_alias=True):
     return expr
 
 
-# Optional detector_config columns, in UDOT's names. Each is matched ignoring case, spaces and underscores, and
-# is NULL if the config does not have it.
-_OPTIONAL_CONFIG_COLUMNS = ['DistanceFromStopBar', 'MPH', 'LatencyCorrection']
+# Optional detector_config columns: UDOT's three, then two for arrival_on_green's queue model. Lanes is the lane numbers an
+# Advance detector covers, as atspm-detector writes them ("2", "1,2"); TravelTime is the seconds free-flowing cars take from
+# its on to the stop line. Each is matched ignoring case, spaces and underscores, and is NULL if the config does not have it.
+_OPTIONAL_CONFIG_COLUMNS = {'DistanceFromStopBar': 'DOUBLE', 'MPH': 'DOUBLE', 'LatencyCorrection': 'DOUBLE',
+                            'Lanes': 'VARCHAR', 'TravelTime': 'DOUBLE', 'RedDepartures': 'DOUBLE'}
 
 
 def _optional_config_select(columns):
-    """The optional detector_config columns as DOUBLE. A value that is not a number becomes NULL."""
+    """The optional detector_config columns, each as its type. A value that is not a number becomes NULL."""
     names = {_normalize_column_name(name): name for name in reversed(list(columns))}
     selects = []
-    for column in _OPTIONAL_CONFIG_COLUMNS:
+    for column, sql_type in _OPTIONAL_CONFIG_COLUMNS.items():
         source = names.get(column.lower())
-        value = f"TRY_CAST({_quote_identifier(source)} AS DOUBLE)" if source is not None else "NULL::DOUBLE"
+        value = f"TRY_CAST({_quote_identifier(source)} AS {sql_type})" if source is not None else f"NULL::{sql_type}"
         selects.append(f"{value} AS {column}")
     return ", ".join(selects)
 
@@ -157,7 +174,12 @@ def load_data(conn,
               unmatched_events=None,
               use_unmatched=False,
               known_detector_days=None,
-              drop_fall_back_hour=True):
+              drop_fall_back_hour=True,
+              window=None,
+              devices_table=None,
+              raw_store='raw_store'):
+    """window: (start, end), the events to read, start <= TimeStamp < end. devices_table: a table of the DeviceIds to read, for
+    raw_data and detector_config. raw_store: the name of the in-memory database raw_data is kept in."""
 
     # Reference point for the max_days_old filters below. A run whose raw data is empty has no
     # MIN(TimeStamp), and a bare None would be interpolated into SQL as the string 'None'. The
@@ -166,7 +188,12 @@ def load_data(conn,
     min_timestamp = '1970-01-01 00:00:00'
 
     if raw_data is not None:
-        if isinstance(raw_data, str):
+        if isinstance(raw_data, TableSource):
+            v_print(f"Loading raw data from {raw_data.label}", verbose, 2)
+            source_reference = raw_data.ref
+            source_columns = _get_columns_from_relation(conn, raw_data.ref)
+            source_label = raw_data.label
+        elif isinstance(raw_data, str):
             raw_path = _strip_wrapping_quotes(raw_data)
             v_print("Loading raw data from path", verbose, 2)
             source_reference = _quote_path(raw_path)
@@ -188,18 +215,24 @@ def load_data(conn,
         if drop_fall_back_hour:
             timestamp = _build_column_expression(column_map, 'TimeStamp', use_alias=False)
             fall_back_filter = f"AND {_fall_back_hour(timestamp)} IS NOT TRUE"
+        # The window and the devices on the source's own columns, so DuckDB can skip what it does not need
+        if window is not None:
+            stamp = _quote_identifier(column_map['TimeStamp'])
+            fall_back_filter += f" AND {stamp} >= TIMESTAMP '{window[0]}' AND {stamp} < TIMESTAMP '{window[1]}'"
+        if devices_table is not None:
+            fall_back_filter += f" AND {_quote_identifier(column_map['DeviceId'])} IN (SELECT DeviceId FROM {devices_table})"
 
         # raw_data sits for the whole run, the biggest table by far. Its own compressed in-memory database holds it in
         # about a sixth of the memory (compression happens at the checkpoint), and it reads about as fast.
         load_sql = f"""
-        ATTACH ':memory:' AS raw_store (COMPRESS);
-        CREATE TABLE raw_store.raw_data AS
+        ATTACH ':memory:' AS {raw_store} (COMPRESS);
+        CREATE TABLE {raw_store}.raw_data AS
         SELECT DISTINCT {select_clause}
         FROM {source_reference}
         WHERE EventId >= 0 AND EventId <= 32767 AND Parameter >= 0 AND Parameter <= 32767
         {fall_back_filter};
-        CHECKPOINT raw_store;
-        CREATE VIEW raw_data AS SELECT * FROM raw_store.raw_data;
+        CHECKPOINT {raw_store};
+        CREATE VIEW raw_data AS SELECT * FROM {raw_store}.raw_data;
         """
 
         conn.query(load_sql)
@@ -210,7 +243,10 @@ def load_data(conn,
 
     # Load Configurations (if provided)
     if detector_config is not None:
-        if isinstance(detector_config, str):
+        if isinstance(detector_config, TableSource):
+            config_columns = _get_columns_from_relation(conn, detector_config.ref)
+            config_reference = detector_config.ref
+        elif isinstance(detector_config, str):
             config_columns = _get_columns_from_path(conn, detector_config)
             config_reference = f"'{detector_config}'"
         else:
@@ -221,6 +257,7 @@ def load_data(conn,
         SELECT DeviceId as DeviceId, Phase::INT16 as Phase, Parameter::INT16 as Parameter, Function::STRING as Function,
             {_optional_config_select(config_columns)}
         FROM {config_reference}
+        {f"WHERE DeviceId IN (SELECT DeviceId FROM {devices_table})" if devices_table is not None else ""}
         """)
 
 
@@ -236,7 +273,11 @@ def load_data(conn,
                     continue
                 if value is None:
                     continue
-                if isinstance(value, str):
+                if isinstance(value, TableSource):
+                    reference = value.ref
+                    source_columns = _get_columns_from_relation(conn, value.ref)
+                    source_label = value.label
+                elif isinstance(value, str):
                     source_path = _strip_wrapping_quotes(value)
                     # Nothing to read on a first run. SignalDataProcessor has raised on any other missing file.
                     if not os.path.exists(source_path):
@@ -284,7 +325,7 @@ def load_data(conn,
                     SELECT TimeStamp, DeviceId, EventId, Parameter FROM raw_data
                     UNION ALL
                     SELECT TimeStamp, DeviceId, EventId, Parameter FROM unmatched_previous
-                    WHERE EventId NOT BETWEEN 927 AND 930 AND EventId NOT BETWEEN 938 AND 954 AND EventId NOT BETWEEN 956 AND 963 AND EventId NOT BETWEEN 970 AND 999; -- only left_turn_gaps, arrival_on_green, platoon_ratio, ped, yellow_red, actuations, approach_delay, arrival_pattern and has_data read these
+                    WHERE EventId NOT BETWEEN 927 AND 930 AND EventId NOT BETWEEN 938 AND 954 AND EventId NOT BETWEEN 956 AND 965 AND EventId NOT BETWEEN 970 AND 999; -- only left_turn_gaps, arrival_on_green, platoon_ratio, ped, yellow_red, actuations, approach_delay, arrival_pattern and has_data read these
                     """
                 elif key == 'split_fail_df_or_path':
                     load_sql = f"""

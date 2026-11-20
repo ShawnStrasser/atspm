@@ -62,7 +62,8 @@ def _load_package():
 
 
 def _has_table(conn, name):
-    return conn.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = ?", [name]).fetchall()[0][0] > 0
+    return conn.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = ? AND table_catalog IN (current_database(), 'temp')",
+                        [name]).fetchall()[0][0] > 0
 
 
 def _register_detectors(conn, detectors):

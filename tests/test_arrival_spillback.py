@@ -2,9 +2,9 @@
 
 A queue that reaches an advance detector stops vehicles on it while the phase is red. When the light turns green the queue
 moves, and its vehicles begin actuating the detector while the phase is green, so they read as arriving on green although
-they all arrived on red. So a detector that stays ON for more than spillback_on_seconds gets a flag, and every actuation
-that begins while it holds the flag counts as arriving on red, whatever the phase shows. The flag stays through the queue
-clearing, about one vehicle every 2 seconds, and goes only after the detector has been OFF for spillback_gap_seconds.
+they all arrived on red. So a detector that stays ON for more than spillback_on_seconds gets a flag, and that actuation and
+every actuation that begins while it holds the flag count as arriving on red, whatever the phase shows. The flag stays through
+the queue clearing, about one vehicle every 2 seconds, and goes only after the detector has been OFF for spillback_gap_seconds.
 
 The times here are seconds from T0. With DistanceFromStopBar 0 an arrival lands the moment the detector turns on.
 """
@@ -160,11 +160,13 @@ def test_a_detector_serving_two_phases_counts_flagged_on_both():
     assert out.Percent_AOG.to_dict() == {2: 0.0, 6: 0.0}
 
 
-def test_the_vehicle_that_trips_the_flag_keeps_its_own_reading():
-    # The flag begins when the detector has been ON long enough, and that vehicle's actuation began before that.
-    # A stall on green: its own actuation reads on green, and the one after it reads on red.
+def test_the_vehicle_that_trips_the_flag_counts_as_not_on_green():
+    # A car on the detector for 15 s was stopped, so it reads on red although its actuation began on green, like the one after it
     events = frame(*signal(), *actuation(65, 80), *actuation(81, 81.4), *END_OF_BIN)
-    assert aog(events) == (2, 1)
+    assert aog(events) == (2, 0)
+    alone = frame(*signal(), *actuation(65, 80), *END_OF_BIN)
+    assert aog(alone) == (1, 0)
+    assert aog(alone, aggregations=[AOG_OFF]) == (1, 1)
 
 
 def test_a_flagged_arrival_is_on_red_where_it_lands():
@@ -184,7 +186,13 @@ def test_on_for_exactly_the_setting_does_not_trip_it():
 
 def test_on_for_just_over_the_setting_trips_it():
     events = frame(*signal(), *actuation(70, 70 + T_ON + 0.1), *actuation(77, 77.5), *END_OF_BIN)
-    assert aog(events) == (2, 1)
+    assert aog(events) == (2, 0)
+
+
+@pytest.mark.parametrize('seconds_on, on_green', [(T_ON - 0.1, 1), (T_ON, 1), (T_ON + 0.1, 0)])
+def test_the_actuation_alone_is_on_red_only_past_the_setting(seconds_on, on_green):
+    events = frame(*signal(), *actuation(70, 70 + seconds_on), *END_OF_BIN)
+    assert aog(events) == (1, on_green)
 
 
 def test_a_gap_of_exactly_the_setting_resets_it():
@@ -204,7 +212,7 @@ def test_the_gap_runs_from_off_to_on_so_a_long_actuation_is_not_a_gap():
 
 
 @pytest.mark.parametrize('t_on, t_gap, on_green', [
-    (4, 5, 3),    # 5 s on trips it, so the next vehicle is flagged, and the 6 s gap after that resets it
+    (4, 5, 2),    # 5 s on trips it, so it and the next vehicle are on red, and the 6 s gap after that resets it
     (6, 5, 4),    # the gaps of 6 s and 5 s no longer reset it
 ])
 def test_both_settings_are_used(t_on, t_gap, on_green):
@@ -217,6 +225,13 @@ def test_off_gives_the_old_answer():
     events = queue_events()
     off = process(events, aggregations=[AOG_OFF])
     assert off['arrival_on_green'].Percent_AOG.tolist() == [pytest.approx(0.9)]
+
+
+@pytest.mark.parametrize('seconds_on, on_green', [(360, 0), (360.1, 1)])
+def test_an_actuation_on_for_over_360_s_keeps_its_own_reading(seconds_on, on_green):
+    # On that long it is a detector fault more than a car. The vehicle after it is still under the flag.
+    events = frame(*signal(yellow=800, red=804), *actuation(70, 70 + seconds_on), *actuation(71 + seconds_on, 71.5 + seconds_on), *END_OF_BIN)
+    assert aog(events) == (2, on_green)
 
 
 @pytest.mark.parametrize('params', [
@@ -241,11 +256,18 @@ def test_defaults_are_used_when_settings_are_left_out():
     assert aog(events, aggregations=[aggregation]) == (10, 0)
 
 
+@pytest.mark.parametrize('gap, on_green', [(3.9, 0), (4, 1)])
+def test_the_default_gap_is_4_seconds(gap, on_green):
+    aggregation = {'name': 'arrival_on_green', 'params': {'latency_offset_seconds': 0}}
+    events = frame(*signal(), *actuation(62, 72), *actuation(72 + gap, 72 + gap + 0.5), *END_OF_BIN)
+    assert aog(events, aggregations=[aggregation]) == (2, on_green)
+
+
 # ---- stuck and quiet detectors, and logs that are not whole
 
 def test_a_detector_stuck_on_counts_nothing_while_stuck_and_recovers_after_a_gap():
     events = frame(*signal(yellow=500, red=504), *actuation(70, 400), *actuation(402, 402.5), *actuation(420, 420.5), *END_OF_BIN)
-    assert aog(events) == (3, 2)  # 70 s began on green, 402 s is flagged, and 420 s comes after the gap
+    assert aog(events) == (3, 1)  # 70 s is stuck so on red, 402 s is flagged, and 420 s comes after the gap
 
 
 def test_a_log_with_no_off_events_never_trips_it():
@@ -301,9 +323,9 @@ CUTS = [895, 892]
 
 def test_the_scenario_reads_as_it_should():
     out = process(queue_across_bins(), carry='first')['arrival_on_green'].sort_values('TimeStamp')
-    # The second bin: on green are 950, 960, 1000 (began before its own flag) and 1030. Flagged are the queue, 941 and 1010.
+    # The second bin: on green are 950, 960 and 1030. 1000 trips the flag, and the queue, 941 and 1010 are under it.
     assert out.Total_Actuations.tolist() == [2, 12]
-    assert out.Percent_AOG.tolist()[1] == pytest.approx(4 / 12)
+    assert out.Percent_AOG.tolist()[1] == pytest.approx(3 / 12)
 
 
 @pytest.mark.parametrize('cut', CUTS)
@@ -332,7 +354,7 @@ def test_a_detector_on_at_the_cut_is_carried_with_when_it_turned_on():
     _, carry = cut_runs(events[events.TimeStamp < T0 + pd.Timedelta(seconds=895)], [])
     still_on = state(carry, STILL_ON)
     assert still_on.TimeStamp.tolist() == [T0 + pd.Timedelta(seconds=890)]
-    assert still_on.Parameter.tolist() == [DETECTOR]
+    assert still_on.Parameter.tolist() == [DETECTOR + 1000]  # its vehicle waits, since it may yet trip the flag
     assert len(state(carry, FLAG)) == 0  # not on for long enough yet
 
 
@@ -381,7 +403,79 @@ def test_a_detector_on_across_a_whole_run_with_nothing_of_its_own():
     big = process(events, carry='first')
     runs, _ = cut_runs(events, [900, 1800])
     same_rows(big['arrival_on_green'], runs['arrival_on_green'])
-    assert runs['arrival_on_green'].sort_values('TimeStamp').Percent_AOG.tolist() == [1.0, 0.0]
+    assert runs['arrival_on_green'].sort_values('TimeStamp').Percent_AOG.tolist() == [1.0, 0.0]  # on for over 360 s, 850 s keeps its reading
+
+
+def tripping_at_the_cut(on, off):
+    """Green from 860 s. A vehicle at 870 s, then one that turns the detector on near the end of the first bin and holds it,
+    one right after it and one after a long gap."""
+    rows = [at(600, 10, PHASE), at(860, 1, PHASE), at(1100, 8, PHASE), at(1104, 10, PHASE)]
+    rows += actuations((870, 870.5), (on, off), (off + 2, off + 2.5), (off + 20, off + 20.5))
+    return frame(*rows, at(899.9, 1, 15), at(1799.9, 1, 15))
+
+
+@pytest.mark.parametrize('on, off, cut, first_bin', [
+    (896, 905, 900, 0.5),    # on for 4 s at the cut, trips the flag after it
+    (893, 905, 900, 0.5),    # on for 7 s at the cut, not known to trip it until its off
+    (895, 900.5, 900, 1.0),  # on for 5 s at the cut, and off before 6 s: on green
+    (893, 905, 897, 0.5),    # a cut inside the bin
+    (893, 905, 903, 0.5),    # a cut after the bin
+])
+def test_a_cut_while_the_tripping_detector_is_still_on_equals_one_big_run(on, off, cut, first_bin):
+    events = tripping_at_the_cut(on, off)
+    big = process(events, carry='first')
+    runs, _ = cut_runs(events, [cut])
+    same_rows(big['arrival_on_green'], runs['arrival_on_green'])
+    same_rows(big['platoon_ratio'], runs['platoon_ratio'])
+    out = big['arrival_on_green'].sort_values('TimeStamp')
+    assert out.Total_Actuations.tolist() == [2, 2]
+    assert out.Percent_AOG.tolist()[0] == first_bin
+
+
+def test_a_vehicle_still_on_at_the_cut_on_green_holds_its_bin_for_the_next_run():
+    events = tripping_at_the_cut(893, 905)
+    first = events[events.TimeStamp < T0 + pd.Timedelta(seconds=900)]
+    run1 = process(first, carry='first')
+    assert len(run1['arrival_on_green']) == 0 and len(run1['platoon_ratio']) == 0
+    assert state(run1['unmatched_events'], STILL_ON).Parameter.tolist() == [DETECTOR + 1000]  # not counted yet
+    assert len(state(run1['unmatched_events'], 938)) == 1  # the vehicle at 870 s waits with it
+    run2 = process(events[events.TimeStamp >= T0 + pd.Timedelta(seconds=900)], carry=run1['unmatched_events'])
+    assert run2['arrival_on_green'].sort_values('TimeStamp').Percent_AOG.tolist() == [0.5, 0.5]
+
+
+def test_a_vehicle_still_on_at_the_cut_on_red_does_not_hold_its_bin():
+    # On red it is not on green whether it trips the flag or not
+    rows = [at(600, 1, PHASE), at(840, 8, PHASE), at(844, 10, PHASE), at(1000, 1, PHASE), *actuation(870, 905), *actuation(880, 880.5, OTHER_DETECTOR)]
+    events = frame(*rows, at(899.9, 1, 15), at(1799.9, 1, 15))
+    detectors = config((PHASE, DETECTOR), (PHASE, OTHER_DETECTOR))
+    run1 = process(events[events.TimeStamp < T0 + pd.Timedelta(seconds=900)], detectors, carry='first')
+    assert run1['arrival_on_green'].Total_Actuations.tolist() == [2]
+    assert state(run1['unmatched_events'], STILL_ON).Parameter.tolist() == [DETECTOR]
+    big = process(events, detectors, carry='first')
+    runs, _ = cut_runs(events, [900], detectors)
+    same_rows(big['arrival_on_green'], runs['arrival_on_green'])
+
+
+@pytest.mark.parametrize('parameter, counted', [(DETECTOR, [1]), (DETECTOR + 1000, [1, 1])])
+def test_a_detector_on_from_an_earlier_run_counts_its_vehicle_once(parameter, counted):
+    # 950 with the detector alone: an earlier run counted its vehicle. Plus 1000: it did not, and this run does.
+    held = pd.DataFrame({'TimeStamp': [T0 + pd.Timedelta(seconds=890)], 'DeviceId': 'A', 'EventId': [STILL_ON], 'Parameter': [parameter], 'IsValid': [True]})
+    events = frame(at(600, 1, PHASE), at(905, 81, DETECTOR), *actuation(930, 930.5), at(1799.9, 1, 15))
+    out = process(events, carry=held)['arrival_on_green'].sort_values('TimeStamp')
+    assert out.Total_Actuations.tolist() == counted
+
+
+@pytest.mark.parametrize('cuts', [[900], [1215], [900, 1215], [900, 1205], [1240]])
+def test_a_cut_while_a_detector_is_on_past_360_s_equals_one_big_run(cuts):
+    """On from 850 s on green to 1250 s. A cut at 1215 s comes after it has been on for 360 s and before its off."""
+    rows = [at(600, 1, PHASE), at(1700, 8, PHASE), at(1704, 10, PHASE), *actuation(850, 1250), *actuation(1252, 1252.5)]
+    rows += [at(t, 1, 15) for t in range(0, 1800, 10)] + [at(899.9, 1, 15), at(1799.9, 1, 15)]
+    events = frame(*rows)
+    big = process(events, carry='first')
+    runs, _ = cut_runs(events, cuts)
+    same_rows(big['arrival_on_green'], runs['arrival_on_green'])
+    same_rows(big['platoon_ratio'], runs['platoon_ratio'])
+    assert big['arrival_on_green'].sort_values('TimeStamp').Percent_AOG.tolist() == [1.0, 0.0]
 
 
 def test_an_empty_run_keeps_the_flag():
@@ -420,6 +514,17 @@ def test_remove_incomplete_keeps_flagged_bins_across_runs():
     aggregations = [has_data, AOG, PLATOON]
     big = process(events, aggregations=aggregations, carry='first', remove_incomplete=True)
     runs, _ = cut_runs(events, [926, 1200], aggregations=aggregations, remove_incomplete=True)
+    same_rows(big['arrival_on_green'], runs['arrival_on_green'])
+    same_rows(big['platoon_ratio'], runs['platoon_ratio'])
+
+
+def test_remove_incomplete_keeps_a_held_bin_across_runs():
+    has_data = {'name': 'has_data', 'params': {}}
+    aggregations = [has_data, AOG, PLATOON]
+    events = pd.concat([tripping_at_the_cut(893, 905), frame(*[at(t, 1, 15) for t in range(-2700, 1800, 10)])]).sort_values(['TimeStamp', 'EventId']).reset_index(drop=True)
+    big = process(events, aggregations=aggregations, carry='first', remove_incomplete=True)
+    runs, _ = cut_runs(events, [900], aggregations=aggregations, remove_incomplete=True)
+    assert len(big['arrival_on_green']) == 2
     same_rows(big['arrival_on_green'], runs['arrival_on_green'])
     same_rows(big['platoon_ratio'], runs['platoon_ratio'])
 

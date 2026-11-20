@@ -3,6 +3,8 @@ import time
 from .data_loader import load_data
 from .data_aggregator import aggregate_data, render_query
 from .data_saver import save_data
+from .conn_mode import (ConnMode, HISTORY_TABLE, INTERNAL_TABLES, STATE_TABLES as CONN_STATE_TABLES, check_settings as check_conn_settings,
+                        check_no_conn_settings)
 from .detector_health import detector_health_params, run_detector_health
 from .utils import COMPLETE_BINS, STATE_EVENT_IDS, WRITE_BINS_AT_ONCE
 from .utils import v_print
@@ -30,7 +32,7 @@ ARRIVAL_CARRY_AGGREGATIONS = ('arrival_on_green', 'platoon_ratio')
 # An advance detector ON for more than this many seconds has a queue over it, and keeps the flag until it has been OFF
 # for the gap (see arrival_spillback.sql). spillback_on_seconds=None turns the flag off.
 DEFAULT_SPILLBACK_ON_SECONDS = 6
-DEFAULT_SPILLBACK_GAP_SECONDS = 5
+DEFAULT_SPILLBACK_GAP_SECONDS = 4
 
 # The default time lapse before a new unique ped actuation is counted.
 DEFAULT_SECONDS_BETWEEN_ACTUATIONS = 15
@@ -48,13 +50,13 @@ INSTANT_EVENT_CLASSES = ('Pattern Change', 'Cycle Length Change', 'Offset Change
 # Every setting a run takes. A misspelled name would otherwise do nothing, with no message. detector_health checks its own.
 SETTINGS = {'raw_data', 'detector_config', 'bin_size', 'output_dir', 'output_to_separate_folders', 'output_format',
             'output_file_prefix', 'remove_incomplete', 'drop_fall_back_hour', 'unmatched_event_settings', 'to_sql', 'verbose',
-            'aggregations', 'controller_type'}
+            'aggregations', 'controller_type', 'conn', 'start', 'end', 'devices', 'schema'}
 STATE_SETTINGS = {'df_or_path', 'split_fail_df_or_path', 'max_days_old', 'first_run'}
 AGGREGATION_PARAMS = {
     'has_data': set(),
     'actuations': {'fill_in_missing', 'known_detectors_max_days_old'},
-    'arrival_on_green': {'latency_offset_seconds', 'spillback_on_seconds', 'spillback_gap_seconds'},
-    'approach_delay': {'latency_offset_seconds', 'spillback_on_seconds', 'spillback_gap_seconds'},
+    'arrival_on_green': {'latency_offset_seconds', 'spillback_on_seconds', 'spillback_gap_seconds', 'queue_model'},
+    'approach_delay': {'latency_offset_seconds', 'spillback_on_seconds', 'spillback_gap_seconds', 'queue_model'},
     'left_turn_gaps': set(),
     'platoon_ratio': set(),
     'yellow_red': {'latency_offset_seconds', 'min_red_offset'},
@@ -75,7 +77,7 @@ AGGREGATION_PARAMS = {
 # are every table's.
 STATE_TABLES = {**dict.fromkeys(range(927, 931), 'left_turn_gaps'), **dict.fromkeys(range(931, 935), 'coordination_agg'), 935: 'timeline', 955: 'timeline',
                 **dict.fromkeys((937, 943, 944, 945, 946, 947), 'ped'),
-                **dict.fromkeys((938, 939, 940, 941, 948, 949, 950), 'arrival_on_green'),
+                **dict.fromkeys((938, 939, 940, 941, 948, 949, 950, 964, 965), 'arrival_on_green'),
                 **dict.fromkeys((951, 952, 953, 954), 'yellow_red'), 956: 'actuations',
                 **dict.fromkeys((957, 958, 959), 'approach_delay'), **dict.fromkeys((960, 961, 962, 963), 'arrival_pattern'), **dict.fromkeys(range(970, 1000), 'has_data'), 936: None, 942: None}
 
@@ -123,6 +125,11 @@ def _spillback_params(params):
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
             raise ValueError(f"{name} must be a positive number of seconds" + (", or None to turn the flag off" if name == 'spillback_on_seconds' else ""))
+    if 'queue_model' in params:
+        if not isinstance(params['queue_model'], bool):
+            raise ValueError("queue_model must be True or False")
+        if params['queue_model'] and params['spillback_on_seconds'] is None:
+            raise ValueError("queue_model needs the spillback flag: it reads the same detector state. Leave spillback_on_seconds set.")
     return params
 
 
@@ -252,7 +259,9 @@ class SignalDataProcessor:
         The raw data to be processed, either as a file path or a DataFrame.
     detector_config : str or DataFrame
         The detector configuration, either as a file path or a DataFrame. Columns: DeviceId, Phase, Parameter, Function,
-        and optionally DistanceFromStopBar (feet), MPH and LatencyCorrection (seconds), which arrival_on_green, approach_delay and arrival_pattern use to project arrivals to the stop bar.
+        and optionally DistanceFromStopBar (feet), MPH and LatencyCorrection (seconds), which arrival_on_green, approach_delay and arrival_pattern use to project arrivals to the stop bar,
+        and Lanes (the lane numbers an Advance detector covers, such as "1,2"), TravelTime (seconds from its on to the
+        stop line) and RedDepartures (share of its lanes' stop bar count zone offs in red) for arrival_on_green's queue_model.
     bin_size : int
         The size of the time bins for aggregation, in minutes.
     output_dir : str
@@ -329,7 +338,17 @@ class SignalDataProcessor:
     def __init__(self, **kwargs):
         """Initializes the SignalDataProcessor with the provided keyword arguments."""
         _check_names(kwargs)
+        app = kwargs.pop('conn', None)
+        if app is None:
+            check_no_conn_settings(kwargs)
+        else:
+            start, end = check_conn_settings(kwargs)
         # Optional parameters
+        self.start = None
+        self.end = None
+        self.devices = None
+        self.schema = 'atspm'
+        self._conn_mode = None # conn mode: the app's connection, see conn_mode.py
         self.raw_data = None
         self.detector_config = None
         self.unmatched_event_settings = None # For incremental processing of timeline, split failure, arrival on green, and yellow red)
@@ -341,6 +360,7 @@ class SignalDataProcessor:
         self.remove_incomplete = False
         self.drop_fall_back_hour = True # Drop events in the hour US clocks repeat when they fall back
         self.to_sql = False
+        self._arrival_stages = None # arrival chain stages built for arrival_on_green and its carry (arrival_shared.sql)
         self.verbose = 1 # 0: only print errors, 1: print performance, 2: print debug statements
         self.controller_type = '' # Controller type: '' (default), 'maxtime' or 'siemens' (case-insensitive)
         
@@ -371,12 +391,26 @@ class SignalDataProcessor:
             # Every other aggregation is then joined to it, wherever it was listed
             self.aggregations.sort(key=lambda agg: agg['name'] != 'has_data')
 
+        # Check the detector_health parameters now rather than after the other aggregations have run. A copy leaves
+        # the caller's list and dicts untouched.
+        self.aggregations = [
+            {**agg, 'params': detector_health_params(agg.get('params', {}))} if agg['name'] == 'detector_health'
+            else {**agg, 'params': _spillback_params(agg.get('params', {}))} if agg['name'] in ('arrival_on_green', 'approach_delay')
+            else {**agg, 'params': _arrival_pattern_params(agg.get('params', {}))} if agg['name'] == 'arrival_pattern'
+            else agg
+            for agg in self.aggregations
+        ]
+     
+        if app is not None:
+            self._open_conn_mode(app, start, end)
+
         # Check format of unmatched_event_settings
         # Duckdb needs quotes if it is a file path, but not if it is a dataframe
         if self.unmatched_event_settings is not None:
             self.incremental_run = True
-            self.unmatched_found = True
-            self.sf_unmatched_found = True  # Separate flag for split_failures
+            # Each state is read only when it was given
+            self.unmatched_found = 'df_or_path' in self.unmatched_event_settings
+            self.sf_unmatched_found = 'split_fail_df_or_path' in self.unmatched_event_settings  # Separate flag for split_failures
             first_run = self.unmatched_event_settings.get('first_run', False)
             for key, value in self.unmatched_event_settings.items():
                 if key in ('max_days_old', 'first_run'):
@@ -394,18 +428,9 @@ class SignalDataProcessor:
             if agg['name'] == 'actuations' and agg['params'].get('fill_in_missing') and 'df_or_path' in (self.unmatched_event_settings or {}):
                 self.known_detector_days = agg['params'].get('known_detectors_max_days_old', 2)
 
-        # Check the detector_health parameters now rather than after the other aggregations have run. A copy leaves
-        # the caller's list and dicts untouched.
-        self.aggregations = [
-            {**agg, 'params': detector_health_params(agg.get('params', {}))} if agg['name'] == 'detector_health'
-            else {**agg, 'params': _spillback_params(agg.get('params', {}))} if agg['name'] in ('arrival_on_green', 'approach_delay')
-            else {**agg, 'params': _arrival_pattern_params(agg.get('params', {}))} if agg['name'] == 'arrival_pattern'
-            else agg
-            for agg in self.aggregations
-        ]
-     
-        # Establish a connection to the database
-        self.conn = duckdb.connect()
+        # Establish a connection to the database (conn mode has the app's cursor already)
+        if self._conn_mode is None:
+            self.conn = duckdb.connect()
         # Track whether connection has been closed
         self._closed = False
         # Track whether data has been loaded
@@ -438,7 +463,8 @@ class SignalDataProcessor:
                     self.unmatched_event_settings,
                     self.unmatched_found or self.sf_unmatched_found,
                     self.known_detector_days,
-                    self.drop_fall_back_hour)
+                    self.drop_fall_back_hour,
+                    **self._load_options())
             # delete self.raw_data and self.detector_config to free up memory
             self.data_loaded = True
             if self.raw_data is not None:
@@ -523,9 +549,7 @@ class SignalDataProcessor:
         bin_interval = f"INTERVAL '{self.bin_size} minutes'"
         # An instant event has no real duration: its end is only the cushion, which can reach a bin the run has not seen
         interval_end = f"CASE WHEN t.EventClass IN {INSTANT_EVENT_CLASSES} THEN t.StartTime ELSE t.EndTime END"
-        has_previous = self.conn.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_previous'"
-        ).fetchall()[0][0]
+        has_previous = self._table_exists('unmatched_previous')
         if has_previous:
             previous_markers = "SELECT DeviceId, MAX(TimeStamp) AS MarkerBin FROM unmatched_previous WHERE EventId = 935 GROUP BY DeviceId"
         else:
@@ -633,9 +657,7 @@ class SignalDataProcessor:
         run inherits that through unmatched_previous.IsValid. The next run measures a silence that crosses
         runs from each device's last event (synthetic EventId 936).
         """
-        has_previous = self.conn.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'unmatched_previous'"
-        ).fetchall()[0][0] > 0
+        has_previous = self._table_exists('unmatched_previous')
         event_gaps = render_query('event_gaps', unmatched=has_previous, event_gap_schedule=self.event_gap_schedule)
         self.conn.execute(f"""
             CREATE OR REPLACE TEMP TABLE event_gaps AS {event_gaps};
@@ -679,8 +701,9 @@ class SignalDataProcessor:
         """)
 
     def _table_exists(self, name):
+        """A table or view of this run: in its own database or its temp tables, not in another database the connection sees."""
         return self.conn.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [name]
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ? AND table_catalog IN (current_database(), 'temp')", [name]
         ).fetchall()[0][0] > 0
 
     def _save_arrival_carry(self):
@@ -689,15 +712,43 @@ class SignalDataProcessor:
         See arrival_on_green_carry.sql.
         """
         params = next(agg for agg in self.aggregations if agg['name'] == 'arrival_on_green').get('params', {})
+        unmatched = self._table_exists('unmatched_previous')
+        shared = self._arrival_stages if self._arrival_stages and self._arrival_stages[1] == unmatched else None
         carry = render_query(
             'arrival_on_green_carry',
             **params,
             bin_size=self.bin_size,
             from_table='raw_data',
             carry_bins=True,
-            unmatched=self._table_exists('unmatched_previous'),
+            unmatched=unmatched,
+            int_keys=True,
+            shared_stages=shared[0] if shared else [],
         )
         self._add_to_unmatched_events(carry)
+        self._drop_arrival_stages()
+
+    def _carries_arrivals(self):
+        """Whether this run writes arrival_on_green's carry (see aggregate)."""
+        return 'df_or_path' in (self.unmatched_event_settings or {}) and not self.to_sql
+
+    def _build_arrival_stages(self, params):
+        """Builds the arrival chain's stages as temp tables, once, for arrival_on_green and its carry to share.
+
+        See arrival_shared.sql. Returns the stages built, and remembers whether they read an earlier run's events: the
+        carry uses them only if it reads the same.
+        """
+        stages = (['flags'] if params.get('spillback_on_seconds') else []) + (['queue'] if params.get('queue_model') else []) + ['state']
+        built = []
+        for stage in stages:
+            self.conn.execute(render_query('arrival_shared', **{**params, 'stage': stage, 'shared_stages': list(built)}))
+            built.append(stage)
+        self._arrival_stages = (built, bool(params.get('unmatched', False)))
+        return list(built)
+
+    def _drop_arrival_stages(self):
+        for stage in (self._arrival_stages or ([],))[0]:
+            self.conn.execute(f"DROP TABLE IF EXISTS _arrival_{stage}")
+        self._arrival_stages = None
 
     def _save_red_cycles_carry(self, name):
         """Saves the cycles yellow_red or arrival_pattern has not finished writing to unmatched_events.
@@ -728,6 +779,7 @@ class SignalDataProcessor:
                 from_table='raw_data',
                 carry_bins=True,
                 unmatched=self._table_exists('unmatched_previous'),
+                int_keys=True,
             ))
         elif self._table_exists('unmatched_previous'):
             self._add_to_unmatched_events(
@@ -763,6 +815,7 @@ class SignalDataProcessor:
             carry_bins=True,
             unmatched=self._table_exists('unmatched_previous'),
             red_cycles_carried=any(agg['name'] in ('yellow_red', 'arrival_pattern') for agg in self.aggregations),
+            arrival_held=any(agg['name'] == 'arrival_on_green' for agg in self.aggregations),
             approach_delay_carried=any(agg['name'] == 'approach_delay' for agg in self.aggregations),
             left_turn_gaps_carried=any(agg['name'] == 'left_turn_gaps' for agg in self.aggregations),
         ))
@@ -844,18 +897,12 @@ class SignalDataProcessor:
             else:
                 # Dependencies: ped_delay, phase_wait, and coordination_agg require the timeline table to exist
                 if aggregation['name'] in ('ped_delay', 'phase_wait', 'coordination_agg') and not self.to_sql:
-                    has_timeline = self.conn.execute(
-                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'timeline'"
-                    ).fetchall()[0][0]
-                    if has_timeline == 0:
+                    if not self._table_exists('timeline'):
                         raise ValueError(f"{aggregation['name']} aggregation requires the timeline table. Run timeline first.")
                 
                 # Dependencies: coordination_agg also requires the has_data table to exist
                 if aggregation['name'] == 'coordination_agg' and not self.to_sql:
-                    has_has_data = self.conn.execute(
-                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'has_data'"
-                    ).fetchall()[0][0]
-                    if has_has_data == 0:
+                    if not self._table_exists('has_data'):
                         raise ValueError(f"{aggregation['name']} aggregation requires the has_data table. Run has_data first.")
 
                 # Get parameters from the aggregation, or defaults
@@ -951,6 +998,16 @@ class SignalDataProcessor:
                 if aggregation['name'] == 'coordination_agg':
                     params['coord_state_found'] = self.unmatched_found
                 
+                # arrival_on_green numbers the signals for its chain, see arrival_phase_events.sql
+                if aggregation['name'] == 'arrival_on_green':
+                    params['int_keys'] = True
+                # A run that also writes arrival_on_green's carry builds the arrival chain once, see arrival_shared.sql
+                if aggregation['name'] == 'arrival_on_green' and self._carries_arrivals():
+                    params['shared_stages'] = self._build_arrival_stages(params)
+                # approach_delay numbers the signals for its chain too
+                if aggregation['name'] == 'approach_delay':
+                    params['int_keys'] = True
+
                 # Output sql or execute query
                 self.sql_queries[aggregation['name']] = aggregate_data(
                     self.conn,
@@ -1047,8 +1104,74 @@ class SignalDataProcessor:
         for name, runtime in self.runtimes.items():
             v_print(f"{name}: {runtime:.2f} seconds", self.verbose)
 
+    # ---- conn mode (see conn_mode.py)
+
+    def _open_conn_mode(self, app, start, end):
+        """The app's cursor in a database of the run's own, the app's tables to read, and the state found in the schema."""
+        self.start, self.end = start, end
+        mode = ConnMode(app, start, end, self.devices, self.schema, self.verbose)
+        self._conn_mode, self.conn = mode, mode.cursor
+        self._closed = False
+        try:
+            self.raw_data = mode.source(self.raw_data, 'raw_data')
+            self.detector_config = mode.source(self.detector_config, 'detector_config')
+            if self.detector_config is None:
+                v_print("No detector config found in the app's database: measures that read it write no rows.", self.verbose)
+            mode.make_devices_table(self.raw_data)
+            names = {agg['name'] for agg in getattr(self, 'aggregations', [])}
+            settings = {'df_or_path': mode.state('unmatched_events'),
+                        'max_days_old': (self.unmatched_event_settings or {}).get('max_days_old', 14)}
+            if 'split_failures' in names:
+                settings['split_fail_df_or_path'] = mode.state('sf_unmatched')
+            self.unmatched_event_settings = settings
+            for agg in getattr(self, 'aggregations', []):
+                if agg['name'] == 'detector_health':
+                    agg['params']['state'] = lambda: mode.relation('health_state')
+                    agg['params']['history'] = lambda: mode.relation(HISTORY_TABLE)
+                    detectors = agg['params'].get('detectors')
+                    named = mode._named(detectors) if isinstance(detectors, str) else None
+                    if named is not None:
+                        agg['params']['detectors'] = self.conn.sql(f"SELECT * FROM {named.ref}")
+        except Exception:
+            self.close()
+            raise
+
+    def _load_options(self):
+        if self._conn_mode is None:
+            return {}
+        return {'window': (self.start, self.end), 'devices_table': self._conn_mode.devices_table, 'raw_store': self._conn_mode.raw_store}
+
+    def _commit(self):
+        """Appends the outputs and replaces the state of this run's devices in the schema, in one transaction: all or nothing."""
+        mode = self._conn_mode
+        tables = mode.work_tables()
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            self.conn.execute(f"CREATE SCHEMA IF NOT EXISTS {mode.schema_ref()}")
+            for table in tables:
+                if table not in INTERNAL_TABLES and table not in CONN_STATE_TABLES and table != HISTORY_TABLE:
+                    mode.append(table)
+            self._write_state(tables)
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+
+    def _write_state(self, tables):
+        mode = self._conn_mode
+        for table in CONN_STATE_TABLES:
+            if table in tables:
+                mode.replace_state(table)
+        if HISTORY_TABLE in tables:
+            mode.append(HISTORY_TABLE)
+            if 'health_state' in tables:
+                mode.keep_listed_history()
+
     def save(self):
-        """Saves the processed data."""
+        """Saves the processed data: to files, or with conn to the app's tables in one transaction."""
+        if self._conn_mode is not None:
+            self._commit()
+            return
         if self.to_sql:
             v_print("to_sql option is True, data will not be saved.", self.verbose)
             return
@@ -1064,10 +1187,13 @@ class SignalDataProcessor:
         return False
     
     def close(self):
-        """Closes the database connection. Safe to call multiple times."""
+        """Closes the database connection, or with conn detaches what the run attached and closes its cursor, never the app's
+        connection. Safe to call multiple times."""
         if self._closed:
             return
-        if hasattr(self, 'conn') and self.conn is not None:
+        if self._conn_mode is not None:
+            self._conn_mode.close()
+        elif hasattr(self, 'conn') and self.conn is not None:
             try:
                 self.conn.close()
             except Exception:
@@ -1077,9 +1203,11 @@ class SignalDataProcessor:
 
     def run(self):
         """Runs the complete data processing pipeline."""
-        self.load()
-        self.aggregate()
-        if self.to_sql:
-            return self.sql_queries
-        self.save()
-        self.close()
+        try:
+            self.load()
+            self.aggregate()
+            if self.to_sql:
+                return self.sql_queries
+            self.save()
+        finally:
+            self.close()

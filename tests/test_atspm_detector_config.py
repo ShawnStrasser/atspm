@@ -148,3 +148,27 @@ def test_atspm_samples(raw, cfgp):
         assert len(t[k]) > 0, f"{k} empty with the exported config"
     assert t["arrival_on_green"].Percent_AOG.between(0, 1).all()
     assert t["split_failures"].Red_Occupancy.between(0, 1).all()
+
+
+def test_queue_model_reads_lanes_and_travel_time(sample_pred):
+    """to_atspm_config carries Lanes ("1,2") and TravelTime; the queue model reads them: two lanes clear a queue faster,
+    and a measured travel time moves arrivals, without changing the vehicle counts."""
+    ev = atspm_events(SAMPLE)
+    cfg = dc.to_atspm_config(sample_pred)
+    assert {"Lanes", "TravelTime"} <= set(cfg.columns)
+
+    def aog(config):
+        with SignalDataProcessor(raw_data=ev, detector_config=config, bin_size=15, remove_incomplete=False, verbose=0,
+                                 aggregations=[{"name": "arrival_on_green", "params": {"latency_offset_seconds": 0,
+                                                                                      "queue_model": True}}]) as p:
+            p.load()
+            p.aggregate()
+            out = p.conn.execute("SELECT sum(Total_Actuations), sum(Percent_AOG * Total_Actuations) FROM arrival_on_green").fetchall()[0]
+        return int(out[0]), float(out[1])
+
+    base = aog(cfg)
+    one_lane = aog(cfg.assign(Lanes=None))
+    slow = aog(cfg.assign(TravelTime=np.where(cfg.Function.eq("Advance"), 8.0, np.nan)))
+    assert base[0] == one_lane[0] == slow[0] > 0
+    assert base[1] >= one_lane[1]          # more lanes never queue more vehicles
+    assert slow[1] != base[1]              # the travel time is read

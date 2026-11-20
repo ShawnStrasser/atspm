@@ -58,7 +58,9 @@ def test_the_list_of_names_matches_the_queries():
     set_by_processor = {'bin_size', 'from_table', 'unmatched', 'incremental_run', 'carry_bins', 'controller_type', 'remove_incomplete',
                         'known_detectors_found', 'ped_carried', 'coord_state_found', 'event_gap_schedule', 'red_cycles_carried',
                         'arrival_pattern', 'red_offset',  # these two the arrival_pattern and yellow_red templates set for what they include
-                        'approach_delay', 'max_wait_seconds'}  # these two the approach_delay templates set for what they include
+                        'approach_delay', 'max_wait_seconds',  # these two the approach_delay templates set for what they include
+                        'queue_model',  # arrival_on_green's: the shared arrival templates read it, and elsewhere it is unset, so off
+                        'int_keys', 'shared_stages'}  # the arrival chains: signals as numbers, and stages built once (arrival_shared.sql)
     for name, known in AGGREGATION_PARAMS.items():
         read = names(f'{name}.sql', set()) - set_by_processor
         assert read <= known, (name, read - known)

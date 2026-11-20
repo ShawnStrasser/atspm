@@ -201,46 +201,55 @@ InvalidWindow AS
 --    from an outage logging greens but no calls for days, and a phase its timing plan leaves out overnight then "waits"
 --    for hours. Other phases' calls are the test, since a phase with its own call held on, by a stuck detector say, logs
 --    no 43 or 44 of its own for as long as that lasts.
+-- 8. A data gap (the device logging nothing, see EventGapWindow) drops every call. The 44 that ended a call may be
+--    among the events lost in the gap, so a call that was on before it says nothing about after it. Without this, a
+--    call registered just before an outage made every green-to-green after it a "wait", and the side street of a
+--    signal resting in main-street green overnight was reported skipped. The wait spanning the gap itself is kept
+--    but invalid.
 {% if unmatched %}
 -- Incremental mode: Include 43, 44, 1, 7 from raw_data, and 902/903/904 from unmatched_previous
+-- 902 from previous chunk means an unmatched call is active
+-- 903 from previous chunk means green end with active call (call is still active)
+-- 904 from previous chunk means a green was active and call persisted
 PhaseWait_Source AS (
-    SELECT * FROM raw_data WHERE EventId IN (43, 44, 1, 7)
+    SELECT TimeStamp, DeviceID, EventId, Parameter FROM raw_data WHERE EventId IN (43, 44, 1, 7)
     UNION ALL
     SELECT TimeStamp, DeviceId, EventId, Parameter FROM unmatched_previous WHERE EventId IN (902, 903, 904)
 ),
-PhaseWait_WithCallState AS (
-    SELECT *,
-        LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId,
-        LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextTime,
-        -- Find the most recent call state change (43=call active, 44=call inactive)
-        -- 902 from previous chunk means an unmatched call is active
-        -- 903 from previous chunk means green end with active call (call is still active)
-        -- 904 from previous chunk means a green was active and call persisted
-        LAST_VALUE(CASE WHEN EventId IN (43, 44, 902, 903, 904) THEN EventId END IGNORE NULLS) 
-            OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId 
-                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS LastCallChangeEvent
-    FROM PhaseWait_Source
-    WHERE EventId IN (43, 44, 1, 7, 902, 903, 904)
-),
 {% else %}
 -- Batch mode or first chunk: Use from_table directly
+PhaseWait_Source AS (
+    SELECT TimeStamp, DeviceID, EventId, Parameter FROM {{from_table}} WHERE EventId IN (43, 44, 1, 7, 902, 903, 904)
+),
+{% endif %}
+-- Rule 8: a call reset (EventId -1, never output) for each of the device's phases just before the first event after
+-- each data gap.
+PhaseWait_Resets AS (
+{% if event_gap_schedule %}
+    SELECT g.EndTime - INTERVAL 1 MILLISECOND AS TimeStamp, g.DeviceID, -1 AS EventId, p.Parameter
+    FROM EventGapWindow g
+    JOIN (SELECT DISTINCT DeviceID, Parameter FROM PhaseWait_Source) p ON p.DeviceID = g.DeviceID
+{% else %}
+    SELECT * FROM PhaseWait_Source WHERE FALSE
+{% endif %}
+),
 PhaseWait_WithCallState AS (
+    SELECT *,
+        -- Find the most recent call state change (43=call active, 44 or a reset=call inactive)
+        LAST_VALUE(CASE WHEN EventId IN (43, 44, -1{% if unmatched %}, 902, 903, 904{% endif %}) THEN EventId END IGNORE NULLS)
+            OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS LastCallChangeEvent,
+        MAX(CASE WHEN EventId = -1 THEN TimeStamp END) OVER (PARTITION BY DeviceID, Parameter) AS LastResetTime
+    FROM (SELECT * FROM PhaseWait_Source UNION ALL SELECT * FROM PhaseWait_Resets)
+),
+PhaseWait_Events AS (
     SELECT *,
         LEAD(EventId) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextEventId,
         LEAD(TimeStamp) OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId) AS NextTime,
-        -- Find the most recent call state change (43=call active, 44=call inactive)
-        LAST_VALUE(CASE WHEN EventId IN (43, 44) THEN EventId END IGNORE NULLS) 
-            OVER (PARTITION BY DeviceID, Parameter ORDER BY TimeStamp, EventId 
-                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS LastCallChangeEvent
-    FROM {{from_table}}
-    WHERE EventId IN (43, 44, 1, 7, 902, 903, 904)
-),
-{% endif %}
-PhaseWait_Events AS (
-    SELECT *,
-        -- Call is active if the most recent call-state event was 43, 902, 903, or 904 (not 44)
+        -- Call is active if the most recent call-state event was 43, 902, 903, or 904 (not 44 or a reset)
         COALESCE(LastCallChangeEvent IN (43, 902, 903, 904), FALSE) AS CallIsActive
     FROM PhaseWait_WithCallState
+    WHERE EventId <> -1
 ),
 -- Case 1: Phase Call (43 or 902) directly followed by Green Start (1) = Phase Wait
 PhaseWait_CallToGreen AS (
@@ -294,6 +303,15 @@ PhaseWait_WithValidity AS (
                 AND pw.TimeStamp < ie.EndTime 
                 AND ie.StartTime < pw.EndTime
             ) THEN FALSE
+            {% if event_gap_schedule %}
+            -- Rule 8: a wait spanning a data gap lost whatever happened during it
+            WHEN EXISTS (
+                SELECT 1 FROM EventGapWindow g
+                WHERE g.DeviceID = pw.DeviceID
+                AND pw.TimeStamp < g.EndTime
+                AND g.StartTime < pw.EndTime
+            ) THEN FALSE
+            {% endif %}
             ELSE TRUE
         END AS IsValid
     FROM PhaseWait_Combined pw
@@ -312,16 +330,19 @@ PhaseWait_UnmatchedCall AS (
     SELECT TimeStamp, DeviceID, 902 AS EventID, Parameter, NULL::TIMESTAMP AS EndTime, FALSE AS IsValid
     FROM PhaseWait_Events
     WHERE EventId IN (43, 902) AND NextEventId IS NULL
+      AND (LastResetTime IS NULL OR TimeStamp > LastResetTime)
 ),
 PhaseWait_UnmatchedGreenEnd AS (
     SELECT TimeStamp, DeviceID, 903 AS EventID, Parameter, NULL::TIMESTAMP AS EndTime, FALSE AS IsValid
     FROM PhaseWait_Events
     WHERE EventId IN (7, 903) AND NextEventId IS NULL AND CallIsActive = TRUE
+      AND (LastResetTime IS NULL OR TimeStamp > LastResetTime)
 ),
 PhaseWait_UnmatchedGreenStart AS (
     SELECT TimeStamp, DeviceID, 904 AS EventID, Parameter, NULL::TIMESTAMP AS EndTime, FALSE AS IsValid
     FROM PhaseWait_Events
     WHERE EventId = 1 AND NextEventId IS NULL AND CallIsActive = TRUE
+      AND (LastResetTime IS NULL OR TimeStamp > LastResetTime)
 ),
 PhaseWait AS (
     SELECT * FROM PhaseWait_WithValidity
